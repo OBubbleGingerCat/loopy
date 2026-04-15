@@ -1,0 +1,72 @@
+[skill]
+name = "loopy:submit-loop"
+default_install_target = "codex"
+
+[skill.install_targets]
+codex = "${CODEX_HOME:-$HOME/.codex}/skills/loopy-submit-loop"
+claude = "$HOME/.claude/skills/loopy-submit-loop"
+
+[executors.mock_worker]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-executor", "worker", "{invocation_context_path}"]
+cwd = "worktree"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.mock_submit_plan_worker]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-submit-plan-worker", "{invocation_context_path}"]
+cwd = "worktree"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.mock_checkpoint_reviewer]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-executor", "checkpoint_reviewer", "{invocation_context_path}"]
+cwd = "worktree"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.mock_artifact_reviewer]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-executor", "artifact_reviewer", "{invocation_context_path}"]
+cwd = "worktree"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.codex_worker]
+kind = "local_command"
+command = "codex"
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
+bypass_sandbox_args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=high", "-c", "shell_environment_policy.inherit=all", "-C", "{worktree_path}", "-"]
+bypass_sandbox_inherit_env = true
+cwd = "worktree"
+timeout_sec = 1200
+transcript_capture = "stdio"
+env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]
+
+[executors.codex_checkpoint_reviewer]
+kind = "local_command"
+command = "codex"
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
+bypass_sandbox_args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=high", "-c", "shell_environment_policy.inherit=all", "-C", "{worktree_path}", "-"]
+bypass_sandbox_inherit_env = true
+cwd = "worktree"
+timeout_sec = 1200
+transcript_capture = "stdio"
+env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]
+
+[executors.codex_artifact_reviewer]
+kind = "local_command"
+command = "codex"
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
+bypass_sandbox_args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=high", "-c", "shell_environment_policy.inherit=all", "-C", "{worktree_path}", "-"]
+bypass_sandbox_inherit_env = true
+cwd = "worktree"
+timeout_sec = 1200
+transcript_capture = "stdio"
+env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]

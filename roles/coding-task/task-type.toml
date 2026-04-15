@@ -1,0 +1,5 @@
+task_type = "coding-task"
+default_planning_worker = "codex_planner"
+default_artifact_worker = "codex_implementer"
+default_checkpoint_reviewers = ["codex_scope", "codex_plan", "codex_contract"]
+default_artifact_reviewers = ["codex_checkpoint_contract", "codex_correctness", "codex_code_quality"]
