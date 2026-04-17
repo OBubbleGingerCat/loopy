@@ -191,6 +191,7 @@ pub fn discover_installed_skill(
     skill_id: &str,
     candidate_roots: &[PathBuf],
 ) -> Result<DiscoveredBundle> {
+    let mut skipped_invalid_candidates = 0usize;
     for root in candidate_roots {
         if !root.is_dir() {
             continue;
@@ -198,13 +199,25 @@ pub fn discover_installed_skill(
         for entry in
             std::fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))?
         {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    skipped_invalid_candidates += 1;
+                    continue;
+                }
+            };
             let bundle_root = entry.path();
             let descriptor_path = descriptor_path(&bundle_root);
             if !descriptor_path.is_file() {
                 continue;
             }
-            let descriptor = read_descriptor(&bundle_root)?;
+            let descriptor = match read_descriptor(&bundle_root) {
+                Ok(descriptor) => descriptor,
+                Err(_) => {
+                    skipped_invalid_candidates += 1;
+                    continue;
+                }
+            };
             if descriptor.skill_id == skill_id {
                 return Ok(DiscoveredBundle {
                     bundle_root,
@@ -212,6 +225,11 @@ pub fn discover_installed_skill(
                 });
             }
         }
+    }
+    if skipped_invalid_candidates > 0 {
+        bail!(
+            "failed to discover installed skill {skill_id} after skipping {skipped_invalid_candidates} invalid bundle candidate(s)"
+        );
     }
     bail!("failed to discover installed skill {skill_id}")
 }
@@ -255,5 +273,84 @@ pub fn descriptor_path(bundle_root: &Path) -> PathBuf {
 fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
     if !paths.iter().any(|path| path == &candidate) {
         paths.push(candidate);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use anyhow::Result;
+
+    use super::discover_installed_skill;
+
+    #[test]
+    fn discover_installed_skill_skips_malformed_sibling_bundles() -> Result<()> {
+        let broken_root = tempfile::tempdir()?;
+        write_invalid_bundle(&broken_root.path().join("broken-skill"))?;
+
+        let healthy_root = tempfile::tempdir()?;
+        let expected_root = healthy_root.path().join("loopy-submit-loop");
+        write_valid_submit_loop_bundle(&expected_root)?;
+
+        let discovered = discover_installed_skill(
+            "loopy:submit-loop",
+            &[
+                broken_root.path().to_path_buf(),
+                healthy_root.path().to_path_buf(),
+            ],
+        )?;
+
+        assert_eq!(discovered.bundle_root, expected_root);
+
+        Ok(())
+    }
+
+    #[test]
+    fn discover_installed_skill_skips_stale_target_before_healthy_installation() -> Result<()> {
+        let broken_root = tempfile::tempdir()?;
+        write_invalid_bundle(&broken_root.path().join("loopy-submit-loop"))?;
+
+        let healthy_root = tempfile::tempdir()?;
+        let expected_root = healthy_root.path().join("loopy-submit-loop");
+        write_valid_submit_loop_bundle(&expected_root)?;
+
+        let discovered = discover_installed_skill(
+            "loopy:submit-loop",
+            &[
+                broken_root.path().to_path_buf(),
+                healthy_root.path().to_path_buf(),
+            ],
+        )?;
+
+        assert_eq!(discovered.bundle_root, expected_root);
+
+        Ok(())
+    }
+
+    fn write_invalid_bundle(bundle_root: &Path) -> Result<()> {
+        fs::create_dir_all(bundle_root)?;
+        fs::write(bundle_root.join("bundle.toml"), "this is not valid toml")?;
+        Ok(())
+    }
+
+    fn write_valid_submit_loop_bundle(bundle_root: &Path) -> Result<()> {
+        fs::create_dir_all(bundle_root)?;
+        fs::write(
+            bundle_root.join("bundle.toml"),
+            [
+                "skill_id = \"loopy:submit-loop\"",
+                "skill_kind = \"bundle\"",
+                "version = \"0.1.0\"",
+                "loader_id = \"loopy.submit-loop.v1\"",
+                "root_entry = \"SKILL.md\"",
+                "binary_path = \"bin/loopy-submit-loop\"",
+                "internal_manifest = \"submit-loop.toml\"",
+                "",
+            ]
+            .join("\n"),
+        )?;
+        Ok(())
     }
 }
