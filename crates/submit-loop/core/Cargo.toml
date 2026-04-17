@@ -1,0 +1,34 @@
+[package]
+name = "loopy-submit-loop-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "loopy"
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+toml.workspace = true
+uuid.workspace = true
+loopy-common-bundle = { path = "../../common/bundle" }
+loopy-common-events = { path = "../../common/events" }
+loopy-common-invocation = { path = "../../common/invocation" }
+loopy-common-projection = { path = "../../common/projection" }
+loopy-common-sqlite = { path = "../../common/sqlite" }
+loopy-submit-loop-api = { path = "../api" }
+loopy-submit-loop-bundle = { path = "../bundle" }
+
+[dev-dependencies]
+anyhow.workspace = true
+assert_cmd.workspace = true
+predicates.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+uuid.workspace = true

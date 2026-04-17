@@ -1,0 +1,7 @@
+skill_id = "loopy:execute-plan"
+skill_kind = "plan_execution"
+version = "0.1.0"
+loader_id = "loopy.execute-plan.v1"
+root_entry = "SKILL.md"
+binary_path = "bin/loopy-execute-plan"
+internal_manifest = "execute-plan.toml"

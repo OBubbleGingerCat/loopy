@@ -1,0 +1,3 @@
+[skill]
+name = "loopy:execute-plan"
+default_install_target = "codex"

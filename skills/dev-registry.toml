@@ -1,0 +1,23 @@
+[[skills]]
+skill_id = "loopy:submit-loop"
+loader_id = "loopy.submit-loop.v1"
+source_root = "skills/submit-loop"
+binary_package = "loopy-submit-loop"
+binary_name = "loopy-submit-loop"
+internal_manifest = "submit-loop.toml"
+
+[[skills]]
+skill_id = "loopy:gen-plan"
+loader_id = "loopy.gen-plan.v1"
+source_root = "skills/gen-plan"
+binary_package = "loopy-gen-plan"
+binary_name = "loopy-gen-plan"
+internal_manifest = "gen-plan.toml"
+
+[[skills]]
+skill_id = "loopy:execute-plan"
+loader_id = "loopy.execute-plan.v1"
+source_root = "skills/execute-plan"
+binary_package = "loopy-execute-plan"
+binary_name = "loopy-execute-plan"
+internal_manifest = "execute-plan.toml"

@@ -1,0 +1,7 @@
+skill_id = "loopy:gen-plan"
+skill_kind = "plan_generation"
+version = "0.1.0"
+loader_id = "loopy.gen-plan.v1"
+root_entry = "SKILL.md"
+binary_path = "bin/loopy-gen-plan"
+internal_manifest = "gen-plan.toml"

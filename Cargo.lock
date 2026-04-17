@@ -410,12 +410,117 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
-name = "loopy"
+name = "loopy-common-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "loopy-common-events"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "time",
+]
+
+[[package]]
+name = "loopy-common-invocation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "loopy-common-projection"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "loopy-common-events",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "loopy-common-sqlite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+]
+
+[[package]]
+name = "loopy-execute-plan"
+version = "0.1.0"
+
+[[package]]
+name = "loopy-execute-plan-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "loopy-common-bundle",
+]
+
+[[package]]
+name = "loopy-gen-plan"
+version = "0.1.0"
+
+[[package]]
+name = "loopy-gen-plan-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "loopy-common-bundle",
+]
+
+[[package]]
+name = "loopy-submit-loop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "loopy-submit-loop-core",
+ "serde_json",
+]
+
+[[package]]
+name = "loopy-submit-loop-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "loopy-submit-loop-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "loopy-common-bundle",
+ "loopy-submit-loop-api",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "loopy-submit-loop-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "clap",
+ "loopy-common-bundle",
+ "loopy-common-events",
+ "loopy-common-invocation",
+ "loopy-common-projection",
+ "loopy-common-sqlite",
+ "loopy-submit-loop-api",
+ "loopy-submit-loop-bundle",
  "predicates",
  "rusqlite",
  "serde",

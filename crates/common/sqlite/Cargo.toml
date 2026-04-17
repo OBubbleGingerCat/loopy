@@ -1,0 +1,8 @@
+[package]
+name = "loopy-common-sqlite"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
