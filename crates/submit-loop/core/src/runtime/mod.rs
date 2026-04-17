@@ -410,13 +410,6 @@ fn resolve_development_bundle_binary(
         return Ok(current_exe);
     }
 
-    let bundled_binary = development_skill
-        .bundle_root
-        .join(&development_skill.descriptor.binary_path);
-    if bundled_binary.is_file() {
-        return Ok(bundled_binary);
-    }
-
     if let Some(profile_binary) =
         current_profile_binary_candidate(&current_exe, &development_skill.registration.binary_name)
     {
@@ -433,6 +426,13 @@ fn resolve_development_bundle_binary(
         if candidate.is_file() {
             return Ok(candidate);
         }
+    }
+
+    let bundled_binary = development_skill
+        .bundle_root
+        .join(&development_skill.descriptor.binary_path);
+    if bundled_binary.is_file() {
+        return Ok(bundled_binary);
     }
 
     bail!(
@@ -597,8 +597,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use anyhow::Result;
+    use loopy_common_bundle::{
+        DevelopmentSkillRegistration, ResolvedDevelopmentSkill, read_descriptor,
+    };
 
-    use super::Runtime;
+    use super::{Runtime, current_profile_binary_candidate, resolve_development_bundle_binary};
 
     #[test]
     fn resolved_skill_bundle_uses_real_binary_path_for_dev_registry_source_roots() -> Result<()> {
@@ -634,6 +637,62 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn development_bundle_binary_prefers_built_binary_over_source_tree_bundle_copy() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let source_root = tempfile::tempdir()?;
+        write_submit_loop_bundle_descriptor(source_root.path())?;
+
+        let bundled_binary = source_root.path().join("bin").join("loopy-submit-loop");
+        fs::create_dir_all(
+            bundled_binary
+                .parent()
+                .expect("bundled binary should have a parent"),
+        )?;
+        fs::write(&bundled_binary, "#!/bin/sh\nexit 0\n")?;
+
+        let workspace_binary = workspace
+            .path()
+            .join("target")
+            .join("debug")
+            .join("loopy-submit-loop");
+        fs::create_dir_all(
+            workspace_binary
+                .parent()
+                .expect("workspace binary should have a parent"),
+        )?;
+        fs::write(&workspace_binary, "#!/bin/sh\nexit 0\n")?;
+
+        let descriptor = read_descriptor(source_root.path())?;
+        let development_skill = ResolvedDevelopmentSkill {
+            bundle_root: source_root.path().to_path_buf(),
+            descriptor,
+            registration: DevelopmentSkillRegistration {
+                skill_id: "loopy:submit-loop".to_owned(),
+                loader_id: "loopy.submit-loop.v1".to_owned(),
+                source_root: source_root.path().display().to_string(),
+                binary_package: "loopy-submit-loop".to_owned(),
+                binary_name: "loopy-submit-loop".to_owned(),
+                internal_manifest: "submit-loop.toml".to_owned(),
+            },
+        };
+        let current_exe = std::env::current_exe()?;
+        let expected_binary = current_profile_binary_candidate(&current_exe, "loopy-submit-loop")
+            .filter(|candidate| candidate.is_file())
+            .unwrap_or(workspace_binary);
+
+        let resolved_binary =
+            resolve_development_bundle_binary(workspace.path(), &development_skill)?;
+
+        assert_eq!(resolved_binary, expected_binary);
+        assert_ne!(
+            resolved_binary, bundled_binary,
+            "development resolution should prefer the active built binary over a stray source-tree copy"
+        );
+
+        Ok(())
+    }
+
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -656,6 +715,25 @@ mod tests {
                 "[[skills]]\nskill_id = \"loopy:submit-loop\"\nloader_id = \"loopy.submit-loop.v1\"\nsource_root = \"{}\"\nbinary_package = \"loopy-submit-loop\"\nbinary_name = \"loopy-submit-loop\"\ninternal_manifest = \"submit-loop.toml\"\n",
                 source_root.display()
             ),
+        )?;
+        Ok(())
+    }
+
+    fn write_submit_loop_bundle_descriptor(bundle_root: &Path) -> Result<()> {
+        fs::create_dir_all(bundle_root)?;
+        fs::write(
+            bundle_root.join("bundle.toml"),
+            [
+                "skill_id = \"loopy:submit-loop\"",
+                "skill_kind = \"bundle\"",
+                "version = \"0.1.0\"",
+                "loader_id = \"loopy.submit-loop.v1\"",
+                "root_entry = \"SKILL.md\"",
+                "binary_path = \"bin/loopy-submit-loop\"",
+                "internal_manifest = \"submit-loop.toml\"",
+                "",
+            ]
+            .join("\n"),
         )?;
         Ok(())
     }

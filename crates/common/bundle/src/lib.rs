@@ -219,6 +219,10 @@ pub fn discover_installed_skill(
                 }
             };
             if descriptor.skill_id == skill_id {
+                if !bundle_candidate_is_complete(&bundle_root, &descriptor) {
+                    skipped_invalid_candidates += 1;
+                    continue;
+                }
                 return Ok(DiscoveredBundle {
                     bundle_root,
                     descriptor,
@@ -276,6 +280,16 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
     }
 }
 
+fn bundle_candidate_is_complete(bundle_root: &Path, descriptor: &BundleDescriptor) -> bool {
+    [
+        bundle_root.join(&descriptor.root_entry),
+        bundle_root.join(&descriptor.binary_path),
+        bundle_root.join(&descriptor.internal_manifest),
+    ]
+    .into_iter()
+    .all(|path| path.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -292,7 +306,7 @@ mod tests {
 
         let healthy_root = tempfile::tempdir()?;
         let expected_root = healthy_root.path().join("loopy-submit-loop");
-        write_valid_submit_loop_bundle(&expected_root)?;
+        write_complete_submit_loop_bundle(&expected_root)?;
 
         let discovered = discover_installed_skill(
             "loopy:submit-loop",
@@ -314,7 +328,29 @@ mod tests {
 
         let healthy_root = tempfile::tempdir()?;
         let expected_root = healthy_root.path().join("loopy-submit-loop");
-        write_valid_submit_loop_bundle(&expected_root)?;
+        write_complete_submit_loop_bundle(&expected_root)?;
+
+        let discovered = discover_installed_skill(
+            "loopy:submit-loop",
+            &[
+                broken_root.path().to_path_buf(),
+                healthy_root.path().to_path_buf(),
+            ],
+        )?;
+
+        assert_eq!(discovered.bundle_root, expected_root);
+
+        Ok(())
+    }
+
+    #[test]
+    fn discover_installed_skill_skips_incomplete_matching_installations() -> Result<()> {
+        let broken_root = tempfile::tempdir()?;
+        write_incomplete_submit_loop_bundle(&broken_root.path().join("loopy-submit-loop"))?;
+
+        let healthy_root = tempfile::tempdir()?;
+        let expected_root = healthy_root.path().join("loopy-submit-loop");
+        write_complete_submit_loop_bundle(&expected_root)?;
 
         let discovered = discover_installed_skill(
             "loopy:submit-loop",
@@ -350,6 +386,31 @@ mod tests {
                 "",
             ]
             .join("\n"),
+        )?;
+        Ok(())
+    }
+
+    fn write_incomplete_submit_loop_bundle(bundle_root: &Path) -> Result<()> {
+        fs::create_dir_all(bundle_root)?;
+        fs::write(bundle_root.join("SKILL.md"), "# submit-loop\n")?;
+        fs::write(
+            bundle_root.join("submit-loop.toml"),
+            "[skill]\nname = \"loopy:submit-loop\"\n",
+        )?;
+        write_valid_submit_loop_bundle(bundle_root)
+    }
+
+    fn write_complete_submit_loop_bundle(bundle_root: &Path) -> Result<()> {
+        write_valid_submit_loop_bundle(bundle_root)?;
+        fs::create_dir_all(bundle_root.join("bin"))?;
+        fs::write(bundle_root.join("SKILL.md"), "# submit-loop\n")?;
+        fs::write(
+            bundle_root.join("submit-loop.toml"),
+            "[skill]\nname = \"loopy:submit-loop\"\n",
+        )?;
+        fs::write(
+            bundle_root.join("bin/loopy-submit-loop"),
+            "#!/bin/sh\nexit 0\n",
         )?;
         Ok(())
     }
