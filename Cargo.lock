@@ -519,6 +519,8 @@ dependencies = [
  "loopy-common-invocation",
  "loopy-common-projection",
  "loopy-common-sqlite",
+ "loopy-execute-plan-bundle",
+ "loopy-gen-plan-bundle",
  "loopy-submit-loop-api",
  "loopy-submit-loop-bundle",
  "predicates",

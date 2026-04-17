@@ -6,13 +6,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
+use loopy_common_bundle::{
+    BundleDescriptor, LoaderRegistration, development_registry_path, discover_bundle_from_binary_path,
+    discover_installed_skill_in_default_roots, dispatch_loader, resolve_development_skill,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 const FIXED_DB_RELATIVE_PATH: &str = "./.loopy/loopy.db";
-const DEFAULT_INSTALLED_SKILL_RELATIVE_PATH: &str = ".loopy/installed-skills/loopy-submit-loop";
 
 mod api;
 
@@ -73,13 +76,28 @@ impl Runtime {
         self.db_path_override.as_deref()
     }
 
-    pub fn installed_skill_root(&self) -> PathBuf {
-        self.installed_skill_root_override
-            .clone()
-            .unwrap_or_else(|| {
-                self.workspace_root
-                    .join(DEFAULT_INSTALLED_SKILL_RELATIVE_PATH)
-            })
+    pub fn installed_skill_root(&self) -> Result<PathBuf> {
+        if let Some(override_root) = &self.installed_skill_root_override {
+            return Ok(override_root.clone());
+        }
+        if let Some(bundle_root) = discover_current_process_bundle_root()? {
+            return Ok(bundle_root);
+        }
+        if development_registry_path(&self.workspace_root).is_file() {
+            let development_skill = resolve_development_skill(
+                &self.workspace_root,
+                loopy_submit_loop_bundle::SKILL_ID,
+            )?;
+            validate_submit_loop_loader(
+                &development_skill.bundle_root,
+                &development_skill.descriptor,
+            )?;
+            return Ok(development_skill.bundle_root);
+        }
+        let installed_skill =
+            discover_installed_skill_in_default_roots(loopy_submit_loop_bundle::SKILL_ID)?;
+        validate_submit_loop_loader(&installed_skill.bundle_root, &installed_skill.descriptor)?;
+        Ok(installed_skill.bundle_root)
     }
 
     pub fn from_invocation_context_path(invocation_context_path: &Path) -> Result<Self> {
@@ -305,6 +323,42 @@ fn configure_write_connection(connection: &Connection) -> Result<()> {
 
 fn configure_read_only_connection(connection: &Connection) -> Result<()> {
     loopy_common_sqlite::configure_read_only_connection(connection)
+}
+
+type BundleValidator = fn(&Path) -> Result<()>;
+
+fn validate_submit_loop_bundle_descriptor(bundle_root: &Path) -> Result<()> {
+    loopy_submit_loop_bundle::load_bundle_descriptor(bundle_root).map(|_| ())
+}
+
+fn validate_submit_loop_loader(bundle_root: &Path, descriptor: &BundleDescriptor) -> Result<()> {
+    let registrations = [LoaderRegistration {
+        loader_id: loopy_submit_loop_bundle::LOADER_ID,
+        loader: validate_submit_loop_bundle_descriptor as BundleValidator,
+    }];
+    let validate_bundle = dispatch_loader(&descriptor.loader_id, &registrations)?;
+    validate_bundle(bundle_root)?;
+    if descriptor.skill_id != loopy_submit_loop_bundle::SKILL_ID {
+        bail!(
+            "expected skill_id {} in {}, found {}",
+            loopy_submit_loop_bundle::SKILL_ID,
+            bundle_root.display(),
+            descriptor.skill_id
+        );
+    }
+    Ok(())
+}
+
+fn discover_current_process_bundle_root() -> Result<Option<PathBuf>> {
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let Some(discovered_bundle) = discover_bundle_from_binary_path(&current_exe)? else {
+        return Ok(None);
+    };
+    validate_submit_loop_loader(
+        &discovered_bundle.bundle_root,
+        &discovered_bundle.descriptor,
+    )?;
+    Ok(Some(discovered_bundle.bundle_root))
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

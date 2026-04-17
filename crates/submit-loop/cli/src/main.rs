@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -270,15 +270,7 @@ impl From<CliReviewKind> for ReviewKind {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let current_workspace_root = std::env::current_dir()?;
-    let installed_skill_root = detect_cli_installed_skill_root()?;
-    let runtime_for_workspace = |workspace_root: &Path| -> Result<Runtime> {
-        if let Some(skill_root) = installed_skill_root.clone() {
-            Runtime::with_installed_skill_root(workspace_root, skill_root)
-        } else {
-            Runtime::new(workspace_root)
-        }
-    };
-    let runtime = runtime_for_workspace(&current_workspace_root)?;
+    let runtime = Runtime::new(&current_workspace_root)?;
 
     match cli.command {
         Commands::OpenLoop {
@@ -292,7 +284,7 @@ fn main() -> Result<()> {
             constraints_json,
             bypass_sandbox,
         } => {
-            let skill_root = runtime.installed_skill_root();
+            let skill_root = runtime.installed_skill_root()?;
             let coordinator_prompt = fs::read_to_string(skill_root.join("coordinator.md"))
                 .with_context(|| {
                     format!("failed to read {}/coordinator.md", skill_root.display())
@@ -336,11 +328,8 @@ fn main() -> Result<()> {
             workspace,
             json,
         } => {
-            let runtime = runtime_for_workspace(
-                workspace
-                    .as_deref()
-                    .unwrap_or(current_workspace_root.as_path()),
-            )?;
+            let runtime =
+                Runtime::new(workspace.as_deref().unwrap_or(current_workspace_root.as_path()))?;
             let summary = runtime.show_loop(ShowLoopRequest { loop_id })?;
             if json {
                 println!("{}", serde_json::to_string(&summary)?);
@@ -900,20 +889,4 @@ fn parse_improvement_opportunities(json_text: &str, flag_name: &str) -> Result<V
             Ok(Value::Object(object.clone()))
         })
         .collect()
-}
-
-fn detect_cli_installed_skill_root() -> Result<Option<PathBuf>> {
-    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let Some(bin_dir) = current_exe.parent() else {
-        return Ok(None);
-    };
-    let Some(bundle_root) = bin_dir.parent() else {
-        return Ok(None);
-    };
-    if bundle_root.join("submit-loop.toml").is_file()
-        && bundle_root.join("coordinator.md").is_file()
-    {
-        return Ok(Some(bundle_root.to_path_buf()));
-    }
-    Ok(None)
 }

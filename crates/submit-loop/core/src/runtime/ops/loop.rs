@@ -3,7 +3,7 @@
 use super::super::{projection, query, roles, system, *};
 
 pub(crate) fn open_loop(runtime: &Runtime, request: OpenLoopRequest) -> Result<OpenLoopResponse> {
-    let skill_root = runtime.installed_skill_root();
+    let skill_root = runtime.installed_skill_root()?;
     let manifest = roles::load_manifest(&skill_root)?;
     let coordinator_prompt = request.coordinator_prompt.clone();
     let normalized_input = roles::normalize_open_loop_input(&skill_root, &manifest, request)?;
@@ -293,7 +293,7 @@ pub(crate) fn open_review_round(
     if query::load_caller_finalize_status(&transaction, &request.loop_id)?.is_some() {
         bail!("cannot open review rounds after caller finalize handoff");
     }
-    let skill_root = runtime.installed_skill_root();
+    let skill_root = runtime.installed_skill_root()?;
     let resolved_role_selection = query::load_resolved_role_selection(
         &transaction,
         &skill_root,

@@ -16,7 +16,7 @@ use loopy::{
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use support::checkpoint;
+use support::{checkpoint, install_bundle_into_codex_home, with_env_vars};
 use tempfile::TempDir;
 use toml::Value as TomlValue;
 
@@ -1666,22 +1666,70 @@ fn open_worker_invocation_requires_workspace_installed_bundle_root() -> Result<(
         "worker opens should resolve only from the installed bundle",
     ))?;
     prepare_loop_worktree(&loop_open_runtime, &loop_response.loop_id)?;
-    let runtime = Runtime::new(workspace.path())?;
+    let isolated_home = tempfile::tempdir()?;
 
-    let error = runtime
-        .start_worker_invocation(StartWorkerInvocationRequest {
-            loop_id: loop_response.loop_id,
-            stage: WorkerStage::Planning,
-            checkpoint_id: None,
-        })
-        .expect_err("expected missing installed bundle to fail worker invocation opening");
+    let error = with_env_vars(
+        &[("HOME", Some(isolated_home.path())), ("CODEX_HOME", None)],
+        || {
+            let runtime = Runtime::new(workspace.path())?;
+            let error = runtime
+                .start_worker_invocation(StartWorkerInvocationRequest {
+                    loop_id: loop_response.loop_id.clone(),
+                    stage: WorkerStage::Planning,
+                    checkpoint_id: None,
+                })
+                .expect_err("expected missing installed bundle to fail worker invocation opening");
+            Ok(error)
+        },
+    )?;
 
     assert!(
         error
             .to_string()
-            .contains(".loopy/installed-skills/loopy-submit-loop"),
+            .contains("failed to discover installed skill loopy:submit-loop"),
         "unexpected error: {error:#}"
     );
+    assert!(
+        !error
+            .to_string()
+            .contains(".loopy/installed-skills/loopy-submit-loop"),
+        "runtime should no longer hard-code the workspace-local installed bundle path: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn open_worker_invocation_uses_host_default_codex_home_bundle_discovery() -> Result<()> {
+    let workspace = git_workspace()?;
+    let codex_home = tempfile::tempdir()?;
+    let isolated_home = tempfile::tempdir()?;
+    let install_root = install_bundle_into_codex_home(codex_home.path())?;
+    install_fake_codex_command(workspace.path(), &install_root)?;
+
+    with_env_vars(
+        &[
+            ("HOME", Some(isolated_home.path())),
+            ("CODEX_HOME", Some(codex_home.path())),
+        ],
+        || {
+            let runtime = Runtime::new(workspace.path())?;
+            let loop_response = runtime.open_loop(open_loop_request(
+                "plan a loop",
+                "host-default discovery should find the installed submit-loop bundle",
+            ))?;
+            prepare_loop_worktree(&runtime, &loop_response.loop_id)?;
+
+            let invocation = runtime.start_worker_invocation(StartWorkerInvocationRequest {
+                loop_id: loop_response.loop_id,
+                stage: WorkerStage::Planning,
+                checkpoint_id: None,
+            })?;
+            assert!(invocation.invocation_id.starts_with("inv-"));
+
+            Ok(())
+        },
+    )?;
 
     Ok(())
 }
@@ -1692,6 +1740,7 @@ fn install_bundle_into_workspace(workspace_root: &Path) -> Result<PathBuf> {
         .join("installed-skills")
         .join("loopy-submit-loop");
     let install_root = install_bundle_at(&install_root)?;
+    crate::support::write_submit_loop_dev_registry(workspace_root, &install_root)?;
     install_fake_codex_command(workspace_root, &install_root)?;
     Ok(install_root)
 }

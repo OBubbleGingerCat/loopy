@@ -110,6 +110,19 @@ fn open_loop_normalizes_optional_inputs_and_persists_resolved_role_selection() -
 }
 
 #[test]
+fn runtime_uses_dev_registry_to_resolve_repo_local_skill_root() -> Result<()> {
+    let repo_root = crate::support::repo_root().as_path();
+    let runtime = Runtime::new(repo_root)?;
+
+    assert_eq!(
+        runtime.installed_skill_root()?,
+        crate::support::submit_loop_source_root().clone()
+    );
+
+    Ok(())
+}
+
+#[test]
 fn open_loop_rejects_legacy_request_shape_and_explicit_default_reviewer_ids() -> Result<()> {
     let error = serde_json::from_value::<OpenLoopRequest>(json!({
         "summary": "legacy request shape",
@@ -759,6 +772,7 @@ fn install_bundle_into_workspace(workspace_root: &Path) -> Result<std::path::Pat
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    crate::support::write_submit_loop_dev_registry(workspace_root, &install_root)?;
     Ok(install_root)
 }
 

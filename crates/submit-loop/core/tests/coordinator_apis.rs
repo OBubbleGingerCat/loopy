@@ -1746,6 +1746,7 @@ fn install_bundle_into_workspace(workspace_root: &std::path::Path) -> Result<std
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    crate::support::write_submit_loop_dev_registry(workspace_root, &install_root)?;
     install_fake_codex_command(workspace_root, &install_root)?;
     Ok(install_root)
 }

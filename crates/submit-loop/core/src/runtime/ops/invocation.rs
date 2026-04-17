@@ -72,7 +72,7 @@ fn open_worker_invocation(
     } else {
         None
     };
-    let skill_root = runtime.installed_skill_root();
+    let skill_root = runtime.installed_skill_root()?;
     let manifest = roles::load_manifest(&skill_root)?;
     let resolved_role_selection = query::load_resolved_role_selection(
         &transaction,
@@ -267,7 +267,7 @@ fn open_reviewer_invocation(
         );
     };
 
-    let skill_root = runtime.installed_skill_root();
+    let skill_root = runtime.installed_skill_root()?;
     let manifest = roles::load_manifest(&skill_root)?;
     let review_kind = match review_round_state.review_kind.as_str() {
         "checkpoint" => ReviewKind::Checkpoint,

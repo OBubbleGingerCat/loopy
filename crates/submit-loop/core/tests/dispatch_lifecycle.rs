@@ -2476,7 +2476,9 @@ fn install_bundle_into_workspace(workspace_root: &Path) -> Result<PathBuf> {
         .join(".loopy")
         .join("installed-skills")
         .join("loopy-submit-loop");
-    install_bundle_at(&install_root)
+    let install_root = install_bundle_at(&install_root)?;
+    crate::support::write_submit_loop_dev_registry(workspace_root, &install_root)?;
+    Ok(install_root)
 }
 
 fn load_mock_executor_stdin_payload(conn: &Connection, invocation_id: &str) -> Result<String> {

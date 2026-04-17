@@ -1,7 +1,8 @@
 use std::fs;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use loopy::{
@@ -370,6 +371,48 @@ pub fn submit_loop_source_root() -> &'static PathBuf {
 }
 
 #[allow(dead_code)]
+pub fn install_bundle_into_codex_home(codex_home: &Path) -> Result<PathBuf> {
+    let install_root = codex_home.join("skills").join("loopy-submit-loop");
+    let repo_root = repo_root();
+    let output = Command::new("bash")
+        .arg("scripts/install-submit-loop-skill.sh")
+        .arg("--target")
+        .arg("codex")
+        .env("CODEX_HOME", codex_home)
+        .env("CARGO_NET_OFFLINE", "true")
+        .current_dir(&repo_root)
+        .output()
+        .context("failed to run install-submit-loop-skill.sh --target codex")?;
+    if !output.status.success() {
+        bail!(
+            "installer failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(install_root)
+}
+
+#[allow(dead_code)]
+pub fn write_submit_loop_dev_registry(workspace_root: &Path, source_root: &Path) -> Result<()> {
+    let registry_dir = workspace_root.join("skills");
+    fs::create_dir_all(&registry_dir)?;
+    let registry_path = registry_dir.join("dev-registry.toml");
+    let source_root = source_root
+        .strip_prefix(workspace_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| source_root.to_path_buf());
+    fs::write(
+        &registry_path,
+        format!(
+            "[[skills]]\nskill_id = \"loopy:submit-loop\"\nloader_id = \"loopy.submit-loop.v1\"\nsource_root = \"{}\"\nbinary_package = \"loopy-submit-loop\"\nbinary_name = \"loopy-submit-loop\"\ninternal_manifest = \"submit-loop.toml\"\n",
+            source_root.display()
+        ),
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn install_bundle_into_workspace(workspace_root: &Path) -> Result<PathBuf> {
     let install_root = workspace_root
         .join(".loopy")
@@ -390,6 +433,7 @@ pub fn install_bundle_into_workspace(workspace_root: &Path) -> Result<PathBuf> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    write_submit_loop_dev_registry(workspace_root, &install_root)?;
     install_fake_codex_command(workspace_root, &install_root)?;
     Ok(install_root)
 }
@@ -486,6 +530,63 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+struct EnvVarGuard {
+    previous: Vec<(String, Option<OsString>)>,
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        for (key, previous) in self.previous.iter().rev() {
+            unsafe {
+                if let Some(previous) = previous {
+                    std::env::set_var(key, previous);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn with_env_vars<T>(
+    updates: &[(&str, Option<&Path>)],
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock should not be poisoned");
+    let restore = EnvVarGuard {
+        previous: updates
+            .iter()
+            .map(|(key, _)| ((*key).to_owned(), std::env::var_os(key)))
+            .collect(),
+    };
+    for (key, value) in updates {
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+    let result = action();
+    drop(restore);
+    result
+}
+
+#[allow(dead_code)]
+pub fn with_env_var<T>(
+    key: &str,
+    value: Option<&Path>,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_env_vars(&[(key, value)], action)
 }
 
 #[allow(dead_code)]
