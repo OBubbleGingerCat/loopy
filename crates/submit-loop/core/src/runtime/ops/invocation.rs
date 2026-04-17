@@ -107,9 +107,10 @@ fn open_worker_invocation(
         .collect::<Vec<_>>();
     let loop_input = query::load_json_content(&transaction, &loop_state.loop_input_ref)?;
     let bypass_sandbox = load_bypass_sandbox(&loop_input);
+    let bundle_bin = runtime.bundle_binary_path()?;
     let (command, args_variant) = roles::resolve_executor_command(
         &executor_profile,
-        &skill_root,
+        &bundle_bin,
         &runtime.workspace_root,
         &loop_state.worktree_path,
         &invocation_context_path,
@@ -169,7 +170,7 @@ fn open_worker_invocation(
         "resolved_executor_config_ref": executor_config_ref,
         "loopy_api_contract": roles::build_loopy_api_contract(&allowed_terminal_apis),
         "bundle_root": skill_root,
-        "bundle_bin": skill_root.join("bin/loopy-submit-loop"),
+        "bundle_bin": bundle_bin,
         "task_type": resolved_role_selection.task_type,
         "loop_input_ref": loop_state.loop_input_ref,
         "loop_input": loop_input,
@@ -326,9 +327,10 @@ fn open_reviewer_invocation(
         .collect::<Vec<_>>();
     let loop_input = query::load_json_content(&transaction, &loop_state.loop_input_ref)?;
     let bypass_sandbox = load_bypass_sandbox(&loop_input);
+    let bundle_bin = runtime.bundle_binary_path()?;
     let (command, args_variant) = roles::resolve_executor_command(
         &executor_profile,
-        &skill_root,
+        &bundle_bin,
         &runtime.workspace_root,
         &loop_state.worktree_path,
         &invocation_context_path,
@@ -389,7 +391,7 @@ fn open_reviewer_invocation(
         "resolved_executor_config_ref": executor_config_ref,
         "loopy_api_contract": roles::build_loopy_api_contract(&allowed_terminal_apis),
         "bundle_root": skill_root,
-        "bundle_bin": skill_root.join("bin/loopy-submit-loop"),
+        "bundle_bin": bundle_bin,
         "task_type": resolved_role_selection.task_type,
         "loop_input_ref": loop_state.loop_input_ref,
         "loop_input": loop_input,

@@ -101,6 +101,34 @@ pub fn resolve_development_skill(
 ) -> Result<ResolvedDevelopmentSkill> {
     let registry = read_development_registry(workspace_root)?;
     let registration = find_registered_skill(&registry, skill_id)?.clone();
+    build_resolved_development_skill(workspace_root, registration)
+}
+
+pub fn resolve_development_skill_if_registered(
+    workspace_root: &Path,
+    skill_id: &str,
+) -> Result<Option<ResolvedDevelopmentSkill>> {
+    if !development_registry_path(workspace_root).is_file() {
+        return Ok(None);
+    }
+    let registry = read_development_registry(workspace_root)?;
+    let Some(registration) = registry
+        .skills
+        .into_iter()
+        .find(|registration| registration.skill_id == skill_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(build_resolved_development_skill(
+        workspace_root,
+        registration,
+    )?))
+}
+
+fn build_resolved_development_skill(
+    workspace_root: &Path,
+    registration: DevelopmentSkillRegistration,
+) -> Result<ResolvedDevelopmentSkill> {
     let bundle_root = resolve_registered_source_root(workspace_root, &registration);
     let descriptor = read_descriptor(&bundle_root)?;
     if descriptor.skill_id != registration.skill_id {
@@ -167,8 +195,8 @@ pub fn discover_installed_skill(
         if !root.is_dir() {
             continue;
         }
-        for entry in std::fs::read_dir(root)
-            .with_context(|| format!("failed to read {}", root.display()))?
+        for entry in
+            std::fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))?
         {
             let entry = entry?;
             let bundle_root = entry.path();

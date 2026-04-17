@@ -7,8 +7,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use loopy_common_bundle::{
-    BundleDescriptor, LoaderRegistration, development_registry_path, discover_bundle_from_binary_path,
-    discover_installed_skill_in_default_roots, dispatch_loader, resolve_development_skill,
+    BundleDescriptor, LoaderRegistration, ResolvedDevelopmentSkill,
+    discover_bundle_from_binary_path, discover_installed_skill_in_default_roots, dispatch_loader,
+    read_descriptor, resolve_development_skill_if_registered,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,12 @@ pub struct Runtime {
     workspace_root: PathBuf,
     db_path_override: Option<PathBuf>,
     installed_skill_root_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSkillBundle {
+    bundle_root: PathBuf,
+    bundle_bin: PathBuf,
 }
 
 impl Runtime {
@@ -77,27 +84,11 @@ impl Runtime {
     }
 
     pub fn installed_skill_root(&self) -> Result<PathBuf> {
-        if let Some(override_root) = &self.installed_skill_root_override {
-            return Ok(override_root.clone());
-        }
-        if let Some(bundle_root) = discover_current_process_bundle_root()? {
-            return Ok(bundle_root);
-        }
-        if development_registry_path(&self.workspace_root).is_file() {
-            let development_skill = resolve_development_skill(
-                &self.workspace_root,
-                loopy_submit_loop_bundle::SKILL_ID,
-            )?;
-            validate_submit_loop_loader(
-                &development_skill.bundle_root,
-                &development_skill.descriptor,
-            )?;
-            return Ok(development_skill.bundle_root);
-        }
-        let installed_skill =
-            discover_installed_skill_in_default_roots(loopy_submit_loop_bundle::SKILL_ID)?;
-        validate_submit_loop_loader(&installed_skill.bundle_root, &installed_skill.descriptor)?;
-        Ok(installed_skill.bundle_root)
+        Ok(self.resolved_skill_bundle()?.bundle_root)
+    }
+
+    pub(crate) fn bundle_binary_path(&self) -> Result<PathBuf> {
+        Ok(self.resolved_skill_bundle()?.bundle_bin)
     }
 
     pub fn from_invocation_context_path(invocation_context_path: &Path) -> Result<Self> {
@@ -311,6 +302,29 @@ impl Runtime {
         }
         Ok(())
     }
+
+    fn resolved_skill_bundle(&self) -> Result<ResolvedSkillBundle> {
+        if let Some(override_root) = &self.installed_skill_root_override {
+            let descriptor = read_descriptor(override_root)?;
+            let bundle_bin = override_root.join(&descriptor.binary_path);
+            return resolved_bundle_from_descriptor(override_root.clone(), descriptor, bundle_bin);
+        }
+        if let Some(bundle) = discover_current_process_bundle()? {
+            return Ok(bundle);
+        }
+        if let Some(development_skill) = resolve_development_skill_if_registered(
+            &self.workspace_root,
+            loopy_submit_loop_bundle::SKILL_ID,
+        )? {
+            return resolve_development_skill_bundle(&self.workspace_root, development_skill);
+        }
+        let installed_skill =
+            discover_installed_skill_in_default_roots(loopy_submit_loop_bundle::SKILL_ID)?;
+        let bundle_root = installed_skill.bundle_root;
+        let descriptor = installed_skill.descriptor;
+        let bundle_bin = bundle_root.join(&descriptor.binary_path);
+        resolved_bundle_from_descriptor(bundle_root, descriptor, bundle_bin)
+    }
 }
 
 pub(crate) fn begin_immediate_transaction(connection: &mut Connection) -> Result<Transaction<'_>> {
@@ -331,6 +345,18 @@ fn validate_submit_loop_bundle_descriptor(bundle_root: &Path) -> Result<()> {
     loopy_submit_loop_bundle::load_bundle_descriptor(bundle_root).map(|_| ())
 }
 
+fn resolved_bundle_from_descriptor(
+    bundle_root: PathBuf,
+    descriptor: BundleDescriptor,
+    bundle_bin: PathBuf,
+) -> Result<ResolvedSkillBundle> {
+    validate_submit_loop_loader(&bundle_root, &descriptor)?;
+    Ok(ResolvedSkillBundle {
+        bundle_root,
+        bundle_bin,
+    })
+}
+
 fn validate_submit_loop_loader(bundle_root: &Path, descriptor: &BundleDescriptor) -> Result<()> {
     let registrations = [LoaderRegistration {
         loader_id: loopy_submit_loop_bundle::LOADER_ID,
@@ -349,16 +375,82 @@ fn validate_submit_loop_loader(bundle_root: &Path, descriptor: &BundleDescriptor
     Ok(())
 }
 
-fn discover_current_process_bundle_root() -> Result<Option<PathBuf>> {
+fn discover_current_process_bundle() -> Result<Option<ResolvedSkillBundle>> {
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
     let Some(discovered_bundle) = discover_bundle_from_binary_path(&current_exe)? else {
         return Ok(None);
     };
-    validate_submit_loop_loader(
-        &discovered_bundle.bundle_root,
-        &discovered_bundle.descriptor,
-    )?;
-    Ok(Some(discovered_bundle.bundle_root))
+    Ok(Some(resolved_bundle_from_descriptor(
+        discovered_bundle.bundle_root,
+        discovered_bundle.descriptor,
+        current_exe,
+    )?))
+}
+
+fn resolve_development_skill_bundle(
+    workspace_root: &Path,
+    development_skill: ResolvedDevelopmentSkill,
+) -> Result<ResolvedSkillBundle> {
+    let bundle_bin = resolve_development_bundle_binary(workspace_root, &development_skill)?;
+    resolved_bundle_from_descriptor(
+        development_skill.bundle_root,
+        development_skill.descriptor,
+        bundle_bin,
+    )
+}
+
+fn resolve_development_bundle_binary(
+    workspace_root: &Path,
+    development_skill: &ResolvedDevelopmentSkill,
+) -> Result<PathBuf> {
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    if current_exe.file_name().and_then(|name| name.to_str())
+        == Some(development_skill.registration.binary_name.as_str())
+    {
+        return Ok(current_exe);
+    }
+
+    let bundled_binary = development_skill
+        .bundle_root
+        .join(&development_skill.descriptor.binary_path);
+    if bundled_binary.is_file() {
+        return Ok(bundled_binary);
+    }
+
+    if let Some(profile_binary) =
+        current_profile_binary_candidate(&current_exe, &development_skill.registration.binary_name)
+    {
+        if profile_binary.is_file() {
+            return Ok(profile_binary);
+        }
+    }
+
+    for profile in ["debug", "release"] {
+        let candidate = workspace_root
+            .join("target")
+            .join(profile)
+            .join(&development_skill.registration.binary_name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    bail!(
+        "failed to resolve development executable {} for cargo package {} from {}",
+        development_skill.registration.binary_name,
+        development_skill.registration.binary_package,
+        workspace_root.display()
+    )
+}
+
+fn current_profile_binary_candidate(current_exe: &Path, binary_name: &str) -> Option<PathBuf> {
+    let current_dir = current_exe.parent()?;
+    let profile_dir = if current_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
+        current_dir.parent()?
+    } else {
+        current_dir
+    };
+    Some(profile_dir.join(binary_name))
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -497,4 +589,74 @@ pub(crate) enum ReviewSlotTerminal {
     Blocked {
         submission_content_ref: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use anyhow::Result;
+
+    use super::Runtime;
+
+    #[test]
+    fn resolved_skill_bundle_uses_real_binary_path_for_dev_registry_source_roots() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let source_root = submit_loop_source_root();
+        write_submit_loop_dev_registry(workspace.path(), &source_root)?;
+
+        let runtime = Runtime::new(workspace.path())?;
+        let resolved_bundle = runtime.resolved_skill_bundle()?;
+
+        assert_eq!(resolved_bundle.bundle_root, source_root);
+        assert!(
+            resolved_bundle.bundle_bin.is_file(),
+            "expected development bundle binary at {}",
+            resolved_bundle.bundle_bin.display()
+        );
+        assert_eq!(
+            resolved_bundle
+                .bundle_bin
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("loopy-submit-loop")
+        );
+        assert_ne!(
+            resolved_bundle.bundle_bin,
+            resolved_bundle
+                .bundle_root
+                .join("bin")
+                .join("loopy-submit-loop"),
+            "development resolution must not point dispatches at an unbuilt source-tree bin path"
+        );
+
+        Ok(())
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("core crate should live under <repo>/crates/submit-loop/core")
+            .to_path_buf()
+    }
+
+    fn submit_loop_source_root() -> PathBuf {
+        repo_root().join("skills").join("submit-loop")
+    }
+
+    fn write_submit_loop_dev_registry(workspace_root: &Path, source_root: &Path) -> Result<()> {
+        let registry_dir = workspace_root.join("skills");
+        fs::create_dir_all(&registry_dir)?;
+        let registry_path = registry_dir.join("dev-registry.toml");
+        fs::write(
+            &registry_path,
+            format!(
+                "[[skills]]\nskill_id = \"loopy:submit-loop\"\nloader_id = \"loopy.submit-loop.v1\"\nsource_root = \"{}\"\nbinary_package = \"loopy-submit-loop\"\nbinary_name = \"loopy-submit-loop\"\ninternal_manifest = \"submit-loop.toml\"\n",
+                source_root.display()
+            ),
+        )?;
+        Ok(())
+    }
 }

@@ -961,7 +961,7 @@ fn split_role_markdown(markdown: &str) -> Result<(&str, &str)> {
 
 pub fn resolve_executor_command(
     executor_profile: &ExecutorProfile,
-    skill_root: &Path,
+    bundle_bin: &Path,
     workspace_root: &Path,
     worktree_path: &str,
     invocation_context_path: &Path,
@@ -986,7 +986,7 @@ pub fn resolve_executor_command(
     let mut command = Vec::with_capacity(1 + args.len());
     command.push(resolve_template_value(
         &executor_profile.command,
-        skill_root,
+        bundle_bin,
         workspace_root,
         worktree_path,
         invocation_context_path,
@@ -994,7 +994,7 @@ pub fn resolve_executor_command(
     command.extend(args.iter().map(|arg| {
         resolve_template_value(
             arg,
-            skill_root,
+            bundle_bin,
             workspace_root,
             worktree_path,
             invocation_context_path,
@@ -1014,11 +1014,7 @@ pub fn resolve_executor_env_policy(
     }
 }
 
-pub fn resolve_executor_cwd(
-    cwd: &str,
-    workspace_root: &Path,
-    worktree_path: &str,
-) -> String {
+pub fn resolve_executor_cwd(cwd: &str, workspace_root: &Path, worktree_path: &str) -> String {
     match cwd {
         "worktree" => worktree_path.to_owned(),
         "workspace" => workspace_root.display().to_string(),
@@ -1028,20 +1024,64 @@ pub fn resolve_executor_cwd(
 
 fn resolve_template_value(
     value: &str,
-    skill_root: &Path,
+    bundle_bin: &Path,
     workspace_root: &Path,
     worktree_path: &str,
     invocation_context_path: &Path,
 ) -> String {
     value
-        .replace(
-            "{bundle_bin}",
-            &skill_root.join("bin/loopy-submit-loop").display().to_string(),
-        )
+        .replace("{bundle_bin}", &bundle_bin.display().to_string())
         .replace("{workspace_root}", &workspace_root.display().to_string())
         .replace("{worktree_path}", worktree_path)
         .replace(
             "{invocation_context_path}",
             &invocation_context_path.display().to_string(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use anyhow::Result;
+
+    use super::{ExecutorProfile, resolve_executor_command};
+
+    #[test]
+    fn resolve_executor_command_uses_the_resolved_bundle_binary_path() -> Result<()> {
+        let executor_profile = ExecutorProfile {
+            kind: "local_command".to_owned(),
+            command: "{bundle_bin}".to_owned(),
+            args: vec![
+                "mock-executor".to_owned(),
+                "worker".to_owned(),
+                "{invocation_context_path}".to_owned(),
+            ],
+            bypass_sandbox_args: None,
+            bypass_sandbox_inherit_env: false,
+            cwd: "worktree".to_owned(),
+            timeout_sec: 60,
+            transcript_capture: "stdio".to_owned(),
+            env_allow: None,
+        };
+        let bundle_bin = Path::new("/tmp/target/debug/loopy-submit-loop");
+        let invocation_context_path = Path::new("/tmp/workspace/.loopy/invocations/inv-1.json");
+
+        let (command, args_variant) = resolve_executor_command(
+            &executor_profile,
+            bundle_bin,
+            Path::new("/tmp/workspace"),
+            "/tmp/workspace/.loopy/worktrees/loop",
+            invocation_context_path,
+            false,
+        )?;
+
+        assert_eq!(args_variant, "default");
+        assert_eq!(command[0], bundle_bin.display().to_string());
+        assert_eq!(command[1], "mock-executor");
+        assert_eq!(command[2], "worker");
+        assert_eq!(command[3], invocation_context_path.display().to_string());
+
+        Ok(())
+    }
 }

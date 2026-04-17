@@ -1734,6 +1734,43 @@ fn open_worker_invocation_uses_host_default_codex_home_bundle_discovery() -> Res
     Ok(())
 }
 
+#[test]
+fn open_worker_invocation_falls_back_to_installed_bundle_with_unrelated_dev_registry() -> Result<()>
+{
+    let workspace = git_workspace()?;
+    write_unrelated_dev_registry(workspace.path())?;
+    let codex_home = tempfile::tempdir()?;
+    let isolated_home = tempfile::tempdir()?;
+    let install_root = install_bundle_into_codex_home(codex_home.path())?;
+    install_fake_codex_command(workspace.path(), &install_root)?;
+
+    with_env_vars(
+        &[
+            ("HOME", Some(isolated_home.path())),
+            ("CODEX_HOME", Some(codex_home.path())),
+        ],
+        || {
+            let runtime = Runtime::new(workspace.path())?;
+            let loop_response = runtime.open_loop(open_loop_request(
+                "plan a loop",
+                "unrelated dev registries must not block installed bundle discovery",
+            ))?;
+            prepare_loop_worktree(&runtime, &loop_response.loop_id)?;
+
+            let invocation = runtime.start_worker_invocation(StartWorkerInvocationRequest {
+                loop_id: loop_response.loop_id,
+                stage: WorkerStage::Planning,
+                checkpoint_id: None,
+            })?;
+            assert!(invocation.invocation_id.starts_with("inv-"));
+
+            Ok(())
+        },
+    )?;
+
+    Ok(())
+}
+
 fn install_bundle_into_workspace(workspace_root: &Path) -> Result<PathBuf> {
     let install_root = workspace_root
         .join(".loopy")
@@ -1743,6 +1780,26 @@ fn install_bundle_into_workspace(workspace_root: &Path) -> Result<PathBuf> {
     crate::support::write_submit_loop_dev_registry(workspace_root, &install_root)?;
     install_fake_codex_command(workspace_root, &install_root)?;
     Ok(install_root)
+}
+
+fn write_unrelated_dev_registry(workspace_root: &Path) -> Result<()> {
+    let registry_dir = workspace_root.join("skills");
+    fs::create_dir_all(&registry_dir)?;
+    fs::write(
+        registry_dir.join("dev-registry.toml"),
+        [
+            "[[skills]]",
+            "skill_id = \"loopy:other-skill\"",
+            "loader_id = \"loopy.other.v1\"",
+            "source_root = \"other-skill\"",
+            "binary_package = \"loopy-other-skill\"",
+            "binary_name = \"loopy-other-skill\"",
+            "internal_manifest = \"other-skill.toml\"",
+            "",
+        ]
+        .join("\n"),
+    )?;
+    Ok(())
 }
 
 fn install_legacy_worker_task_type(install_root: &Path) -> Result<()> {
