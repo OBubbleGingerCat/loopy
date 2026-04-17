@@ -873,6 +873,84 @@ fn bundled_cli_show_loop_can_target_workspace_explicitly_from_outside_repo_root(
 }
 
 #[test]
+fn bundled_cli_prepare_worktree_can_target_workspace_explicitly_from_outside_repo_root()
+-> Result<()> {
+    let install_root = install_bundle()?;
+    let workspace = git_workspace()?;
+    let bundled_loopy = install_root.join("bin/loopy-submit-loop");
+    let outside_dir = tempfile::tempdir()?;
+
+    let open_loop_output = Command::new(&bundled_loopy)
+        .args([
+            "open-loop",
+            "--summary",
+            "prepare worktree from outside cwd",
+            "--task-type",
+            "coding-task",
+        ])
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to open loop for explicit workspace prepare-worktree test")?;
+    if !open_loop_output.status.success() {
+        bail!(
+            "open-loop failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&open_loop_output.stdout),
+            String::from_utf8_lossy(&open_loop_output.stderr)
+        );
+    }
+    let open_loop_json: Value = serde_json::from_slice(&open_loop_output.stdout)?;
+    let loop_id = open_loop_json["loop_id"]
+        .as_str()
+        .context("missing loop_id")?
+        .to_owned();
+
+    let output = Command::new(&bundled_loopy)
+        .args([
+            "prepare-worktree",
+            "--loop-id",
+            &loop_id,
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("non-utf8 workspace path")?,
+        ])
+        .current_dir(outside_dir.path())
+        .output()
+        .context("failed to run bundled prepare-worktree command from outside workspace root")?;
+
+    if !output.status.success() {
+        bail!(
+            "prepare-worktree --workspace failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let payload: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(payload["loop_id"].as_str(), Some(loop_id.as_str()));
+    assert_eq!(payload["lifecycle"].as_str(), Some("prepared"));
+    assert_eq!(
+        payload["path"].as_str(),
+        Some(
+            workspace
+                .path()
+                .join(".loopy")
+                .join("worktrees")
+                .join(
+                    open_loop_json["label"]
+                        .as_str()
+                        .context("missing label in open-loop response")?
+                )
+                .to_str()
+                .context("non-utf8 worktree path")?
+        )
+    );
+
+    Ok(())
+}
+
+#[test]
 fn bundled_cli_show_loop_includes_terminal_result_for_completed_loop() -> Result<()> {
     let install_root = install_bundle()?;
     let workspace = git_workspace()?;

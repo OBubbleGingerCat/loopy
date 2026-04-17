@@ -96,10 +96,9 @@ fn installer_builds_and_copies_the_submit_loop_skill_bundle() -> Result<()> {
         "installed SKILL.md should declare the loopy:submit-loop skill name"
     );
     assert!(
-        installed_skill.contains("./bin/loopy-submit-loop")
-            || installed_skill.contains("bin/loopy-submit-loop")
-            || installed_skill.contains("${SKILL_ROOT}/bin/loopy-submit-loop"),
-        "installed SKILL.md should use the bundled CLI path"
+        installed_skill.contains("bundle_bin")
+            && installed_skill.contains("bin/loopy-submit-loop"),
+        "installed SKILL.md should derive and pass an explicit bundle_bin path"
     );
     assert!(
         installed_skill.contains("coordinator.md"),
@@ -126,6 +125,10 @@ fn installer_builds_and_copies_the_submit_loop_skill_bundle() -> Result<()> {
     assert!(
         installed_skill.contains("open-loop"),
         "installed SKILL.md should open the loop before delegating to the coordinator"
+    );
+    assert!(
+        installed_skill.contains("workspace_root"),
+        "installed SKILL.md should pass the authoritative workspace_root through the caller/coordinator handoff"
     );
     assert!(
         installed_skill.contains("finalize-failure"),
@@ -382,8 +385,8 @@ fn installed_bundle_skill_mentions_show_loop_status_query() -> Result<()> {
 
     let installed_skill = fs::read_to_string(install_root.join("SKILL.md"))?;
     assert!(
-        installed_skill.contains("\"$SKILL_ROOT/bin/loopy-submit-loop\" show-loop --loop-id <loop_id>"),
-        "installed SKILL.md should document the show-loop status query with the bundled binary path and an explicit loop id"
+        installed_skill.contains("<bundle_bin> show-loop --loop-id <loop_id> --workspace <workspace_root>"),
+        "installed SKILL.md should document the show-loop status query with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_skill.contains("--workspace <workspace_root>"),
@@ -1015,9 +1018,9 @@ fn installed_bundle_documents_exact_cli_forms_for_prompts() -> Result<()> {
     let installed_skill = fs::read_to_string(install_root.join("SKILL.md"))?;
     assert!(
         installed_skill.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" open-loop --summary <summary> --task-type <task_type>"
+            "<bundle_bin> open-loop --summary <summary> --task-type <task_type> --workspace <workspace_root>"
         ),
-        "installed SKILL.md should document the exact open-loop base CLI form"
+        "installed SKILL.md should document the exact open-loop base CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_skill.contains("--context <context>")
@@ -1031,46 +1034,46 @@ fn installed_bundle_documents_exact_cli_forms_for_prompts() -> Result<()> {
     );
     assert!(
         installed_skill.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" finalize-failure --loop-id <loop_id> --failure-cause-type coordinator_failure --summary <summary>"
+            "<bundle_bin> finalize-failure --loop-id <loop_id> --failure-cause-type coordinator_failure --summary <summary> --workspace <workspace_root>"
         ),
-        "installed SKILL.md should document the exact caller-side finalize-failure CLI form"
+        "installed SKILL.md should document the exact caller-side finalize-failure CLI form with explicit bundle_bin and workspace_root inputs"
     );
 
     let installed_coordinator = fs::read_to_string(install_root.join("coordinator.md"))?;
     assert!(
         installed_coordinator
-            .contains("\"$SKILL_ROOT/bin/loopy-submit-loop\" prepare-worktree --loop-id <loop_id>"),
-        "installed coordinator should document the exact prepare-worktree CLI form"
+            .contains("<bundle_bin> prepare-worktree --loop-id <loop_id> --workspace <workspace_root>"),
+        "installed coordinator should document the exact prepare-worktree CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_coordinator.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" start-worker-invocation --loop-id <loop_id> --stage planning"
+            "<bundle_bin> start-worker-invocation --loop-id <loop_id> --stage planning --workspace <workspace_root>"
         ),
-        "installed coordinator should document the exact planning worker CLI form"
+        "installed coordinator should document the exact planning worker CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_coordinator.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" open-review-round --loop-id <loop_id> --review-kind checkpoint --target-type plan_revision --target-ref plan-<revision>"
+            "<bundle_bin> open-review-round --loop-id <loop_id> --review-kind checkpoint --target-type plan_revision --target-ref plan-<revision> --workspace <workspace_root>"
         ),
-        "installed coordinator should document the exact checkpoint review round CLI form"
+        "installed coordinator should document the exact checkpoint review round CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_coordinator.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" start-worker-invocation --loop-id <loop_id> --stage artifact --checkpoint-id <checkpoint_id>"
+            "<bundle_bin> start-worker-invocation --loop-id <loop_id> --stage artifact --checkpoint-id <checkpoint_id> --workspace <workspace_root>"
         ),
-        "installed coordinator should document the exact artifact worker CLI form"
+        "installed coordinator should document the exact artifact worker CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_coordinator.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" open-review-round --loop-id <loop_id> --review-kind artifact --target-type checkpoint_id --target-ref <checkpoint_id>"
+            "<bundle_bin> open-review-round --loop-id <loop_id> --review-kind artifact --target-type checkpoint_id --target-ref <checkpoint_id> --workspace <workspace_root>"
         ),
-        "installed coordinator should document the exact artifact review round CLI form"
+        "installed coordinator should document the exact artifact review round CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_coordinator.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" start-reviewer-invocation --loop-id <loop_id> --review-round-id <review_round_id> --review-slot-id <review_slot_id>"
+            "<bundle_bin> start-reviewer-invocation --loop-id <loop_id> --review-round-id <review_round_id> --review-slot-id <review_slot_id> --workspace <workspace_root>"
         ),
-        "installed coordinator should document the exact reviewer invocation CLI form"
+        "installed coordinator should document the exact reviewer invocation CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_coordinator.contains("blocking_issues")
@@ -1083,31 +1086,31 @@ fn installed_bundle_documents_exact_cli_forms_for_prompts() -> Result<()> {
     );
     assert!(
         installed_coordinator
-            .contains("\"$SKILL_ROOT/bin/loopy-submit-loop\" handoff-to-caller-finalize --loop-id <loop_id>"),
-        "installed coordinator should document the exact handoff-to-caller-finalize CLI form"
+            .contains("<bundle_bin> handoff-to-caller-finalize --loop-id <loop_id> --workspace <workspace_root>"),
+        "installed coordinator should document the exact handoff-to-caller-finalize CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_skill
-            .contains("\"$SKILL_ROOT/bin/loopy-submit-loop\" begin-caller-finalize --loop-id <loop_id>"),
-        "installed SKILL.md should document the exact begin-caller-finalize CLI form"
+            .contains("<bundle_bin> begin-caller-finalize --loop-id <loop_id> --workspace <workspace_root>"),
+        "installed SKILL.md should document the exact begin-caller-finalize CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_skill.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" block-caller-finalize --loop-id <loop_id> --strategy-summary <summary> --blocking-summary <summary> --human-question <question> --conflicting-files-json <json_array>"
+            "<bundle_bin> block-caller-finalize --loop-id <loop_id> --strategy-summary <summary> --blocking-summary <summary> --human-question <question> --conflicting-files-json <json_array> --workspace <workspace_root>"
         ),
-        "installed SKILL.md should document the exact block-caller-finalize CLI form"
+        "installed SKILL.md should document the exact block-caller-finalize CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_skill.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" finalize-success --loop-id <loop_id> --integration-summary-json <json_object>"
+            "<bundle_bin> finalize-success --loop-id <loop_id> --integration-summary-json <json_object> --workspace <workspace_root>"
         ),
-        "installed SKILL.md should document the exact caller-owned finalize-success CLI form"
+        "installed SKILL.md should document the exact caller-owned finalize-success CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
         installed_coordinator.contains(
-            "\"$SKILL_ROOT/bin/loopy-submit-loop\" finalize-failure --loop-id <loop_id> --failure-cause-type coordinator_failure --summary <summary>"
+            "<bundle_bin> finalize-failure --loop-id <loop_id> --failure-cause-type coordinator_failure --summary <summary> --workspace <workspace_root>"
         ),
-        "installed coordinator should document the exact finalize-failure CLI form"
+        "installed coordinator should document the exact finalize-failure CLI form with explicit bundle_bin and workspace_root inputs"
     );
 
     Ok(())

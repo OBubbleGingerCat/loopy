@@ -20,6 +20,8 @@ use serde_json::Value;
 #[command(name = "loopy-submit-loop")]
 #[command(about = "Local runtime for loopy:submit-loop")]
 struct Cli {
+    #[arg(long, global = true)]
+    workspace: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -49,8 +51,6 @@ enum Commands {
     ShowLoop {
         #[arg(long)]
         loop_id: String,
-        #[arg(long)]
-        workspace: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -268,11 +268,11 @@ impl From<CliReviewKind> for ReviewKind {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let current_workspace_root = std::env::current_dir()?;
+    let Cli { workspace, command } = Cli::parse();
+    let current_workspace_root = workspace.unwrap_or(std::env::current_dir()?);
     let runtime = Runtime::new(&current_workspace_root)?;
 
-    match cli.command {
+    match command {
         Commands::OpenLoop {
             summary,
             task_type,
@@ -323,13 +323,7 @@ fn main() -> Result<()> {
             })?;
             println!("{}", serde_json::to_string(&response)?);
         }
-        Commands::ShowLoop {
-            loop_id,
-            workspace,
-            json,
-        } => {
-            let runtime =
-                Runtime::new(workspace.as_deref().unwrap_or(current_workspace_root.as_path()))?;
+        Commands::ShowLoop { loop_id, json } => {
             let summary = runtime.show_loop(ShowLoopRequest { loop_id })?;
             if json {
                 println!("{}", serde_json::to_string(&summary)?);

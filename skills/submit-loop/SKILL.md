@@ -44,7 +44,7 @@ Collect exactly one logical request object:
 Hard invariants:
 
 - Treat steps 4, 5, and 6 as one contiguous handoff sequence.
-- Before step 4, do only the minimum local work needed to construct the caller request object, resolve the installed skill root, and load the exact installed `coordinator.md` text for handoff.
+- Before step 4, do only the minimum local work needed to construct the caller request object, resolve the installed skill root, derive the bundled runtime binary path, capture the workspace root, and load the exact installed `coordinator.md` text for handoff.
 - Do not spend time on exploratory preflight such as `--help` probes, role-file browsing, repo-state inspection, or extra validation once the required request object is already available.
 - Reading `coordinator.md` is for exact prompt handoff only. Do not rewrite it, summarize it, or pause to analyze it before launching the coordinator.
 - Once `open-loop` succeeds, the immediate next non-error action must be `spawn_agent`. Do not insert extra shell commands, file reads, repo inspection, commentary-only status updates, or local reasoning detours between parsing the `open-loop` JSON and launching the coordinator.
@@ -54,11 +54,11 @@ Hard invariants:
    - For Codex, prefer `$CODEX_HOME/skills/loopy-submit-loop`; otherwise use `$HOME/.codex/skills/loopy-submit-loop`.
    - For Claude Code, use `~/.claude/skills/loopy-submit-loop`.
    - The resolved directory must contain `SKILL.md`, `coordinator.md`, and `bin/loopy-submit-loop`.
-2. Use the bundled runtime tool at `${SKILL_ROOT}/bin/loopy-submit-loop`. Do not rely on `loopy` from `PATH`.
+2. Derive `bundle_bin` as `<resolved_skill_root>/bin/loopy-submit-loop`. Do not rely on `loopy` from `PATH`.
 3. Read the installed coordinator prompt from `coordinator.md`. Do not replace it with an ad hoc coordinator plan. Do not perform any additional local analysis after loading it.
-4. Open the loop first with the bundled runtime from the workspace root using this exact CLI shape:
+4. Capture `workspace_root` as the caller workspace root for this run, then open the loop first with the bundled runtime using this exact CLI shape:
 
-   `"$SKILL_ROOT/bin/loopy-submit-loop" open-loop --summary <summary> --task-type <task_type>`
+   `<bundle_bin> open-loop --summary <summary> --task-type <task_type> --workspace <workspace_root>`
 
    Add optional flags only when the request object includes the field:
 
@@ -76,16 +76,16 @@ Hard invariants:
 
    `--bypass-sandbox`
 5. Parse `loop_id`, `branch`, and `label` from the `open-loop` JSON and treat them as authoritative loop metadata for the rest of the run. Do not perform any other action except immediate handoff into step 6 unless step 4 failed.
-6. Launch a dedicated coordinator subagent from the workspace root with `spawn_agent`. This must be the next non-error action after step 5.
+6. Launch a dedicated coordinator subagent with `spawn_agent`. This must be the next non-error action after step 5.
    - Do not fork the caller thread history into the coordinator subagent.
    - Do not override the model for that subagent; let it inherit the caller's current model.
-   - Pass only the exact installed `coordinator.md` prompt together with the resolved installed skill root, the pre-opened `loop_id`/`branch`/`label`, and the single caller request object.
+   - Pass only the exact installed `coordinator.md` prompt together with the caller-provided `bundle_bin`, `workspace_root`, the pre-opened `loop_id`/`branch`/`label`, and the single caller request object.
    - Do not add extra repo summaries, copied transcript context, failure analysis, or other ad hoc framing around that launch payload.
 7. Wait for that dedicated coordinator subagent to finish and capture its final message.
 
    If the caller needs to inspect progress while waiting for the coordinator, use:
 
-   `"$SKILL_ROOT/bin/loopy-submit-loop" show-loop --loop-id <loop_id> --workspace <workspace_root>`
+   `<bundle_bin> show-loop --loop-id <loop_id> --workspace <workspace_root>`
 
    Use the original workspace root from the `open-loop` step when polling from another cwd. Add `--json` for machine-readable polling. While waiting, the caller should periodically use this read-only query as a health check to confirm the loop is still progressing or paused in an expected state. This is read-only status inspection; it does not transfer coordinator ownership back to the caller, so use it instead of blind-waiting or resuming coordinator duties locally. Repeated artifact rounds, repeated accepted commits, or a single slow polling interval alone are not evidence of coordinator failure while the coordinator subagent is still running.
    For caller-side polling decisions, treat these `show-loop --json` fields as the supported contract: `status`, `phase`, `plan.latest_submitted_plan_revision`, `plan.current_executable_plan_revision`, `latest_invocation`, `latest_review`, `result`, and `caller_finalize`.
@@ -94,12 +94,12 @@ Hard invariants:
 8. The coordinator owns worktree preparation and worker/reviewer orchestration only. It does not integrate commits or finalize success for the caller branch.
 9. If the coordinator returns a caller-finalize handoff object, immediately claim caller-owned finalize with:
 
-   `"$SKILL_ROOT/bin/loopy-submit-loop" begin-caller-finalize --loop-id <loop_id>`
+   `<bundle_bin> begin-caller-finalize --loop-id <loop_id> --workspace <workspace_root>`
 
    Then integrate the accepted loop output onto the current caller branch from the workspace root using branch-preserving git operations such as replay or `cherry-pick`. Do not assume `ff-only`.
 10. If caller-owned integration succeeds, finalize the loop from the caller with:
 
-   `"$SKILL_ROOT/bin/loopy-submit-loop" finalize-success --loop-id <loop_id> --integration-summary-json <json_object>`
+   `<bundle_bin> finalize-success --loop-id <loop_id> --integration-summary-json <json_object> --workspace <workspace_root>`
 
    The `integration_summary_json` request shape is a JSON object using only `strategy`, `landed_commit_shas`, and `resolution_notes`. It must describe the caller-owned replay, including the strategy, the landed caller-branch commit SHAs, and any resolution notes needed to explain conflict handling. Minimal valid example:
 
@@ -112,7 +112,7 @@ Hard invariants:
    ```
 11. If caller-owned integration conflicts, attempt task-goal-directed automatic resolution first. If you still cannot safely continue, record the blocked handoff and stop to ask the human with:
 
-   `"$SKILL_ROOT/bin/loopy-submit-loop" block-caller-finalize --loop-id <loop_id> --strategy-summary <summary> --blocking-summary <summary> --human-question <question> --conflicting-files-json <json_array> [--notes <notes>] [--has-in-progress-integration]`
+   `<bundle_bin> block-caller-finalize --loop-id <loop_id> --strategy-summary <summary> --blocking-summary <summary> --human-question <question> --conflicting-files-json <json_array> --workspace <workspace_root> [--notes <notes>] [--has-in-progress-integration]`
 
    The `conflicting_files_json` request shape is a JSON array of strings. Minimal valid example:
 
@@ -122,12 +122,12 @@ Hard invariants:
 
    When the human later provides guidance for that same `loop_id`, resume by calling:
 
-   `"$SKILL_ROOT/bin/loopy-submit-loop" begin-caller-finalize --loop-id <loop_id>`
+   `<bundle_bin> begin-caller-finalize --loop-id <loop_id> --workspace <workspace_root>`
 
    Continue the integration from the current caller branch and finish through `finalize-success`.
 12. If the coordinator subagent errors, returns a non-zero exit status, or does not yield one terminal JSON object, do not continue locally as coordinator. Instead call:
 
-   `"$SKILL_ROOT/bin/loopy-submit-loop" finalize-failure --loop-id <loop_id> --failure-cause-type coordinator_failure --summary <summary>`
+   `<bundle_bin> finalize-failure --loop-id <loop_id> --failure-cause-type coordinator_failure --summary <summary> --workspace <workspace_root>`
 
    Return only that failure object.
 13. Return only the terminal JSON object from `finalize-success` or `finalize-failure`.
