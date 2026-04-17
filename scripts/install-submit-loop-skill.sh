@@ -75,13 +75,15 @@ if [[ "${CARGO_NET_OFFLINE:-}" == "true" || "${CARGO_NET_OFFLINE:-}" == "1" ]]; 
 fi
 
 cd "$REPO_ROOT"
-cargo build "${BUILD_FLAGS[@]}" --bin loopy
+cargo build "${BUILD_FLAGS[@]}" -p loopy-submit-loop --bin loopy-submit-loop
 
-BIN_PATH="$REPO_ROOT/target/$BUILD_PROFILE/loopy"
+BIN_PATH="$REPO_ROOT/target/$BUILD_PROFILE/loopy-submit-loop"
 if [[ ! -x "$BIN_PATH" ]]; then
   echo "expected built binary at $BIN_PATH" >&2
   exit 1
 fi
+
+SOURCE_ROOT="$REPO_ROOT/skills/submit-loop"
 
 rm -rf "$INSTALL_ROOT"
 mkdir -p \
@@ -92,37 +94,38 @@ mkdir -p \
   "$INSTALL_ROOT/roles/coding-task/checkpoint_reviewer" \
   "$INSTALL_ROOT/roles/coding-task/artifact_reviewer"
 
-cp "$REPO_ROOT/SKILL.md" "$INSTALL_ROOT/SKILL.md"
-cp "$REPO_ROOT/coordinator.md" "$INSTALL_ROOT/coordinator.md"
-cp "$REPO_ROOT/submit-loop.toml" "$INSTALL_ROOT/submit-loop.toml"
-cp "$REPO_ROOT/roles/coding-task/task-type.toml" \
+cp "$SOURCE_ROOT/SKILL.md" "$INSTALL_ROOT/SKILL.md"
+cp "$SOURCE_ROOT/coordinator.md" "$INSTALL_ROOT/coordinator.md"
+cp "$SOURCE_ROOT/submit-loop.toml" "$INSTALL_ROOT/submit-loop.toml"
+cp "$SOURCE_ROOT/bundle.toml" "$INSTALL_ROOT/bundle.toml"
+cp "$SOURCE_ROOT/roles/coding-task/task-type.toml" \
   "$INSTALL_ROOT/roles/coding-task/task-type.toml"
-cp "$REPO_ROOT/roles/coding-task/planning_worker/codex_planner.md" \
+cp "$SOURCE_ROOT/roles/coding-task/planning_worker/codex_planner.md" \
   "$INSTALL_ROOT/roles/coding-task/planning_worker/codex_planner.md"
-cp "$REPO_ROOT/roles/coding-task/planning_worker/mock_planner.md" \
+cp "$SOURCE_ROOT/roles/coding-task/planning_worker/mock_planner.md" \
   "$INSTALL_ROOT/roles/coding-task/planning_worker/mock_planner.md"
-cp "$REPO_ROOT/roles/coding-task/artifact_worker/codex_implementer.md" \
+cp "$SOURCE_ROOT/roles/coding-task/artifact_worker/codex_implementer.md" \
   "$INSTALL_ROOT/roles/coding-task/artifact_worker/codex_implementer.md"
-cp "$REPO_ROOT/roles/coding-task/artifact_worker/mock_implementer.md" \
+cp "$SOURCE_ROOT/roles/coding-task/artifact_worker/mock_implementer.md" \
   "$INSTALL_ROOT/roles/coding-task/artifact_worker/mock_implementer.md"
-cp "$REPO_ROOT/roles/coding-task/checkpoint_reviewer/codex_scope.md" \
+cp "$SOURCE_ROOT/roles/coding-task/checkpoint_reviewer/codex_scope.md" \
   "$INSTALL_ROOT/roles/coding-task/checkpoint_reviewer/codex_scope.md"
-cp "$REPO_ROOT/roles/coding-task/checkpoint_reviewer/codex_plan.md" \
+cp "$SOURCE_ROOT/roles/coding-task/checkpoint_reviewer/codex_plan.md" \
   "$INSTALL_ROOT/roles/coding-task/checkpoint_reviewer/codex_plan.md"
-cp "$REPO_ROOT/roles/coding-task/checkpoint_reviewer/codex_contract.md" \
+cp "$SOURCE_ROOT/roles/coding-task/checkpoint_reviewer/codex_contract.md" \
   "$INSTALL_ROOT/roles/coding-task/checkpoint_reviewer/codex_contract.md"
-cp "$REPO_ROOT/roles/coding-task/checkpoint_reviewer/mock.md" \
+cp "$SOURCE_ROOT/roles/coding-task/checkpoint_reviewer/mock.md" \
   "$INSTALL_ROOT/roles/coding-task/checkpoint_reviewer/mock.md"
-cp "$REPO_ROOT/roles/coding-task/artifact_reviewer/codex_checkpoint_contract.md" \
+cp "$SOURCE_ROOT/roles/coding-task/artifact_reviewer/codex_checkpoint_contract.md" \
   "$INSTALL_ROOT/roles/coding-task/artifact_reviewer/codex_checkpoint_contract.md"
-cp "$REPO_ROOT/roles/coding-task/artifact_reviewer/codex_correctness.md" \
+cp "$SOURCE_ROOT/roles/coding-task/artifact_reviewer/codex_correctness.md" \
   "$INSTALL_ROOT/roles/coding-task/artifact_reviewer/codex_correctness.md"
-cp "$REPO_ROOT/roles/coding-task/artifact_reviewer/codex_code_quality.md" \
+cp "$SOURCE_ROOT/roles/coding-task/artifact_reviewer/codex_code_quality.md" \
   "$INSTALL_ROOT/roles/coding-task/artifact_reviewer/codex_code_quality.md"
-cp "$REPO_ROOT/roles/coding-task/artifact_reviewer/mock.md" \
+cp "$SOURCE_ROOT/roles/coding-task/artifact_reviewer/mock.md" \
   "$INSTALL_ROOT/roles/coding-task/artifact_reviewer/mock.md"
-cp "$BIN_PATH" "$INSTALL_ROOT/bin/loopy"
+cp "$BIN_PATH" "$INSTALL_ROOT/bin/loopy-submit-loop"
 
-chmod +x "$INSTALL_ROOT/bin/loopy"
+chmod +x "$INSTALL_ROOT/bin/loopy-submit-loop"
 
 printf '%s\n' "$INSTALL_ROOT"

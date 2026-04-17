@@ -1,0 +1,8 @@
+[package]
+name = "loopy-gen-plan"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "loopy-gen-plan"
+path = "src/main.rs"

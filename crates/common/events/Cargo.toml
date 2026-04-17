@@ -1,0 +1,11 @@
+[package]
+name = "loopy-common-events"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true

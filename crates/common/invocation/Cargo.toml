@@ -1,0 +1,7 @@
+[package]
+name = "loopy-common-invocation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true

@@ -1,0 +1,8 @@
+[package]
+name = "loopy-gen-plan-bundle"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+loopy-common-bundle = { path = "../../common/bundle" }

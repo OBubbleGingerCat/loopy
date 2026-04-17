@@ -1,0 +1,7 @@
+skill_id = "loopy:submit-loop"
+skill_kind = "submit_loop"
+version = "0.1.0"
+loader_id = "loopy.submit-loop.v1"
+root_entry = "SKILL.md"
+binary_path = "bin/loopy-submit-loop"
+internal_manifest = "submit-loop.toml"

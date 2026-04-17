@@ -63,7 +63,7 @@ for required in \
   "$INSTALL_ROOT/roles/coding-task/artifact_worker/codex_implementer.md" \
   "$INSTALL_ROOT/roles/coding-task/checkpoint_reviewer/codex_scope.md" \
   "$INSTALL_ROOT/roles/coding-task/artifact_reviewer/codex_checkpoint_contract.md" \
-  "$INSTALL_ROOT/bin/loopy"; do
+  "$INSTALL_ROOT/bin/loopy-submit-loop"; do
   [[ -f "$required" ]] || {
     echo "missing required installed asset: $required" >&2
     exit 1

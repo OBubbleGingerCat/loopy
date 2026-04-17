@@ -1,0 +1,8 @@
+[package]
+name = "loopy-execute-plan"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "loopy-execute-plan"
+path = "src/main.rs"
