@@ -12,6 +12,8 @@ pub const LOADER_ID: &str = "loopy.gen-plan.v1";
 const DOMAIN_CONTRACT_PROMPT: &str = "domain_contract";
 const LEAF_RUNTIME_PROMPT: &str = "leaf_runtime";
 const FRONTIER_RUNTIME_PROMPT: &str = "frontier_runtime";
+const LEAF_REVIEWER_ROLE_KIND: &str = "leaf_reviewer";
+const FRONTIER_REVIEWER_ROLE_KIND: &str = "frontier_reviewer";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +235,7 @@ pub fn load_frontier_runtime_prompt(skill_root: &Path) -> Result<String> {
 }
 
 pub fn load_prompt_template(skill_root: &Path, template_name: &str) -> Result<String> {
+    let template_name = validate_template_name(template_name)?;
     let prompt_path = skill_root
         .join("prompts")
         .join(format!("{template_name}.md"));
@@ -250,48 +253,70 @@ fn normalize_non_blank(field_name: &str, value: &str) -> Result<String> {
 }
 
 fn normalize_role_id(field_name: &str, value: &str) -> Result<String> {
-    let normalized = normalize_non_blank(field_name, value)?;
-    if normalized.contains('/') || normalized.contains('\\') {
-        bail!("{field_name} must not contain path separators");
-    }
-    Ok(normalized)
+    validate_ascii_identifier_with_separators(field_name, value, &['_', '-'])
 }
 
 pub fn validate_task_type_identifier(task_type: &str) -> Result<String> {
-    let normalized = normalize_non_blank("task_type", task_type)?;
+    validate_ascii_identifier_with_separators("task_type", task_type, &['-'])
+}
+
+fn validate_role_kind(role_kind: &str) -> Result<&'static str> {
+    match role_kind {
+        LEAF_REVIEWER_ROLE_KIND => Ok(LEAF_REVIEWER_ROLE_KIND),
+        FRONTIER_REVIEWER_ROLE_KIND => Ok(FRONTIER_REVIEWER_ROLE_KIND),
+        _ => bail!(
+            "role_kind must be one of `{LEAF_REVIEWER_ROLE_KIND}` or `{FRONTIER_REVIEWER_ROLE_KIND}`"
+        ),
+    }
+}
+
+fn validate_template_name(template_name: &str) -> Result<String> {
+    validate_ascii_identifier_with_separators("template_name", template_name, &['_'])
+}
+
+fn validate_ascii_identifier_with_separators(
+    field_name: &str,
+    value: &str,
+    allowed_separators: &[char],
+) -> Result<String> {
+    let normalized = normalize_non_blank(field_name, value)?;
     let mut chars = normalized.chars();
     let Some(first) = chars.next() else {
-        bail!("task_type must not be blank");
+        bail!("{field_name} must not be blank");
     };
     if !first.is_ascii_lowercase() {
         bail!(
-            "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+            "{field_name} must be a safe identifier using lowercase ascii letters, digits, and internal separators"
         );
     }
 
-    let mut previous_was_hyphen = false;
+    let mut previous_was_separator = false;
     for ch in normalized.chars() {
         match ch {
-            'a'..='z' | '0'..='9' => previous_was_hyphen = false,
-            '-' => {
-                if previous_was_hyphen {
+            'a'..='z' | '0'..='9' => previous_was_separator = false,
+            separator if allowed_separators.contains(&separator) => {
+                if previous_was_separator {
                     bail!(
-                        "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+                        "{field_name} must be a safe identifier using lowercase ascii letters, digits, and internal separators"
                     );
                 }
-                previous_was_hyphen = true;
+                previous_was_separator = true;
             }
             _ => {
                 bail!(
-                    "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+                    "{field_name} must be a safe identifier using lowercase ascii letters, digits, and internal separators"
                 );
             }
         }
     }
 
-    if normalized.ends_with('-') {
+    if normalized
+        .chars()
+        .last()
+        .is_some_and(|ch| allowed_separators.contains(&ch))
+    {
         bail!(
-            "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+            "{field_name} must be a safe identifier using lowercase ascii letters, digits, and internal separators"
         );
     }
 
@@ -342,6 +367,8 @@ fn role_path_for(
     role_kind: &str,
     role_id: &str,
 ) -> Result<PathBuf> {
+    let role_kind = validate_role_kind(role_kind)?;
+    let role_id = normalize_role_id("role_id", role_id)?;
     Ok(skill_root
         .join("roles")
         .join(validate_task_type_identifier(task_type)?)
@@ -490,6 +517,68 @@ mod tests {
         let error = load_prompt_template(skill_root.path(), "missing_prompt")
             .expect_err("missing prompt should fail");
         assert!(format!("{error:#}").contains("failed to read"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn role_id_with_path_separator_is_rejected() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+        write_task_type_config(
+            skill_root.path(),
+            "coding-task",
+            "codex_default",
+            "codex_default",
+        )?;
+
+        let manifest = load_manifest(skill_root.path())?;
+        let error = load_task_type_role_definition(
+            skill_root.path(),
+            &manifest,
+            "coding-task",
+            "leaf_reviewer",
+            "../codex_default",
+        )
+        .expect_err("path-bearing role_id should fail");
+        assert!(format!("{error:#}").contains("role_id"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_role_kind_is_rejected() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+        write_task_type_config(
+            skill_root.path(),
+            "coding-task",
+            "codex_default",
+            "codex_default",
+        )?;
+
+        let manifest = load_manifest(skill_root.path())?;
+        let error = load_task_type_role_definition(
+            skill_root.path(),
+            &manifest,
+            "coding-task",
+            "checkpoint_reviewer",
+            "codex_default",
+        )
+        .expect_err("unexpected role_kind should fail");
+        assert!(format!("{error:#}").contains("role_kind"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn template_name_with_path_separator_is_rejected() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+
+        let error = load_prompt_template(skill_root.path(), "../leaf_runtime")
+            .expect_err("path-bearing template_name should fail");
+        assert!(format!("{error:#}").contains("template_name"));
 
         Ok(())
     }
