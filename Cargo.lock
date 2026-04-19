@@ -474,7 +474,6 @@ dependencies = [
  "anyhow",
  "clap",
  "loopy-gen-plan-core",
- "serde_json",
 ]
 
 [[package]]
