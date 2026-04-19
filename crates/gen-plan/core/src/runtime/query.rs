@@ -25,7 +25,7 @@ pub(crate) fn ensure_plan(
         project_directory: _project_directory,
     } = request;
 
-    if let Some(existing) = select_plan(connection, workspace_root, &plan_name)? {
+    if let Some(existing) = select_plan(connection, workspace_root, &plan_name, plan_root)? {
         return Ok(EnsurePlanResponse {
             plan_id: existing.plan_id,
             plan_root: existing.plan_root,
@@ -72,10 +72,11 @@ pub(crate) fn ensure_plan(
 pub(crate) fn open_plan(
     connection: &Connection,
     workspace_root: &Path,
+    plan_root: &Path,
     request: OpenPlanRequest,
 ) -> Result<OpenPlanResponse> {
     let plan_name = request.plan_name;
-    let plan = select_plan(connection, workspace_root, &plan_name)?
+    let plan = select_plan(connection, workspace_root, &plan_name, plan_root)?
         .ok_or_else(|| anyhow!("plan `{plan_name}` does not exist"))?;
 
     Ok(OpenPlanResponse {
@@ -186,8 +187,10 @@ fn select_plan(
     connection: &Connection,
     workspace_root: &Path,
     plan_name: &str,
+    expected_plan_root: &Path,
 ) -> Result<Option<PlanRow>> {
-    connection
+    let expected_plan_root = path_string(expected_plan_root);
+    let plan = connection
         .query_row(
             "SELECT plan_id, plan_root, plan_status, task_type
              FROM GEN_PLAN__plans
@@ -203,7 +206,17 @@ fn select_plan(
             },
         )
         .optional()
-        .context("failed to read persisted plan metadata")
+        .context("failed to read persisted plan metadata")?;
+
+    if let Some(plan) = &plan {
+        if plan.plan_root != expected_plan_root {
+            return Err(anyhow!(
+                "persisted plan_root does not match the fixed plan location for `{plan_name}`"
+            ));
+        }
+    }
+
+    Ok(plan)
 }
 
 fn select_node(

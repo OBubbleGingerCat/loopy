@@ -43,9 +43,10 @@ impl Runtime {
     }
 
     pub fn open_plan(&self, request: OpenPlanRequest) -> Result<OpenPlanResponse> {
-        validate_plan_name(&request.plan_name)?;
+        let plan_name = validate_plan_name(&request.plan_name)?;
+        let plan_root = self.plan_root(plan_name);
         let connection = self.open_connection()?;
-        query::open_plan(&connection, self.workspace_root(), request)
+        query::open_plan(&connection, self.workspace_root(), &plan_root, request)
     }
 
     pub fn ensure_node_id(&self, request: EnsureNodeIdRequest) -> Result<EnsureNodeIdResponse> {

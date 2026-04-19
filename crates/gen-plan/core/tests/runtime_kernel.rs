@@ -2,6 +2,7 @@ mod support;
 
 use anyhow::Result;
 use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, Runtime};
+use rusqlite::{Connection, params};
 
 #[test]
 fn ensure_plan_creates_fixed_plan_root_and_persists_metadata() -> Result<()> {
@@ -152,6 +153,47 @@ fn ensure_node_id_rejects_conflicting_parent_for_existing_node() -> Result<()> {
     assert!(
         error_text.contains("parent_relative_path"),
         "unexpected conflicting parent error: {error_text}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn persisted_plan_root_mismatch_is_rejected_on_readback() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "UPDATE GEN_PLAN__plans SET plan_root = ?1 WHERE plan_id = ?2",
+        params!["/tmp/tampered-plan-root", plan.plan_id],
+    )?;
+
+    let ensure_error = runtime
+        .ensure_plan(EnsurePlanRequest {
+            plan_name: "demo-plan".to_owned(),
+            task_type: "coding-task".to_owned(),
+            project_directory: workspace.path().to_path_buf(),
+        })
+        .expect_err("mismatched persisted plan_root should be rejected by ensure_plan");
+    assert!(
+        format!("{ensure_error:#}").contains("plan_root"),
+        "unexpected ensure_plan error: {ensure_error:#}"
+    );
+
+    let open_error = runtime
+        .open_plan(OpenPlanRequest {
+            plan_name: "demo-plan".to_owned(),
+        })
+        .expect_err("mismatched persisted plan_root should be rejected by open_plan");
+    assert!(
+        format!("{open_error:#}").contains("plan_root"),
+        "unexpected open_plan error: {open_error:#}"
     );
 
     Ok(())
