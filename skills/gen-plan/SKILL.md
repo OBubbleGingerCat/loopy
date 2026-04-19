@@ -74,6 +74,42 @@ Instead, the Agent must:
 
 This means breadth-first is preserved at the depth/frontier level, while manual interaction remains parent-scoped to control context size, readability, and attention.
 
+### 0.4.1 Manual Clarification Gate
+
+In manual mode, the Agent is not limited to mechanically splitting one parent node into child nodes. If the correct child structure depends on an unresolved user choice, missing constraint, or ambiguous assumption, the Agent MUST stop and ask the user before finalizing that parent-scoped expansion.
+
+This applies especially to first-order choices that materially change decomposition, execution boundaries, or downstream artifacts, such as:
+- programming language,
+- framework,
+- database or storage technology,
+- deployment target,
+- interface style,
+- integration direction,
+- any other decision that would cause different child nodes, different leaf contracts, or different acceptance criteria.
+
+The Agent may recommend one or more options and explain the tradeoffs, but it MUST NOT silently make that choice on the user’s behalf in manual mode.
+
+If multiple such choices remain unresolved, the Agent should ask them one at a time whenever possible, using question-and-answer rounds until the parent-scoped expansion becomes stable enough to confirm.
+
+### 0.4.2 Auto Clarification Gate
+
+Auto-Generation does not mean the Agent should stop asking questions entirely.
+
+Before automatic expansion of the remaining frontier or remaining layers begins, the Agent MUST first try to resolve the missing user-owned details that would materially affect decomposition, execution boundaries, downstream artifacts, leaf contracts, or acceptance criteria.
+
+This applies especially to first-order choices such as:
+- programming language,
+- framework,
+- database or storage technology,
+- deployment target,
+- interface style,
+- integration direction,
+- any other decision that would cause meaningfully different child nodes, leaf outputs, or acceptance checks.
+
+The Agent should front-load these high-leverage clarification questions before entering Auto-Generation whenever practical.
+
+The Agent may recommend defaults or tradeoffs, but it MUST NOT silently convert unresolved user-owned choices into agent-owned decisions merely because Auto-Generation was approved.
+
 ## 1. Purpose and Scope
 
 `loopy:gen-plan` is an AI Agent skill for transforming a user draft into an actionable tree-structured plan.
@@ -81,6 +117,12 @@ This means breadth-first is preserved at the depth/frontier level, while manual 
 The draft may be incomplete, unstructured, ambiguous, or simply a collection of natural language notes, goals, loose ideas, or early requirements. The purpose of this skill is not to directly produce the final deliverable. Instead, it should identify user intent, extract key tasks, constraints, and possible dependencies, and organize them into a clear, extensible, progressively executable plan tree.
 
 This skill is designed for “plan first, execute later” scenarios and helps users turn ideas into execution structure.
+
+### 1.1 Existing Repository Context Requirement
+
+If the target project is non-empty or the draft depends on an existing codebase, the Agent MUST inspect the relevant repository context before proposing the first layer.
+
+The Agent must not invent plan structure without first reading the project areas that constrain the plan.
 
 ## 2. Skill Name
 
@@ -148,6 +190,8 @@ If batch-style generation is desired, the user must explicitly request auto-gene
 - providing a dedicated auto flag in the surrounding workflow,
 - or explicitly stating in natural language that the Agent should generate the remaining layers automatically.
 
+If the surrounding workflow records an early request for auto-generation, that request records user intent only. The Agent may actually enter Auto-Generation only at the next mode-choice checkpoint after a confirmed write.
+
 ## 7. Root Directory Naming
 
 The skill must not use a fixed root directory name.
@@ -174,7 +218,9 @@ The output must be represented as a tree-shaped directory structure.
 
 The root directory must contain:
 - a draft file,
-- directories corresponding to all first-layer nodes.
+- entries corresponding to all first-layer nodes,
+- first-layer non-leaf nodes represented as directories,
+- first-layer leaf nodes represented as markdown files directly under the root directory.
 
 The root itself is not a normal task node. It is the container of the whole plan tree.
 
@@ -256,16 +302,16 @@ Every leaf node must also satisfy these hard requirements:
 - the node must not hand unresolved first-order product, architecture, or scope decisions back to the execution Agent unless an explicit decision rule is already provided,
 - the node must have acceptance criteria that are binary-checkable or strongly falsifiable rather than merely descriptive.
 
-Each leaf markdown file should include at least:
+Each leaf markdown file must include at least:
 - task name,
 - Goal,
 - Task Description,
+- Inputs,
+- Expected Outputs,
 - Acceptance Criteria,
 - Suggested Steps.
 
 When necessary, it may also include:
-- Inputs,
-- Expected Outputs,
 - Constraints,
 - Notes.
 
@@ -421,6 +467,7 @@ Risks, reminders, and execution notes.
 Leaf template notes:
 - `Inputs` should prefer explicit upstream files, artifact names, datasets, configs, tables, or other concrete references whenever available.
 - `Expected Outputs` should name concrete deliverables, checks, tables, configs, scripts, files, or other bounded artifacts rather than generic "document/plan/definition" phrasing.
+- If a leaf truly has no external inputs, the `Inputs` section should say `None` rather than being omitted.
 - If meaningful choices still remain inside the task, the leaf should either include the decision rule explicitly or continue expanding.
 
 ## 13. Naming and Linking Rules
@@ -436,14 +483,14 @@ This skill uses the following conventions:
 
 Example:
 
-`define-scope/`
-- `define-scope.md`
+`runtime-validation/`
+- `runtime-validation.md`
 
 ### 13.2 Leaf Naming
 
 Example:
 
-`identify-constraints.md`
+`produce-constraint-matrix.md`
 
 ### 13.3 Linking Rules
 
@@ -506,11 +553,13 @@ Each layer should follow the same flow:
 5. ask the user whether to continue manually, switch to auto-generation, or pause,
 6. if the user chooses manual mode, select one parent node from the current frontier,
 7. expand only that parent node’s direct children,
-8. ask the user to confirm that parent-scoped expansion,
-9. write the confirmed parent-scoped expansion to the filesystem,
-10. provide a subtree summary for that parent and indicate which same-frontier parent nodes remain,
-11. repeat steps 5-10 for the remaining frontier,
-12. only after the current breadth frontier has been processed may the Agent derive the next breadth-first layer.
+8. if any unresolved user choice or missing constraint would materially change that expansion, ask the necessary clarification question or questions and wait for the user,
+9. ask the user to confirm that parent-scoped expansion,
+10. write the confirmed parent-scoped expansion to the filesystem,
+11. provide a subtree summary for that parent,
+12. ask the explicit mode-choice question and indicate which same-frontier parent nodes remain,
+13. if the user chooses to continue manually, repeat steps 6-12 for the remaining frontier,
+14. only after the current breadth frontier has been processed may the Agent derive the next breadth-first layer.
 
 ### 15.2.1 Mode Choice Gate
 
@@ -520,6 +569,10 @@ The preferred options are:
 1. continue manually with the next parent node,
 2. switch to auto-generation for the remaining frontier or remaining layers,
 3. pause or stop.
+
+This is a mutually exclusive mode-choice checkpoint. Exactly one mode may be active after the user’s response.
+
+If the user’s response is ambiguous, mixed, or conflicting, the Agent must ask a clarification question rather than infer precedence.
 
 The Agent must not skip this question, even if interactive mode is still the default.
 
@@ -541,7 +594,7 @@ In most cases, the Agent should prefer the format:
 
 The user should be allowed to:
 - select one option,
-- select multiple options,
+- select multiple compatible options when the question is not mutually exclusive,
 - select an option with additional comments,
 - ignore the options and provide a freeform answer.
 
@@ -558,13 +611,27 @@ The Agent may enter Auto-Generation only after the user explicitly says one of t
 
 This approval should be obtained at a mode-choice checkpoint after a confirmed write. The Agent must not treat silence, momentum, or the absence of objections as persistence of a previous mode choice.
 
+If the surrounding workflow recorded an earlier auto-generation request, that earlier request counts only as user intent and does not authorize an immediate transition. The actual transition may occur only at the next mode-choice checkpoint after a confirmed write.
+
+Explicit approval for Auto-Generation authorizes automatic continuation only after the Auto Clarification Gate has been satisfied. It does not authorize immediate blind generation in the presence of material unresolved user-owned choices.
+
 The Agent must not enter Auto-Generation based on:
 - the initial command alone,
 - the Agent’s own judgment that the current layer is complete,
 - the need to reduce context pressure,
 - the existence of an output directory.
 
-### 15.4.1 Auto-Generation Leaf Lint Gate
+### 15.4.1 Auto-Generation Clarification Gate
+
+Before entering Auto-Generation, the Agent MUST inspect the confirmed context and remaining planning surface for missing details that are still best resolved by the user.
+
+If any unresolved user choice, missing constraint, or ambiguous assumption would materially change decomposition, execution boundaries, leaf contracts, artifact choices, or acceptance criteria, the Agent MUST ask clarification questions first and wait for the user’s answers before beginning automatic expansion.
+
+The Agent should try to ask the minimum high-leverage clarification questions needed to reduce future guesswork. The goal is not to interrogate the user for every minor preference, but to resolve the details that would otherwise cause structural drift or hidden planner decisions during Auto-Generation.
+
+If the user explicitly delegates a choice, approves a recommended default, or instructs the Agent to proceed despite a named uncertainty, the Agent may record that instruction and continue.
+
+### 15.4.2 Auto-Generation Leaf Lint Gate
 
 Entering Auto-Generation does not relax leaf quality requirements.
 
@@ -597,7 +664,7 @@ When using templates, the Agent should follow these constraints:
 - prefer structured options when they reduce response cost,
 - switch to open questions immediately if options would distort the issue,
 - avoid fake options created only to satisfy the template pattern,
-- avoid asking implementation-detail questions during structural clarification,
+- avoid asking implementation-detail questions during structural clarification unless the answer would materially change decomposition, node boundaries, execution contracts, or acceptance criteria,
 - avoid using non-leaf decomposition prompts on nodes that should already be leaves,
 - in manual mode, avoid asking the user to review expansions for multiple parent nodes in the same round,
 - do not move from one completed parent node to another without first giving the required subtree summary.
@@ -620,6 +687,7 @@ Core states include:
 - `Layer Completion Review`
 - `Layer Write`
 - `Parent Subtree Summary`
+- `Auto Clarification`
 - `Auto-Generation`
 - `Pause / Stop`
 
@@ -629,11 +697,12 @@ Core transition logic:
 - `Layer Outline Proposal` -> `Layer Outline Confirmation`
 - `Layer Outline Confirmation` -> `Layer Outline Proposal` or `Layer Write` or `Pause / Stop`
 - `Layer Write` -> `Mode Choice` or `Parent Subtree Summary` or `Auto-Generation` or `Pause / Stop`
-- `Mode Choice` -> `Frontier Parent Selection` or `Auto-Generation` or `Pause / Stop`
+- `Mode Choice` -> `Frontier Parent Selection` or `Auto Clarification` or `Pause / Stop`
 - `Frontier Parent Selection` -> `Non-Leaf Refinement` or `Leaf Refinement`
 - `Non-Leaf Refinement` -> `Layer Completion Review`
 - `Leaf Refinement` -> `Layer Completion Review`
 - `Layer Completion Review` -> `Layer Write` or `Pause / Stop`
+- `Auto Clarification` -> `Auto Clarification` or `Auto-Generation` or `Pause / Stop`
 - `Parent Subtree Summary` -> `Mode Choice` or `Frontier Parent Selection` or `Layer Outline Proposal` or `Pause / Stop`
 
 Core constraints include:
@@ -644,6 +713,7 @@ Core constraints include:
 - do not enter the next layer before the confirmed current layer has been written to disk,
 - do not skip the mode-choice checkpoint after a confirmed write,
 - do not expand multiple frontier parents in one manual round,
+- do not enter `Auto-Generation` before the Auto Clarification Gate has been satisfied,
 - do not move to a sibling parent or a deeper layer before emitting the required parent subtree summary.
 
 ### 17.1 Confirmation Gate Checklist
@@ -654,6 +724,7 @@ Before generating any deeper layer or entering Auto-Generation, the Agent must c
 - Has the required mode-choice checkpoint already been asked if the Agent intends to continue interactively?
 - Has the just-completed parent node already been summarized before moving to another parent or a deeper layer?
 - Has the user explicitly approved Auto-Generation if the Agent intends to use it?
+- Have the material user-facing clarification questions required for Auto-Generation already been asked and resolved, delegated, or explicitly waived by the user?
 
 If any answer is no, the Agent must stop and ask rather than continue.
 
@@ -690,8 +761,9 @@ After each confirmed parent-scoped frontier slice in manual mode:
 - the Agent MUST write only that confirmed slice’s markdown files and directories to disk,
 - the Agent MUST update parent-to-child links for that slice,
 - the Agent MUST verify that the written slice matches the confirmed structure,
+- the Agent MUST provide the required parent subtree summary before moving to another parent or a deeper layer,
 - the Agent MUST ask the explicit mode-choice question before continuing,
-- the Agent MUST provide the required parent subtree summary before moving to another parent or a deeper layer.
+- the Agent MUST stop and wait for the user’s response before moving to another parent or a deeper layer.
 
 Incremental writing is part of the generation workflow, not a final cleanup step.
 
@@ -699,7 +771,9 @@ Incremental writing is part of the generation workflow, not a final cleanup step
 
 The root must contain:
 - `<plan-name>_draft.md`
-- directories corresponding to all first-layer nodes.
+- entries corresponding to all first-layer nodes,
+- first-layer non-leaf nodes as directories,
+- first-layer leaf nodes as markdown files directly under the root directory.
 
 The draft file may be written as soon as the root directory name is determined.
 
@@ -717,6 +791,14 @@ All `Child Nodes` links must point to the actual markdown files of child nodes a
 
 If the user revises a previously generated node, the Agent must update the corresponding file rather than append a parallel version.
 
+### 18.3.1 Revision Invalidation Rule
+
+If a previously confirmed non-leaf node is revised in a way that changes its scope, boundaries, decomposition, or child contract after descendants in that subtree have already been confirmed, those descendants become stale.
+
+Stale descendants must not be treated as confirmed until they are regenerated and explicitly re-confirmed.
+
+The Agent must not silently preserve stale descendant content as if it still satisfied the revised parent node.
+
 ### 18.4 Invalid Behavior Examples
 
 Invalid:
@@ -724,8 +806,10 @@ Invalid:
 - writing the full tree immediately after the initial draft intake,
 - treating “the user asked for a plan” as permission to auto-generate all layers,
 - entering Auto-Generation without explicit approval,
+- entering Auto-Generation before asking the material clarification questions needed to resolve missing user-owned details that would change downstream structure or leaf contracts,
 - continuing to the next breadth-first layer before the confirmed current layer has been written to disk,
 - writing multiple sibling-parent expansions in a single manual round,
+- silently choosing a programming language, framework, database, deployment target, or similar first-order decision in manual mode when that choice materially changes the child structure or leaf contracts,
 - moving on after a write checkpoint without asking the required manual/auto/pause mode-choice question,
 - finishing one parent’s expansion and then jumping to another parent without providing the subtree summary,
 - marking a node as a leaf even though execution would still require asking the planner to choose among major options,
@@ -781,6 +865,7 @@ After each layer, the Agent should at least check:
 - whether the current reply expanded more than one frontier parent in manual mode,
 - whether the required subtree summary has been provided for the just-completed parent,
 - whether the required mode-choice checkpoint has been asked after the latest write,
+- whether Auto-Generation was preceded by the necessary clarification questions about material missing details,
 - whether the current response size is starting to overload context and should be split into smaller parent-scoped rounds.
 
 Before final writing or each incremental write, the Agent should at least check:
