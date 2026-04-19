@@ -489,8 +489,11 @@ name = "loopy-gen-plan-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "loopy-common-sqlite",
+ "rusqlite",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
