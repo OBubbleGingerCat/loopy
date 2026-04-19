@@ -72,7 +72,7 @@ pub fn validate_placeholder_bundle(bundle_root: &Path) -> Result<()> {
 }
 
 pub fn load_bundle_descriptor(skill_root: &Path) -> Result<BundleDescriptor> {
-    let descriptor = read_descriptor(skill_root)?;
+    let mut descriptor = read_descriptor(skill_root)?;
     if descriptor.skill_id != SKILL_ID {
         bail!(
             "expected skill_id {} in {}, found {}",
@@ -89,6 +89,8 @@ pub fn load_bundle_descriptor(skill_root: &Path) -> Result<BundleDescriptor> {
             descriptor.loader_id
         );
     }
+    descriptor.internal_manifest =
+        validate_bundle_local_file_name("internal_manifest", &descriptor.internal_manifest)?;
     Ok(descriptor)
 }
 
@@ -272,6 +274,28 @@ fn validate_role_kind(role_kind: &str) -> Result<&'static str> {
 
 fn validate_template_name(template_name: &str) -> Result<String> {
     validate_ascii_identifier_with_separators("template_name", template_name, &['_'])
+}
+
+fn validate_bundle_local_file_name(field_name: &str, value: &str) -> Result<String> {
+    let normalized = normalize_non_blank(field_name, value)?;
+    if normalized.contains('/') || normalized.contains('\\') {
+        bail!("{field_name} must be a bundle-local file name without path separators");
+    }
+
+    let path = Path::new(&normalized);
+    if path.is_absolute() {
+        bail!("{field_name} must be a bundle-local file name");
+    }
+
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(component)) = components.next() else {
+        bail!("{field_name} must be a bundle-local file name");
+    };
+    if components.next().is_some() || component != normalized.as_str() {
+        bail!("{field_name} must be a bundle-local file name");
+    }
+
+    Ok(normalized)
 }
 
 fn validate_ascii_identifier_with_separators(
@@ -609,6 +633,114 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn bundle_descriptor_rejects_wrong_loader_id() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        fs::create_dir_all(skill_root.path())?;
+        fs::write(
+            skill_root.path().join("bundle.toml"),
+            [
+                "skill_id = \"loopy:gen-plan\"",
+                "skill_kind = \"plan_generation\"",
+                "version = \"0.1.0\"",
+                "loader_id = \"loopy.not-gen-plan.v1\"",
+                "root_entry = \"SKILL.md\"",
+                "binary_path = \"bin/loopy-gen-plan\"",
+                "internal_manifest = \"gen-plan.toml\"",
+                "",
+            ]
+            .join("\n"),
+        )?;
+
+        let error =
+            load_bundle_descriptor(skill_root.path()).expect_err("wrong loader_id should fail");
+        assert!(format!("{error:#}").contains("expected loader_id"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_loading_rejects_path_bearing_internal_manifest() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        fs::create_dir_all(skill_root.path())?;
+        fs::write(skill_root.path().join("SKILL.md"), "# gen-plan\n")?;
+        fs::write(
+            skill_root.path().join("bundle.toml"),
+            [
+                "skill_id = \"loopy:gen-plan\"",
+                "skill_kind = \"plan_generation\"",
+                "version = \"0.1.0\"",
+                "loader_id = \"loopy.gen-plan.v1\"",
+                "root_entry = \"SKILL.md\"",
+                "binary_path = \"bin/loopy-gen-plan\"",
+                "internal_manifest = \"../gen-plan.toml\"",
+                "",
+            ]
+            .join("\n"),
+        )?;
+
+        let error = load_manifest(skill_root.path())
+            .expect_err("path-bearing internal_manifest should fail");
+        assert!(format!("{error:#}").contains("internal_manifest"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn checked_in_gen_plan_bundle_assets_load_and_preserve_project_executor_contract() -> Result<()>
+    {
+        let skill_root = checked_in_gen_plan_skill_root()?;
+
+        let manifest = load_manifest(&skill_root)?;
+        let domain_contract = load_domain_contract_prompt(&skill_root)?;
+        let leaf_runtime = load_leaf_runtime_prompt(&skill_root)?;
+        let frontier_runtime = load_frontier_runtime_prompt(&skill_root)?;
+
+        assert!(domain_contract.contains("Gen-Plan Domain Contract"));
+        assert!(leaf_runtime.contains("Leaf Node Review Gate"));
+        assert!(frontier_runtime.contains("Frontier Review Gate"));
+
+        let (_, leaf_prompt, leaf_front_matter, leaf_executor) = load_task_type_role_definition(
+            &skill_root,
+            &manifest,
+            "coding-task",
+            "leaf_reviewer",
+            "codex_default",
+        )?;
+        let (_, frontier_prompt, frontier_front_matter, frontier_executor) =
+            load_task_type_role_definition(
+                &skill_root,
+                &manifest,
+                "coding-task",
+                "frontier_reviewer",
+                "codex_default",
+            )?;
+
+        assert_eq!(leaf_front_matter.executor, "codex_leaf_reviewer");
+        assert_eq!(frontier_front_matter.executor, "codex_frontier_reviewer");
+        assert!(!leaf_prompt.trim().is_empty());
+        assert!(!frontier_prompt.trim().is_empty());
+
+        for executor in [&leaf_executor, &frontier_executor] {
+            assert_eq!(executor.cwd, "project");
+            assert!(
+                !executor.args.iter().any(|arg| arg.contains("worktree")),
+                "executor args should not assume worktrees: {:?}",
+                executor.args
+            );
+            assert!(
+                !executor
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("dangerously-bypass-approvals-and-sandbox")),
+                "executor args should not enable bypass-sandbox mode: {:?}",
+                executor.args
+            );
+        }
+
+        Ok(())
+    }
+
     fn write_valid_bundle(skill_root: &Path) -> Result<()> {
         fs::create_dir_all(skill_root.join("prompts"))?;
         fs::create_dir_all(skill_root.join("bin"))?;
@@ -696,5 +828,12 @@ mod tests {
 
     fn valid_role_markdown(role_kind: &str, executor: &str) -> String {
         format!("---\nrole = \"{role_kind}\"\nexecutor = \"{executor}\"\n---\nbody\n")
+    }
+
+    fn checked_in_gen_plan_skill_root() -> Result<PathBuf> {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../skills/gen-plan")
+            .canonicalize()
+            .context("checked-in skills/gen-plan root should resolve")
     }
 }
