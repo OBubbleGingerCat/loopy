@@ -1,3 +1,41 @@
 [skill]
 name = "loopy:gen-plan"
 default_install_target = "codex"
+
+[skill.install_targets]
+codex = "${CODEX_HOME:-$HOME/.codex}/skills/loopy-gen-plan"
+claude = "$HOME/.claude/skills/loopy-gen-plan"
+
+[executors.mock_leaf_reviewer]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-executor", "leaf_reviewer", "{invocation_context_path}"]
+cwd = "project"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.mock_frontier_reviewer]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-executor", "frontier_reviewer", "{invocation_context_path}"]
+cwd = "project"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.codex_leaf_reviewer]
+kind = "local_command"
+command = "codex"
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-"]
+cwd = "project"
+timeout_sec = 1200
+transcript_capture = "stdio"
+env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]
+
+[executors.codex_frontier_reviewer]
+kind = "local_command"
+command = "codex"
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-"]
+cwd = "project"
+timeout_sec = 1200
+transcript_capture = "stdio"
+env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]

@@ -1,8 +1,13 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use rusqlite::Connection;
+use anyhow::{Context, Result, anyhow, bail};
+use loopy_common_bundle::{
+    discover_bundle_from_binary_path, discover_installed_skill_in_default_roots,
+    resolve_development_skill_if_registered,
+};
+use loopy_gen_plan_bundle::ResolvedGateRoleSelection;
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
     EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse,
@@ -54,6 +59,22 @@ impl Runtime {
         query::ensure_node_id(&connection, request)
     }
 
+    pub fn resolve_gate_roles(&self, plan_id: &str) -> Result<ResolvedGateRoleSelection> {
+        let connection = self.open_connection()?;
+        let task_type: String = connection
+            .query_row(
+                "SELECT task_type FROM GEN_PLAN__plans WHERE plan_id = ?1",
+                params![plan_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read persisted plan task_type")?
+            .ok_or_else(|| anyhow!("plan `{plan_id}` does not exist"))?;
+        let skill_root = self.resolved_skill_root()?;
+        let manifest = loopy_gen_plan_bundle::load_manifest(&skill_root)?;
+        loopy_gen_plan_bundle::resolve_gate_roles(&skill_root, &manifest, &task_type)
+    }
+
     fn bootstrap_filesystem(&self) -> Result<()> {
         let loopy_dir = self.workspace_root.join(".loopy");
         fs::create_dir_all(&loopy_dir)
@@ -85,6 +106,32 @@ impl Runtime {
             .join(FIXED_PLANS_RELATIVE_PATH)
             .join(plan_name)
     }
+
+    fn resolved_skill_root(&self) -> Result<PathBuf> {
+        if let Some(bundle_root) = discover_current_process_bundle()? {
+            return Ok(bundle_root);
+        }
+        if let Some(development_skill) = resolve_development_skill_if_registered(
+            &self.workspace_root,
+            loopy_gen_plan_bundle::SKILL_ID,
+        )? {
+            loopy_gen_plan_bundle::load_bundle_descriptor(&development_skill.bundle_root)?;
+            return Ok(development_skill.bundle_root);
+        }
+        let installed_skill =
+            discover_installed_skill_in_default_roots(loopy_gen_plan_bundle::SKILL_ID)?;
+        loopy_gen_plan_bundle::load_bundle_descriptor(&installed_skill.bundle_root)?;
+        Ok(installed_skill.bundle_root)
+    }
+}
+
+fn discover_current_process_bundle() -> Result<Option<PathBuf>> {
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let Some(discovered_bundle) = discover_bundle_from_binary_path(&current_exe)? else {
+        return Ok(None);
+    };
+    loopy_gen_plan_bundle::load_bundle_descriptor(&discovered_bundle.bundle_root)?;
+    Ok(Some(discovered_bundle.bundle_root))
 }
 
 fn validate_plan_name(plan_name: &str) -> Result<&str> {

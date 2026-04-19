@@ -482,6 +482,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "loopy-common-bundle",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -489,7 +491,9 @@ name = "loopy-gen-plan-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "loopy-common-bundle",
  "loopy-common-sqlite",
+ "loopy-gen-plan-bundle",
  "rusqlite",
  "serde",
  "serde_json",

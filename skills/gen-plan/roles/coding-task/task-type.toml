@@ -1,0 +1,3 @@
+task_type = "coding-task"
+default_leaf_reviewer = "codex_default"
+default_frontier_reviewer = "codex_default"

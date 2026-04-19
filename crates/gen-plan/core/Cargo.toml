@@ -8,6 +8,8 @@ name = "loopy_gen_plan"
 
 [dependencies]
 anyhow.workspace = true
+loopy-common-bundle = { path = "../../common/bundle" }
+loopy-gen-plan-bundle = { path = "../bundle" }
 rusqlite.workspace = true
 serde.workspace = true
 uuid.workspace = true
