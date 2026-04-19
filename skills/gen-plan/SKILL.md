@@ -39,6 +39,41 @@ In other words:
 - Leaf nodes must be executable.
 - The tree should progressively converge from vague, abstract, directional descriptions into concrete, explicit, executable actions.
 
+### 0.3 Interaction Contract
+
+Unless the user explicitly opts into auto-generation, this skill operates in interactive mode.
+
+Interactive mode is blocking:
+- after proposing a layer outline, the Agent MUST stop and wait for explicit user confirmation,
+- after completing a layer refinement, the Agent MUST stop and wait for explicit user confirmation before entering the next layer,
+- after a layer is confirmed, the Agent MUST write that confirmed layer to disk before starting breadth-first expansion of the next layer,
+- after each confirmed layer or confirmed parent-scoped frontier slice is written, the Agent MUST explicitly ask whether to continue manually, switch to auto-generation, or pause before any further expansion.
+
+The Agent MUST NOT infer confirmation from:
+- the initial invocation,
+- the user’s silence,
+- the user’s general desire for a plan,
+- the existence of an output path,
+- the Agent’s own judgment that a layer is “stable enough.”
+
+Without explicit confirmation, the Agent must not generate deeper layers or the remaining tree.
+
+### 0.4 Frontier-Scoped Manual Expansion
+
+In this skill, breadth-first planning is performed over a frontier of confirmed parent nodes at the current working depth.
+
+In manual mode, the Agent MUST NOT expand the direct children of multiple frontier parents in the same unconfirmed planning step.
+
+Instead, the Agent must:
+- select one confirmed parent node from the current frontier,
+- expand only that parent node’s direct children,
+- ask the user to confirm that parent-scoped expansion,
+- write only that confirmed parent-scoped expansion to disk,
+- provide a short subtree summary for that parent,
+- only then return to the remaining frontier or ask whether to switch to auto-generation.
+
+This means breadth-first is preserved at the depth/frontier level, while manual interaction remains parent-scoped to control context size, readability, and attention.
+
 ## 1. Purpose and Scope
 
 `loopy:gen-plan` is an AI Agent skill for transforming a user draft into an actionable tree-structured plan.
@@ -104,7 +139,14 @@ This means:
 - read the draft from `draft.md`,
 - write the generated result under `docs/plan`,
 - automatically generate an appropriate root directory name based on the draft’s topic and goal,
-- create that plan directory under `docs/plan` and generate the full markdown file tree inside it.
+- create that plan directory under `docs/plan`,
+- start the plan generation workflow in interactive mode by default rather than batch generation.
+
+This invocation does not, by itself, authorize full-tree generation in one shot.
+
+If batch-style generation is desired, the user must explicitly request auto-generation for the remaining layers, for example by:
+- providing a dedicated auto flag in the surrounding workflow,
+- or explicitly stating in natural language that the Agent should generate the remaining layers automatically.
 
 ## 7. Root Directory Naming
 
@@ -207,6 +249,13 @@ A valid leaf node should satisfy the following:
 - the execution Agent should be able to start directly from the document,
 - the execution Agent should be able to self-check completion against the acceptance criteria.
 
+Every leaf node must also satisfy these hard requirements:
+- the node must bind execution to a bounded artifact, change, or verifiable outcome rather than an open-ended planning conversation,
+- if inputs are listed, they should prefer explicit upstream files, named artifacts, datasets, configs, tables, or other concrete materials over generic labels such as "project goals" or "requirements",
+- if expected outputs are listed, they must name concrete deliverables or checks that the execution Agent can produce directly,
+- the node must not hand unresolved first-order product, architecture, or scope decisions back to the execution Agent unless an explicit decision rule is already provided,
+- the node must have acceptance criteria that are binary-checkable or strongly falsifiable rather than merely descriptive.
+
 Each leaf markdown file should include at least:
 - task name,
 - Goal,
@@ -226,6 +275,18 @@ For example, for a programming task:
 - it may specify functional requirements, input-output expectations, acceptance conditions, and suggested steps,
 - but it should not include concrete code implementation.
 
+### 9.2.1 Leaf Title and Deliverable Rules
+
+A leaf title should describe an execution unit or deliverable, not an unresolved planning act.
+
+The Agent should treat titles such as `define-*`, `choose-*`, `plan-*`, `identify-*`, and `decide-*` as strong red flags for leaves, because these titles usually indicate that the node is still carrying planner work. If a node truly is executable, prefer titles that reflect the bounded deliverable or action, such as:
+- `write-isa-software-contract`
+- `produce-pipeline-width-comparison-table`
+- `assemble-directed-cache-miss-test-suite`
+- `implement-trace-schema-checks`
+
+The same caution applies to expected outputs. Outputs phrased only as "a document", "a plan", "a strategy", "a definition", or "a list" are not sufficient for a leaf unless the artifact structure, completion rule, and expected downstream use are already concretely specified.
+
 ## 10. Leaf Determination Rule
 
 Whether a node should continue to expand must not be judged merely by whether it can still be split. It should be judged by whether its scope has reached a complete state suitable for direct execution.
@@ -242,6 +303,17 @@ A node should usually stop expanding and become a leaf when:
 
 A leaf node is not necessarily the smallest atomic action. It is the most appropriate complete execution unit in the current planning context.
 
+### 10.1 Leaf Readiness Gate
+
+Before the Agent stops expanding a node and marks it as a leaf, it MUST check all of the following:
+- Could a separate execution Agent start immediately without asking the planner to make a major product, architecture, or scope choice?
+- Are the required inputs concrete enough that the execution Agent can locate them immediately?
+- Are the expected outputs concrete enough that completion produces a bounded artifact, change, or verifiable check?
+- Are the acceptance criteria falsifiable without returning to the planner for interpretation?
+- Does the node represent one cohesive execution unit rather than multiple bundled workstreams or phases?
+
+If any answer is no, the node is not yet a leaf and must continue expanding.
+
 ## 11. Must-Expand Rule
 
 If a node’s scope is still too large, too vague, too mixed, or not yet sufficient to support direct execution, it should not be treated as a leaf node and must continue to be expanded.
@@ -252,7 +324,24 @@ A node should generally not become a leaf if:
 - it carries multiple goals, phases, or dimensions that should be separated,
 - it contains natural and stable sub-scopes,
 - it cannot yet support strong acceptance criteria,
-- it can describe direction, but still cannot support an execution Agent starting work.
+- it can describe direction, but still cannot support an execution Agent starting work,
+- it still mainly asks the execution Agent to "define", "choose", "plan", "identify", or "decide" something at the same abstraction level as the planner,
+- its inputs are generic labels rather than concrete upstream artifacts or clearly discoverable materials,
+- its expected outputs are abstract planning documents rather than bounded deliverables,
+- it bundles several independent deliverables or multiple phases into one node,
+- finishing it would still leave the execution Agent naturally asking "which option should I pick?" or "what exactly should I produce?"
+
+### 11.1 Leaf Red Flags
+
+The following are strong red flags that a node is not yet a true leaf:
+- the node title is planner-shaped, such as `define-*`, `choose-*`, `plan-*`, `identify-*`, or `decide-*`,
+- the expected outputs are only "a document", "a plan", "a strategy", or "a list",
+- the acceptance criteria rely on words like "clear", "reasonable", "appropriate", "well-designed", or "can be used later" without stronger checks,
+- the inputs refer only to vague context such as "requirements", "project goals", or "design results" without concrete references,
+- the execution Agent would still need to ask the planner to arbitrate among materially different options,
+- the node clearly covers a phase, stream, or package of work rather than one bounded execution unit
+
+These red flags do not merely suggest lower quality. In most cases they mean the node must continue expanding.
 
 ## 12. Markdown Templates
 
@@ -329,6 +418,11 @@ Describe what should be done and where this task fits in the overall plan.
 Risks, reminders, and execution notes.
 ```
 
+Leaf template notes:
+- `Inputs` should prefer explicit upstream files, artifact names, datasets, configs, tables, or other concrete references whenever available.
+- `Expected Outputs` should name concrete deliverables, checks, tables, configs, scripts, files, or other bounded artifacts rather than generic "document/plan/definition" phrasing.
+- If meaningful choices still remain inside the task, the leaf should either include the decision rule explicitly or continue expanding.
+
 ## 13. Naming and Linking Rules
 
 This skill uses the following conventions:
@@ -388,9 +482,11 @@ The generation process should follow these principles:
 - dialogue-driven,
 - layer-by-layer expansion,
 - breadth-first,
+- frontier-scoped expansion in manual mode,
 - outline first, detail later,
 - refine nodes one by one,
-- optionally switch to auto mode after a layer is completed.
+- summarize completed parent subtrees before moving on,
+- switch to auto mode only when the user explicitly opts in.
 
 ### 15.1 Why Breadth-First Is Required
 
@@ -398,13 +494,44 @@ Painting does not work by infinitely refining one corner before returning to the
 
 Therefore, this skill must use breadth-first generation and must not use depth-first recursive expansion as its default behavior.
 
+Breadth-first here means controlling the active depth frontier, not dumping every sibling parent’s children in a single response. In manual mode, the Agent should progress across the frontier one parent at a time.
+
 ### 15.2 Layer Generation Flow
 
 Each layer should follow the same flow:
 1. derive the current layer outline from the previous layer,
 2. ask the user whether to add or revise anything,
-3. refine the nodes in this layer one by one,
-4. only after the current layer is sufficiently complete, decide whether to enter the next layer.
+3. ask the user to confirm the current layer outline,
+4. write the confirmed layer outline to the filesystem,
+5. ask the user whether to continue manually, switch to auto-generation, or pause,
+6. if the user chooses manual mode, select one parent node from the current frontier,
+7. expand only that parent node’s direct children,
+8. ask the user to confirm that parent-scoped expansion,
+9. write the confirmed parent-scoped expansion to the filesystem,
+10. provide a subtree summary for that parent and indicate which same-frontier parent nodes remain,
+11. repeat steps 5-10 for the remaining frontier,
+12. only after the current breadth frontier has been processed may the Agent derive the next breadth-first layer.
+
+### 15.2.1 Mode Choice Gate
+
+After every successful write checkpoint, the Agent MUST ask a single explicit mode-choice question before continuing.
+
+The preferred options are:
+1. continue manually with the next parent node,
+2. switch to auto-generation for the remaining frontier or remaining layers,
+3. pause or stop.
+
+The Agent must not skip this question, even if interactive mode is still the default.
+
+### 15.2.2 Parent Subtree Summary Rule
+
+When a manual-mode parent node has had its direct children confirmed and written, the Agent MUST provide a compact subtree summary before moving to another parent or a deeper layer.
+
+That summary should include at least:
+- the completed parent node,
+- the confirmed direct child nodes,
+- which children are leaves and which remain expandable,
+- which same-frontier parent nodes remain unresolved.
 
 ### 15.3 Question Presentation
 
@@ -420,6 +547,38 @@ The user should be allowed to:
 
 If a question is naturally better handled in open discussion, the Agent may skip options and ask openly.
 
+### 15.4 Auto-Generation Entry Rule
+
+Auto-Generation is opt-in only.
+
+The Agent may enter Auto-Generation only after the user explicitly says one of the following or an equivalent instruction:
+- continue to the next layer automatically,
+- generate the remaining layers automatically,
+- switch to auto mode.
+
+This approval should be obtained at a mode-choice checkpoint after a confirmed write. The Agent must not treat silence, momentum, or the absence of objections as persistence of a previous mode choice.
+
+The Agent must not enter Auto-Generation based on:
+- the initial command alone,
+- the Agent’s own judgment that the current layer is complete,
+- the need to reduce context pressure,
+- the existence of an output directory.
+
+### 15.4.1 Auto-Generation Leaf Lint Gate
+
+Entering Auto-Generation does not relax leaf quality requirements.
+
+Before the Agent emits any node as a leaf while in Auto-Generation, it MUST run the following leaf lint:
+- Is the node free of unresolved first-order product, architecture, and scope choices?
+- Are the inputs concrete enough for another Agent to locate immediately?
+- Are the outputs concrete enough to produce a bounded artifact, change, or verifiable check?
+- Are the acceptance criteria falsifiable without returning to the planner?
+- Is the node one cohesive execution unit rather than a bundled phase or workstream?
+
+If any answer is no, the Agent must continue expanding rather than stop at that node.
+
+The Agent must not use Auto-Generation as justification for stopping expansion early, collapsing planner work into leaves, or trading leaf executability for context compression.
+
 ## 16. Dialogue Template Rules
 
 To maintain stable, consistent, controllable interaction quality, the Agent should prefer standardized dialogue templates.
@@ -427,8 +586,10 @@ To maintain stable, consistent, controllable interaction quality, the Agent shou
 Templates should at least cover:
 - layer outline proposals,
 - layer confirmations,
+- mode-choice checkpoints,
 - non-leaf refinement,
 - leaf refinement,
+- parent subtree summaries,
 - auto-generation switching.
 
 When using templates, the Agent should follow these constraints:
@@ -437,7 +598,9 @@ When using templates, the Agent should follow these constraints:
 - switch to open questions immediately if options would distort the issue,
 - avoid fake options created only to satisfy the template pattern,
 - avoid asking implementation-detail questions during structural clarification,
-- avoid using non-leaf decomposition prompts on nodes that should already be leaves.
+- avoid using non-leaf decomposition prompts on nodes that should already be leaves,
+- in manual mode, avoid asking the user to review expansions for multiple parent nodes in the same round,
+- do not move from one completed parent node to another without first giving the required subtree summary.
 
 The Agent should aim for the minimum number of questions needed to make a stable judgment and only continue asking when key information is still missing.
 
@@ -450,10 +613,13 @@ Core states include:
 - `Plan Naming`
 - `Layer Outline Proposal`
 - `Layer Outline Confirmation`
-- `Node Selection`
+- `Mode Choice`
+- `Frontier Parent Selection`
 - `Non-Leaf Refinement`
 - `Leaf Refinement`
 - `Layer Completion Review`
+- `Layer Write`
+- `Parent Subtree Summary`
 - `Auto-Generation`
 - `Pause / Stop`
 
@@ -461,17 +627,35 @@ Core transition logic:
 - `Draft Intake` -> `Plan Naming`
 - `Plan Naming` -> `Layer Outline Proposal`
 - `Layer Outline Proposal` -> `Layer Outline Confirmation`
-- `Layer Outline Confirmation` -> `Layer Outline Proposal` or `Node Selection` or `Pause / Stop`
-- `Node Selection` -> `Non-Leaf Refinement` or `Leaf Refinement`
-- `Non-Leaf Refinement` -> `Node Selection` or `Leaf Refinement`
-- `Leaf Refinement` -> `Node Selection`
-- `Node Selection` -> `Layer Completion Review`
-- `Layer Completion Review` -> `Layer Outline Proposal` or `Auto-Generation` or `Pause / Stop`
+- `Layer Outline Confirmation` -> `Layer Outline Proposal` or `Layer Write` or `Pause / Stop`
+- `Layer Write` -> `Mode Choice` or `Parent Subtree Summary` or `Auto-Generation` or `Pause / Stop`
+- `Mode Choice` -> `Frontier Parent Selection` or `Auto-Generation` or `Pause / Stop`
+- `Frontier Parent Selection` -> `Non-Leaf Refinement` or `Leaf Refinement`
+- `Non-Leaf Refinement` -> `Layer Completion Review`
+- `Leaf Refinement` -> `Layer Completion Review`
+- `Layer Completion Review` -> `Layer Write` or `Pause / Stop`
+- `Parent Subtree Summary` -> `Mode Choice` or `Frontier Parent Selection` or `Layer Outline Proposal` or `Pause / Stop`
 
 Core constraints include:
 - do not skip layer confirmation and jump directly into deeper nodes,
 - do not enter the next layer before the current one is complete,
-- do not replace necessary user confirmation with guesswork.
+- do not replace necessary user confirmation with guesswork,
+- do not enter `Layer Write` before the user has explicitly confirmed the current layer,
+- do not enter the next layer before the confirmed current layer has been written to disk,
+- do not skip the mode-choice checkpoint after a confirmed write,
+- do not expand multiple frontier parents in one manual round,
+- do not move to a sibling parent or a deeper layer before emitting the required parent subtree summary.
+
+### 17.1 Confirmation Gate Checklist
+
+Before generating any deeper layer or entering Auto-Generation, the Agent must check:
+- Has the current layer or current parent-scoped frontier slice been explicitly confirmed by the user?
+- Has the confirmed layer or slice already been written to disk?
+- Has the required mode-choice checkpoint already been asked if the Agent intends to continue interactively?
+- Has the just-completed parent node already been summarized before moving to another parent or a deeper layer?
+- Has the user explicitly approved Auto-Generation if the Agent intends to use it?
+
+If any answer is no, the Agent must stop and ask rather than continue.
 
 ## 18. Final Assembly and File Writing Rules
 
@@ -481,9 +665,45 @@ Under the `--output` directory, create:
 
 `<output>/<plan-name>/`
 
+### 18.0 Writing Gate
+
+The Agent MUST NOT write the full output tree to the filesystem until one of the following is true:
+- the user has confirmed all required layers,
+- or the user has explicitly approved Auto-Generation for the remaining layers.
+
+Before that point, the Agent may:
+- write the draft file,
+- write only the nodes, layers, and parent-scoped frontier slices that have already been explicitly confirmed by the user.
+
+The Agent must not write speculative deeper layers, speculative sibling-parent expansions, or any structure that has not yet been confirmed or explicitly authorized through Auto-Generation.
+
+### 18.1 Incremental Layer Writing Rule
+
+This skill uses incremental writing to reduce context pressure and preserve confirmed structure.
+
+After each layer is confirmed:
+- the Agent MUST write that layer’s markdown files and directories to disk,
+- the Agent MUST update parent-to-child links for the confirmed layer,
+- the Agent MUST verify that the written layer matches the confirmed structure before starting the next breadth-first layer.
+
+After each confirmed parent-scoped frontier slice in manual mode:
+- the Agent MUST write only that confirmed slice’s markdown files and directories to disk,
+- the Agent MUST update parent-to-child links for that slice,
+- the Agent MUST verify that the written slice matches the confirmed structure,
+- the Agent MUST ask the explicit mode-choice question before continuing,
+- the Agent MUST provide the required parent subtree summary before moving to another parent or a deeper layer.
+
+Incremental writing is part of the generation workflow, not a final cleanup step.
+
+### 18.2 Root Write Rule
+
 The root must contain:
 - `<plan-name>_draft.md`
 - directories corresponding to all first-layer nodes.
+
+The draft file may be written as soon as the root directory name is determined.
+
+### 18.3 Non-Leaf and Leaf Write Rule
 
 For every non-leaf node, create:
 - `<node-name>/`
@@ -496,6 +716,23 @@ For every leaf node, create:
 All `Child Nodes` links must point to the actual markdown files of child nodes and should use relative paths whenever possible.
 
 If the user revises a previously generated node, the Agent must update the corresponding file rather than append a parallel version.
+
+### 18.4 Invalid Behavior Examples
+
+Invalid:
+- proposing the first layer and then generating deeper layers without user confirmation,
+- writing the full tree immediately after the initial draft intake,
+- treating “the user asked for a plan” as permission to auto-generate all layers,
+- entering Auto-Generation without explicit approval,
+- continuing to the next breadth-first layer before the confirmed current layer has been written to disk,
+- writing multiple sibling-parent expansions in a single manual round,
+- moving on after a write checkpoint without asking the required manual/auto/pause mode-choice question,
+- finishing one parent’s expansion and then jumping to another parent without providing the subtree summary,
+- marking a node as a leaf even though execution would still require asking the planner to choose among major options,
+- using planner-shaped leaf titles such as `define-*`, `choose-*`, or `plan-*` when the actual deliverable and decision rule remain unspecified,
+- using abstract outputs such as "a plan", "a document", or "a strategy" as leaf deliverables without concrete artifact structure or completion rules,
+- collapsing multiple phases or independent deliverables into a single leaf merely to reduce context pressure,
+- using Auto-Generation to stop expansion before the leaf readiness gate has actually been satisfied
 
 ## 19. Exception Handling and Conflict Resolution
 
@@ -530,6 +767,7 @@ Quality should be evaluated along at least the following dimensions:
 - Documentation Quality
 - Navigation Quality
 - Interaction Quality
+- Context Control
 
 After each layer, the Agent should at least check:
 - whether the nodes in the layer serve the same parent scope,
@@ -537,7 +775,13 @@ After each layer, the Agent should at least check:
 - whether there is obvious overlap or omission,
 - whether some nodes should already become leaves,
 - whether some leaves should actually continue expanding,
-- whether the current layer is stable enough to enter the next layer.
+- whether any candidate leaf still carries unresolved planner-level decisions,
+- whether any candidate leaf is still using planner-shaped naming or abstract deliverables,
+- whether the current layer is stable enough to enter the next layer,
+- whether the current reply expanded more than one frontier parent in manual mode,
+- whether the required subtree summary has been provided for the just-completed parent,
+- whether the required mode-choice checkpoint has been asked after the latest write,
+- whether the current response size is starting to overload context and should be split into smaller parent-scoped rounds.
 
 Before final writing or each incremental write, the Agent should at least check:
 - whether the root directory name is appropriate,
@@ -546,4 +790,9 @@ Before final writing or each incremental write, the Agent should at least check:
 - whether every leaf is a standalone `.md` file,
 - whether all parent-child links exist and are correct,
 - whether there are naming conflicts, dangling nodes, or unreferenced nodes,
-- whether node content matches the template for its node type.
+- whether node content matches the template for its node type,
+- whether every leaf passes the leaf readiness gate,
+- whether each leaf binds to concrete inputs and concrete outputs,
+- whether each leaf has falsifiable acceptance criteria,
+- whether any leaf still bundles multiple phases or independent workstreams,
+- whether any auto-generated leaf was accepted without first passing the leaf lint gate
