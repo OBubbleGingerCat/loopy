@@ -56,7 +56,7 @@ fn main() -> Result<()> {
                 EnsurePlanRequest {
                     plan_name,
                     task_type,
-                    project_directory: project_directory.display().to_string(),
+                    project_directory,
                 },
             );
             println!("ensure-plan not implemented yet");

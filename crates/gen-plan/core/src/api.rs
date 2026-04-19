@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,7 +13,7 @@ pub enum PlannerMode {
 pub struct EnsurePlanRequest {
     pub plan_name: String,
     pub task_type: String,
-    pub project_directory: String,
+    pub project_directory: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,4 +46,29 @@ pub struct EnsureNodeIdRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnsureNodeIdResponse {
     pub node_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::EnsurePlanRequest;
+
+    #[test]
+    fn ensure_plan_request_keeps_project_directory_as_pathbuf() {
+        let request: EnsurePlanRequest = serde_json::from_value(json!({
+            "plan_name": "demo-plan",
+            "task_type": "coding-task",
+            "project_directory": "/tmp/project",
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(
+            std::any::type_name_of_val(&request.project_directory),
+            std::any::type_name::<PathBuf>()
+        );
+        assert_eq!(request.project_directory, PathBuf::from("/tmp/project"));
+    }
 }
