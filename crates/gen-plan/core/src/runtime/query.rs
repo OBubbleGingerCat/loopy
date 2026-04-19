@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -94,6 +95,11 @@ pub(crate) fn ensure_node_id(
         relative_path,
         parent_relative_path,
     } = request;
+    let relative_path = validate_plan_local_path("relative_path", &relative_path)?;
+    let parent_relative_path = parent_relative_path
+        .as_deref()
+        .map(|path| validate_plan_local_path("parent_relative_path", path))
+        .transpose()?;
 
     let node_id = ensure_node_id_for_path(
         connection,
@@ -110,11 +116,7 @@ fn ensure_node_id_for_path(
     relative_path: &str,
     parent_relative_path: Option<&str>,
 ) -> Result<String> {
-    if let Some(node_id) = select_node_id(connection, plan_id, relative_path)? {
-        return Ok(node_id);
-    }
-
-    let parent_node_id = match parent_relative_path {
+    let requested_parent_node_id = match parent_relative_path {
         Some(parent_relative_path) if parent_relative_path == relative_path => {
             return Err(anyhow!(
                 "parent_relative_path must differ from relative_path for `{relative_path}`"
@@ -128,6 +130,17 @@ fn ensure_node_id_for_path(
         )?),
         None => None,
     };
+
+    if let Some(existing) = select_node(connection, plan_id, relative_path)? {
+        if let Some(requested_parent_node_id) = requested_parent_node_id.as_deref() {
+            if existing.parent_node_id.as_deref() != Some(requested_parent_node_id) {
+                return Err(anyhow!(
+                    "parent_relative_path conflicts with existing node linkage for `{relative_path}`"
+                ));
+            }
+        }
+        return Ok(existing.node_id);
+    }
 
     let node_id = Uuid::new_v4().to_string();
     let node_name = node_name(relative_path);
@@ -148,13 +161,20 @@ fn ensure_node_id_for_path(
             node_id,
             relative_path,
             node_name,
-            parent_node_id,
+            requested_parent_node_id,
             timestamp,
             timestamp,
         ],
     ) {
-        if let Some(existing) = select_node_id(connection, plan_id, relative_path)? {
-            return Ok(existing);
+        if let Some(existing) = select_node(connection, plan_id, relative_path)? {
+            if let Some(requested_parent_node_id) = requested_parent_node_id.as_deref() {
+                if existing.parent_node_id.as_deref() != Some(requested_parent_node_id) {
+                    return Err(anyhow!(
+                        "parent_relative_path conflicts with existing node linkage for `{relative_path}`"
+                    ));
+                }
+            }
+            return Ok(existing.node_id);
         }
         return Err(error).context("failed to persist node metadata");
     }
@@ -186,21 +206,74 @@ fn select_plan(
         .context("failed to read persisted plan metadata")
 }
 
-fn select_node_id(
+fn select_node(
     connection: &Connection,
     plan_id: &str,
     relative_path: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<NodeRow>> {
     connection
         .query_row(
-            "SELECT node_id
+            "SELECT node_id, parent_node_id
              FROM GEN_PLAN__nodes
              WHERE plan_id = ?1 AND relative_path = ?2",
             params![plan_id, relative_path],
-            |row| row.get(0),
+            |row| {
+                Ok(NodeRow {
+                    node_id: row.get(0)?,
+                    parent_node_id: row.get(1)?,
+                })
+            },
         )
         .optional()
         .context("failed to read persisted node metadata")
+}
+
+fn validate_plan_local_path(label: &str, input: &str) -> Result<String> {
+    if input.is_empty() {
+        return Err(anyhow!("{label} must not be empty"));
+    }
+
+    let path = Path::new(input);
+    if path.is_absolute() {
+        return Err(anyhow!(
+            "{label} must be a plan-local relative path: absolute paths are not allowed"
+        ));
+    }
+
+    let mut normalized_components = Vec::<OsString>::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(component) => normalized_components.push(component.to_os_string()),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(anyhow!(
+                    "{label} must be a normalized plan-local relative path"
+                ));
+            }
+        }
+    }
+
+    if normalized_components.is_empty() {
+        return Err(anyhow!("{label} must not be empty"));
+    }
+
+    let normalized =
+        normalized_components
+            .into_iter()
+            .fold(PathBuf::new(), |mut path, component| {
+                path.push(component);
+                path
+            });
+    let normalized = path_string(&normalized);
+    if normalized != input {
+        return Err(anyhow!(
+            "{label} must be a normalized plan-local relative path"
+        ));
+    }
+
+    Ok(normalized)
 }
 
 fn current_timestamp() -> Result<String> {
@@ -233,4 +306,9 @@ struct PlanRow {
     plan_root: String,
     plan_status: String,
     task_type: String,
+}
+
+struct NodeRow {
+    node_id: String,
+    parent_node_id: Option<String>,
 }

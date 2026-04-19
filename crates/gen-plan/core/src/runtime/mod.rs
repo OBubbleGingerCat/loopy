@@ -1,7 +1,7 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
 use crate::{
@@ -33,7 +33,8 @@ impl Runtime {
     }
 
     pub fn ensure_plan(&self, request: EnsurePlanRequest) -> Result<EnsurePlanResponse> {
-        let plan_root = self.plan_root(&request.plan_name);
+        let plan_name = validate_plan_name(&request.plan_name)?;
+        let plan_root = self.plan_root(plan_name);
         fs::create_dir_all(&plan_root)
             .with_context(|| format!("failed to create {}", plan_root.display()))?;
 
@@ -42,6 +43,7 @@ impl Runtime {
     }
 
     pub fn open_plan(&self, request: OpenPlanRequest) -> Result<OpenPlanResponse> {
+        validate_plan_name(&request.plan_name)?;
         let connection = self.open_connection()?;
         query::open_plan(&connection, self.workspace_root(), request)
     }
@@ -82,4 +84,29 @@ impl Runtime {
             .join(FIXED_PLANS_RELATIVE_PATH)
             .join(plan_name)
     }
+}
+
+fn validate_plan_name(plan_name: &str) -> Result<&str> {
+    if plan_name.is_empty() {
+        bail!("plan_name must not be empty");
+    }
+
+    let path = Path::new(plan_name);
+    if path.is_absolute() {
+        bail!("plan_name must stay within .loopy/plans/: absolute paths are not allowed");
+    }
+
+    let mut components = path.components();
+    let Some(Component::Normal(component)) = components.next() else {
+        bail!("plan_name must be a single directory name within .loopy/plans/");
+    };
+    if components.next().is_some() {
+        bail!("plan_name must be a single directory name within .loopy/plans/");
+    }
+
+    if component != plan_name {
+        bail!("plan_name must be normalized within .loopy/plans/");
+    }
+
+    Ok(plan_name)
 }
