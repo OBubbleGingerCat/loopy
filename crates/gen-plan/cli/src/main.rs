@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, Runtime};
+use loopy_gen_plan::{
+    EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, PlannerMode,
+    RunFrontierReviewGateRequest, RunLeafReviewGateRequest, Runtime,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "loopy-gen-plan")]
@@ -36,8 +39,22 @@ enum Commands {
         #[arg(long)]
         parent_relative_path: Option<String>,
     },
-    RunLeafReviewGate {},
-    RunFrontierReviewGate {},
+    RunLeafReviewGate {
+        #[arg(long)]
+        plan_id: String,
+        #[arg(long)]
+        node_id: String,
+        #[arg(long)]
+        planner_mode: String,
+    },
+    RunFrontierReviewGate {
+        #[arg(long)]
+        plan_id: String,
+        #[arg(long)]
+        parent_node_id: String,
+        #[arg(long)]
+        planner_mode: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -80,15 +97,39 @@ fn main() -> Result<()> {
             );
             println!("ensure-node-id not implemented yet");
         }
-        Commands::RunLeafReviewGate {} => {
-            let _ = runtime;
-            println!("run-leaf-review-gate not implemented yet");
+        Commands::RunLeafReviewGate {
+            plan_id,
+            node_id,
+            planner_mode,
+        } => {
+            let response = runtime.run_leaf_review_gate(RunLeafReviewGateRequest {
+                plan_id,
+                node_id,
+                planner_mode: parse_planner_mode(&planner_mode)?,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
-        Commands::RunFrontierReviewGate {} => {
-            let _ = runtime;
-            println!("run-frontier-review-gate not implemented yet");
+        Commands::RunFrontierReviewGate {
+            plan_id,
+            parent_node_id,
+            planner_mode,
+        } => {
+            let response = runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
+                plan_id,
+                parent_node_id,
+                planner_mode: parse_planner_mode(&planner_mode)?,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
     }
 
     Ok(())
+}
+
+fn parse_planner_mode(value: &str) -> Result<PlannerMode> {
+    match value {
+        "manual" => Ok(PlannerMode::Manual),
+        "auto" => Ok(PlannerMode::Auto),
+        _ => bail!("invalid planner_mode `{value}`: expected `manual` or `auto`"),
+    }
 }

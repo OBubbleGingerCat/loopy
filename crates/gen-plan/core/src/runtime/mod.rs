@@ -1,20 +1,22 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use loopy_common_bundle::{
     discover_bundle_from_binary_path, discover_installed_skill_in_default_roots,
     resolve_development_skill_if_registered,
 };
 use loopy_gen_plan_bundle::ResolvedGateRoleSelection;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
     EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse,
-    OpenPlanRequest, OpenPlanResponse,
+    OpenPlanRequest, OpenPlanResponse, RunFrontierReviewGateRequest, RunFrontierReviewGateResponse,
+    RunLeafReviewGateRequest, RunLeafReviewGateResponse,
 };
 
 mod db;
+mod gates;
 mod query;
 
 const FIXED_PLANS_RELATIVE_PATH: &str = ".loopy/plans";
@@ -73,6 +75,22 @@ impl Runtime {
         let skill_root = self.resolved_skill_root()?;
         let manifest = loopy_gen_plan_bundle::load_manifest(&skill_root)?;
         loopy_gen_plan_bundle::resolve_gate_roles(&skill_root, &manifest, &task_type)
+    }
+
+    pub fn run_leaf_review_gate(
+        &self,
+        request: RunLeafReviewGateRequest,
+    ) -> Result<RunLeafReviewGateResponse> {
+        let connection = self.open_connection()?;
+        gates::run_leaf_review_gate(&connection, request)
+    }
+
+    pub fn run_frontier_review_gate(
+        &self,
+        request: RunFrontierReviewGateRequest,
+    ) -> Result<RunFrontierReviewGateResponse> {
+        let connection = self.open_connection()?;
+        gates::run_frontier_review_gate(&connection, request)
     }
 
     fn bootstrap_filesystem(&self) -> Result<()> {

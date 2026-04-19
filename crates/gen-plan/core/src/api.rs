@@ -9,6 +9,15 @@ pub enum PlannerMode {
     Auto,
 }
 
+impl PlannerMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnsurePlanRequest {
     pub plan_name: String,
@@ -46,6 +55,50 @@ pub struct EnsureNodeIdRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnsureNodeIdResponse {
     pub node_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewIssue {
+    pub issue_kind: String,
+    pub target_node_id: Option<String>,
+    pub target_parent_node_id: Option<String>,
+    pub target_node_ids: Option<Vec<String>>,
+    pub summary: String,
+    pub rationale: String,
+    pub expected_revision: String,
+    pub question_for_user: Option<String>,
+    pub decision_impact: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunLeafReviewGateRequest {
+    pub plan_id: String,
+    pub node_id: String,
+    pub planner_mode: PlannerMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunLeafReviewGateResponse {
+    pub passed: bool,
+    pub verdict: String,
+    pub reviewer_role_id: String,
+    pub issues: Vec<ReviewIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunFrontierReviewGateRequest {
+    pub plan_id: String,
+    pub parent_node_id: String,
+    pub planner_mode: PlannerMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunFrontierReviewGateResponse {
+    pub passed: bool,
+    pub verdict: String,
+    pub reviewer_role_id: String,
+    pub issues: Vec<ReviewIssue>,
+    pub invalidated_leaf_node_ids: Vec<String>,
 }
 
 #[cfg(test)]
