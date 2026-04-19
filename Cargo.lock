@@ -483,6 +483,7 @@ dependencies = [
  "anyhow",
  "loopy-common-bundle",
  "serde",
+ "tempfile",
  "toml",
 ]
 

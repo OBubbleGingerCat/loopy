@@ -9,7 +9,7 @@ claude = "$HOME/.claude/skills/loopy-gen-plan"
 [executors.mock_leaf_reviewer]
 kind = "local_command"
 command = "{bundle_bin}"
-args = ["mock-executor", "leaf_reviewer", "{invocation_context_path}"]
+args = ["mock-leaf-reviewer", "{invocation_payload_path}"]
 cwd = "project"
 timeout_sec = 60
 transcript_capture = "stdio"
@@ -17,7 +17,7 @@ transcript_capture = "stdio"
 [executors.mock_frontier_reviewer]
 kind = "local_command"
 command = "{bundle_bin}"
-args = ["mock-executor", "frontier_reviewer", "{invocation_context_path}"]
+args = ["mock-frontier-reviewer", "{invocation_payload_path}"]
 cwd = "project"
 timeout_sec = 60
 transcript_capture = "stdio"

@@ -24,6 +24,7 @@ pub(crate) fn ensure_plan(
         task_type,
         project_directory: _project_directory,
     } = request;
+    let task_type = loopy_gen_plan_bundle::validate_task_type_identifier(&task_type)?;
 
     if let Some(existing) = select_plan(connection, workspace_root, &plan_name, plan_root)? {
         return Ok(EnsurePlanResponse {

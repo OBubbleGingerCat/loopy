@@ -120,9 +120,10 @@ pub fn load_manifest(skill_root: &Path) -> Result<Manifest> {
 }
 
 pub fn load_task_type_config(skill_root: &Path, task_type: &str) -> Result<TaskTypeConfig> {
+    let task_type = validate_task_type_identifier(task_type)?;
     let config_path = skill_root
         .join("roles")
-        .join(task_type)
+        .join(&task_type)
         .join("task-type.toml");
     if !config_path.is_file() {
         bail!(
@@ -134,11 +135,13 @@ pub fn load_task_type_config(skill_root: &Path, task_type: &str) -> Result<TaskT
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let config: TaskTypeConfig = toml::from_str(&config_text)
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
-    if config.task_type.trim() != task_type {
+    let config_task_type = validate_task_type_identifier(&config.task_type)
+        .with_context(|| format!("invalid task_type in {}", config_path.display()))?;
+    if config_task_type != task_type {
         bail!(
             "task_type {} does not match {} in {}",
             task_type,
-            config.task_type,
+            config_task_type,
             config_path.display()
         );
     }
@@ -150,7 +153,7 @@ pub fn resolve_gate_roles(
     manifest: &Manifest,
     task_type: &str,
 ) -> Result<ResolvedGateRoleSelection> {
-    let task_type = normalize_non_blank("task_type", task_type)?;
+    let task_type = validate_task_type_identifier(task_type)?;
     let task_type_config = load_task_type_config(skill_root, &task_type)?;
     let leaf_reviewer_role_id = normalize_role_id(
         "default_leaf_reviewer",
@@ -190,7 +193,7 @@ pub fn load_task_type_role_definition(
     role_kind: &str,
     role_id: &str,
 ) -> Result<(PathBuf, String, RoleFrontMatter, ExecutorProfile)> {
-    let role_path = role_path_for(skill_root, task_type, role_kind, role_id);
+    let role_path = role_path_for(skill_root, task_type, role_kind, role_id)?;
     let role_markdown = fs::read_to_string(&role_path)
         .with_context(|| format!("failed to read {}", role_path.display()))?;
     let role_front_matter = parse_role_front_matter(&role_markdown)
@@ -254,6 +257,47 @@ fn normalize_role_id(field_name: &str, value: &str) -> Result<String> {
     Ok(normalized)
 }
 
+pub fn validate_task_type_identifier(task_type: &str) -> Result<String> {
+    let normalized = normalize_non_blank("task_type", task_type)?;
+    let mut chars = normalized.chars();
+    let Some(first) = chars.next() else {
+        bail!("task_type must not be blank");
+    };
+    if !first.is_ascii_lowercase() {
+        bail!(
+            "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+        );
+    }
+
+    let mut previous_was_hyphen = false;
+    for ch in normalized.chars() {
+        match ch {
+            'a'..='z' | '0'..='9' => previous_was_hyphen = false,
+            '-' => {
+                if previous_was_hyphen {
+                    bail!(
+                        "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+                    );
+                }
+                previous_was_hyphen = true;
+            }
+            _ => {
+                bail!(
+                    "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+                );
+            }
+        }
+    }
+
+    if normalized.ends_with('-') {
+        bail!(
+            "task_type must be a safe identifier using lowercase ascii letters, digits, and internal hyphens"
+        );
+    }
+
+    Ok(normalized)
+}
+
 fn validate_selected_role(
     skill_root: &Path,
     manifest: &Manifest,
@@ -261,7 +305,7 @@ fn validate_selected_role(
     role_kind: &str,
     role_id: &str,
 ) -> Result<()> {
-    let role_path = role_path_for(skill_root, task_type, role_kind, role_id);
+    let role_path = role_path_for(skill_root, task_type, role_kind, role_id)?;
     if !role_path.is_file() {
         bail!(
             "missing role file for {} {} at {}",
@@ -292,12 +336,17 @@ fn validate_selected_role(
     Ok(())
 }
 
-fn role_path_for(skill_root: &Path, task_type: &str, role_kind: &str, role_id: &str) -> PathBuf {
-    skill_root
+fn role_path_for(
+    skill_root: &Path,
+    task_type: &str,
+    role_kind: &str,
+    role_id: &str,
+) -> Result<PathBuf> {
+    Ok(skill_root
         .join("roles")
-        .join(task_type)
+        .join(validate_task_type_identifier(task_type)?)
         .join(role_kind)
-        .join(format!("{role_id}.md"))
+        .join(format!("{role_id}.md")))
 }
 
 fn parse_role_front_matter(markdown: &str) -> Result<RoleFrontMatter> {
@@ -323,4 +372,240 @@ fn split_role_markdown(markdown: &str) -> Result<(&str, &str)> {
         bail!("unexpected content before role front matter");
     }
     Ok((front_matter, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use anyhow::Result;
+
+    use super::*;
+
+    #[test]
+    fn invalid_task_type_is_rejected_before_role_path_resolution() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+
+        let manifest = load_manifest(skill_root.path())?;
+        let error = resolve_gate_roles(skill_root.path(), &manifest, "../coding-task")
+            .expect_err("invalid task_type should be rejected");
+        assert!(format!("{error:#}").contains("task_type"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_role_front_matter_is_rejected() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+        write_task_type_config(skill_root.path(), "coding-task", "broken", "codex_default")?;
+        write_role(
+            skill_root.path(),
+            "coding-task",
+            "leaf_reviewer",
+            "broken",
+            "---\nrole = \"leaf_reviewer\"\nexecutor = [\n---\nbody\n",
+        )?;
+
+        let manifest = load_manifest(skill_root.path())?;
+        let error = load_task_type_role_definition(
+            skill_root.path(),
+            &manifest,
+            "coding-task",
+            "leaf_reviewer",
+            "broken",
+        )
+        .expect_err("malformed front matter should fail");
+        assert!(format!("{error:#}").contains("front matter"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn missing_role_file_is_rejected() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+        write_task_type_config(
+            skill_root.path(),
+            "coding-task",
+            "missing_leaf",
+            "codex_default",
+        )?;
+        write_role(
+            skill_root.path(),
+            "coding-task",
+            "frontier_reviewer",
+            "codex_default",
+            valid_role_markdown("frontier_reviewer", "codex_frontier_reviewer"),
+        )?;
+
+        let manifest = load_manifest(skill_root.path())?;
+        let error = resolve_gate_roles(skill_root.path(), &manifest, "coding-task")
+            .expect_err("missing role file should fail");
+        assert!(format!("{error:#}").contains("missing role file"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_executor_profile_is_rejected() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+        write_task_type_config(
+            skill_root.path(),
+            "coding-task",
+            "codex_default",
+            "codex_default",
+        )?;
+        write_role(
+            skill_root.path(),
+            "coding-task",
+            "leaf_reviewer",
+            "codex_default",
+            valid_role_markdown("leaf_reviewer", "missing_executor"),
+        )?;
+        write_role(
+            skill_root.path(),
+            "coding-task",
+            "frontier_reviewer",
+            "codex_default",
+            valid_role_markdown("frontier_reviewer", "codex_frontier_reviewer"),
+        )?;
+
+        let manifest = load_manifest(skill_root.path())?;
+        let error = resolve_gate_roles(skill_root.path(), &manifest, "coding-task")
+            .expect_err("unknown executor profile should fail");
+        assert!(format!("{error:#}").contains("unknown executor"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn missing_prompt_template_is_rejected() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        write_valid_bundle(skill_root.path())?;
+
+        let error = load_prompt_template(skill_root.path(), "missing_prompt")
+            .expect_err("missing prompt should fail");
+        assert!(format!("{error:#}").contains("failed to read"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_descriptor_rejects_wrong_skill_id() -> Result<()> {
+        let skill_root = tempfile::tempdir()?;
+        fs::create_dir_all(skill_root.path())?;
+        fs::write(
+            skill_root.path().join("bundle.toml"),
+            [
+                "skill_id = \"loopy:not-gen-plan\"",
+                "skill_kind = \"plan_generation\"",
+                "version = \"0.1.0\"",
+                "loader_id = \"loopy.gen-plan.v1\"",
+                "root_entry = \"SKILL.md\"",
+                "binary_path = \"bin/loopy-gen-plan\"",
+                "internal_manifest = \"gen-plan.toml\"",
+                "",
+            ]
+            .join("\n"),
+        )?;
+
+        let error =
+            load_bundle_descriptor(skill_root.path()).expect_err("wrong skill_id should fail");
+        assert!(format!("{error:#}").contains("expected skill_id"));
+
+        Ok(())
+    }
+
+    fn write_valid_bundle(skill_root: &Path) -> Result<()> {
+        fs::create_dir_all(skill_root.join("prompts"))?;
+        fs::create_dir_all(skill_root.join("bin"))?;
+        fs::write(skill_root.join("SKILL.md"), "# gen-plan\n")?;
+        fs::write(skill_root.join("bin/loopy-gen-plan"), "#!/bin/sh\nexit 0\n")?;
+        fs::write(
+            skill_root.join("bundle.toml"),
+            [
+                "skill_id = \"loopy:gen-plan\"",
+                "skill_kind = \"plan_generation\"",
+                "version = \"0.1.0\"",
+                "loader_id = \"loopy.gen-plan.v1\"",
+                "root_entry = \"SKILL.md\"",
+                "binary_path = \"bin/loopy-gen-plan\"",
+                "internal_manifest = \"gen-plan.toml\"",
+                "",
+            ]
+            .join("\n"),
+        )?;
+        fs::write(
+            skill_root.join("gen-plan.toml"),
+            [
+                "[skill]",
+                "name = \"loopy:gen-plan\"",
+                "default_install_target = \"codex\"",
+                "",
+                "[skill.install_targets]",
+                "codex = \"$HOME/.codex/skills/loopy-gen-plan\"",
+                "",
+                "[executors.codex_leaf_reviewer]",
+                "kind = \"local_command\"",
+                "command = \"codex\"",
+                "args = [\"exec\"]",
+                "cwd = \"project\"",
+                "timeout_sec = 60",
+                "transcript_capture = \"stdio\"",
+                "",
+                "[executors.codex_frontier_reviewer]",
+                "kind = \"local_command\"",
+                "command = \"codex\"",
+                "args = [\"exec\"]",
+                "cwd = \"project\"",
+                "timeout_sec = 60",
+                "transcript_capture = \"stdio\"",
+                "",
+            ]
+            .join("\n"),
+        )?;
+        fs::write(skill_root.join("prompts/domain_contract.md"), "domain")?;
+        fs::write(skill_root.join("prompts/leaf_runtime.md"), "leaf")?;
+        fs::write(skill_root.join("prompts/frontier_runtime.md"), "frontier")?;
+        Ok(())
+    }
+
+    fn write_task_type_config(
+        skill_root: &Path,
+        task_type: &str,
+        leaf_reviewer: &str,
+        frontier_reviewer: &str,
+    ) -> Result<()> {
+        let role_dir = skill_root.join("roles").join(task_type);
+        fs::create_dir_all(role_dir.join("leaf_reviewer"))?;
+        fs::create_dir_all(role_dir.join("frontier_reviewer"))?;
+        fs::write(
+            role_dir.join("task-type.toml"),
+            format!(
+                "task_type = \"{task_type}\"\ndefault_leaf_reviewer = \"{leaf_reviewer}\"\ndefault_frontier_reviewer = \"{frontier_reviewer}\"\n"
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_role(
+        skill_root: &Path,
+        task_type: &str,
+        role_kind: &str,
+        role_id: &str,
+        markdown: impl AsRef<str>,
+    ) -> Result<()> {
+        let role_dir = skill_root.join("roles").join(task_type).join(role_kind);
+        fs::create_dir_all(&role_dir)?;
+        fs::write(role_dir.join(format!("{role_id}.md")), markdown.as_ref())?;
+        Ok(())
+    }
+
+    fn valid_role_markdown(role_kind: &str, executor: &str) -> String {
+        format!("---\nrole = \"{role_kind}\"\nexecutor = \"{executor}\"\n---\nbody\n")
+    }
 }

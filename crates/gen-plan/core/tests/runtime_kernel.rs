@@ -86,6 +86,40 @@ fn ensure_plan_rejects_plan_names_that_escape_fixed_plan_root() -> Result<()> {
 }
 
 #[test]
+fn ensure_plan_rejects_invalid_task_types() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+
+    for task_type in [
+        "",
+        " ",
+        "../coding-task",
+        "nested/plan",
+        "coding task",
+        "coding_task",
+        "-coding-task",
+        "coding-task-",
+        "Coding-task",
+        ".coding-task",
+    ] {
+        let error = runtime
+            .ensure_plan(EnsurePlanRequest {
+                plan_name: "demo-plan".to_owned(),
+                task_type: task_type.to_owned(),
+                project_directory: workspace.path().to_path_buf(),
+            })
+            .expect_err("invalid task_type should be rejected");
+        let error_text = format!("{error:#}");
+        assert!(
+            error_text.contains("task_type"),
+            "unexpected error for `{task_type}`: {error_text}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn ensure_node_id_rejects_paths_that_are_not_valid_plan_local_paths() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
