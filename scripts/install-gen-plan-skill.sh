@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CALLER_CWD="$(pwd)"
+CALLER_CWD="$(pwd -P)"
 
 TARGET_MODE="codex"
 TARGET_EXPLICIT=0
@@ -94,9 +94,96 @@ fi
 
 normalize_install_root() {
   local raw_path="$1"
+  local absolute_path
+  absolute_path=""
   case "$raw_path" in
-    /*) printf '%s\n' "$raw_path" ;;
-    *) printf '%s\n' "$CALLER_CWD/$raw_path" ;;
+    /*) absolute_path="$raw_path" ;;
+    *) absolute_path="$CALLER_CWD/$raw_path" ;;
+  esac
+  canonicalize_path "$absolute_path"
+}
+
+canonicalize_path() {
+  local raw_path="$1"
+  local -a segments=()
+  local -a collapsed=()
+  local segment
+  IFS='/' read -r -a segments <<< "$raw_path"
+  for segment in "${segments[@]}"; do
+    case "$segment" in
+      ""|".")
+        continue
+        ;;
+      "..")
+        if [[ "${#collapsed[@]}" -gt 0 ]]; then
+          unset 'collapsed[${#collapsed[@]}-1]'
+        fi
+        ;;
+      *)
+        collapsed+=("$segment")
+        ;;
+    esac
+  done
+  if [[ "${#collapsed[@]}" -eq 0 ]]; then
+    printf '/\n'
+  else
+    local IFS='/'
+    printf '/%s\n' "${collapsed[*]}"
+  fi
+}
+
+path_overlaps() {
+  local left="$1"
+  local right="$2"
+  [[ "$left" == "$right" || "$left" == "$right"/* || "$right" == "$left"/* ]]
+}
+
+assert_safe_install_root() {
+  local install_root="$1"
+  local caller_parent
+  caller_parent="$(canonicalize_path "$CALLER_CWD/..")"
+
+  if [[ "$install_root" == "/" ]]; then
+    echo "unsafe install root: refusing to install into /" >&2
+    exit 1
+  fi
+
+  if [[ "$install_root" == "$CALLER_CWD" || "$install_root" == "$caller_parent" ]]; then
+    echo "unsafe install root: refusing to install into the caller working directory or its parent" >&2
+    exit 1
+  fi
+
+  if path_overlaps "$install_root" "$REPO_ROOT"; then
+    echo "unsafe install root: destination must not overlap the repository" >&2
+    exit 1
+  fi
+}
+
+resolve_target_install_root() {
+  case "$TARGET_MODE" in
+    codex)
+      if [[ -n "${CODEX_HOME:-}" ]]; then
+        printf '%s/skills/loopy-gen-plan\n' "$CODEX_HOME"
+      else
+        [[ -n "${HOME:-}" ]] || {
+          echo "HOME is required when CODEX_HOME is not set for the codex install target" >&2
+          exit 1
+        }
+        printf '%s/.codex/skills/loopy-gen-plan\n' "$HOME"
+      fi
+      ;;
+    claude)
+      [[ -n "${HOME:-}" ]] || {
+        echo "HOME is required for the claude install target" >&2
+        exit 1
+      }
+      printf '%s/.claude/skills/loopy-gen-plan\n' "$HOME"
+      ;;
+    *)
+      echo "unknown installer target: $TARGET_MODE" >&2
+      usage >&2
+      exit 1
+      ;;
   esac
 }
 
@@ -105,22 +192,11 @@ if [[ -n "$POSITIONAL_PATH" ]]; then
 elif [[ -n "$INSTALL_ROOT" ]]; then
   INSTALL_ROOT="$(normalize_install_root "$INSTALL_ROOT")"
 else
-  case "$TARGET_MODE" in
-    codex)
-      INSTALL_ROOT="${CODEX_HOME:-$HOME/.codex}/skills/loopy-gen-plan"
-      ;;
-    claude)
-      INSTALL_ROOT="$HOME/.claude/skills/loopy-gen-plan"
-      ;;
-    *)
-      echo "unknown installer target: $TARGET_MODE" >&2
-      usage >&2
-      exit 1
-      ;;
-  esac
+  INSTALL_ROOT="$(resolve_target_install_root)"
 fi
 
 INSTALL_ROOT="$(normalize_install_root "$INSTALL_ROOT")"
+assert_safe_install_root "$INSTALL_ROOT"
 
 BUILD_PROFILE="${CARGO_BUILD_PROFILE:-debug}"
 BUILD_FLAGS=()

@@ -284,6 +284,85 @@ fn install_script_rejects_empty_positional_install_root() -> Result<()> {
 }
 
 #[test]
+fn install_script_rejects_unsafe_install_roots() -> Result<()> {
+    let workspace = support::workspace()?;
+    let repo_overlapping_path = repo_root().join(format!(
+        "tmp-gen-plan-unsafe-install-{}",
+        workspace
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("workspace fixture name should be utf-8")?
+    ));
+    let cases = [
+        (
+            workspace.path().to_path_buf(),
+            vec![OsString::from("--path"), OsString::from(".")],
+        ),
+        (workspace.path().to_path_buf(), vec![OsString::from("..")]),
+        (
+            workspace.path().to_path_buf(),
+            vec![
+                OsString::from("--path"),
+                repo_overlapping_path.into_os_string(),
+            ],
+        ),
+    ];
+
+    for (current_dir, args) in cases {
+        let output = run_installer(
+            &current_dir,
+            &args,
+            &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+            &[],
+        )?;
+        assert_installer_failure_contains(
+            &output,
+            "unsafe install root",
+            "unsafe install root should fail cleanly",
+        )?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn install_script_requires_home_for_default_codex_target_when_codex_home_is_unset() -> Result<()> {
+    let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &["CODEX_HOME", "HOME"],
+    )?;
+
+    assert_installer_failure_contains(
+        &output,
+        "HOME is required when CODEX_HOME is not set for the codex install target",
+        "default codex target should fail cleanly when HOME is missing",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn install_script_requires_home_for_claude_target() -> Result<()> {
+    let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[OsString::from("--target"), OsString::from("claude")],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &["CODEX_HOME", "HOME"],
+    )?;
+
+    assert_installer_failure_contains(
+        &output,
+        "HOME is required for the claude install target",
+        "claude target should fail cleanly when HOME is missing",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn install_script_supports_target_claude() -> Result<()> {
     let workspace = support::workspace()?;
     let home = workspace.path().join("home");
@@ -396,6 +475,27 @@ fn assert_installer_success(output: &Output, context: &str) -> Result<()> {
             "{context} failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn assert_installer_failure_contains(
+    output: &Output,
+    expected_stderr: &str,
+    context: &str,
+) -> Result<()> {
+    if output.status.success() {
+        bail!(
+            "{context}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stderr = String::from_utf8(output.stderr.clone())?;
+    if !stderr.contains(expected_stderr) {
+        bail!(
+            "{context}\nexpected stderr to contain `{expected_stderr}`\nactual stderr:\n{stderr}"
         );
     }
     Ok(())
