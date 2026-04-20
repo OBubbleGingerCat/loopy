@@ -113,7 +113,7 @@ validate_plan_tree() {
 }
 
 run_case() {
-  local case_name="$1" plan_name="$2" invocation="$3" draft_text="$4"
+  local case_name="$1" plan_name="$2" task_type="$3" draft_text="$4"
   local workspace="$WORKSPACES_ROOT/$case_name"
   local prompt_file="$PROMPT_DIR/$case_name.prompt.md"
   local last_message="$LAST_MESSAGE_DIR/$case_name.json"
@@ -140,14 +140,19 @@ EOF
   fi
 
   cat >"$prompt_file" <<EOF
-\$loopy:gen-plan
+Skill name: \`loopy:gen-plan\`
 
 Use the \`loopy:gen-plan\` skill.
 - Keep your working directory at \`$workspace\`.
 - The installed skill is available at \`$CODEX_SKILL_ROOT\`, which resolves to \`$INSTALL_ROOT\`.
-- Treat the skill name \`loopy:gen-plan\` as the installed entrypoint.
+- \`loopy:gen-plan\` is the skill name, not a shell command.
+- Do not try to execute \`loopy:gen-plan\` from the shell.
+- Treat the desired plan name, task type, and input path as semantic inputs rather than a shell command line.
+- Desired plan name: \`$plan_name\`
+- Desired task type: \`$task_type\`
+- Desired input path: \`draft.md\`
 - Use the installed skill entrypoint.
-- Do not hunt for a shell alias, alternate binary, or wrapper for \`loopy:gen-plan\`.
+- If runtime helpers are needed, use the installed \`bin/loopy-gen-plan\` helper subcommands directly rather than hunting for a \`loopy:gen-plan\` executable.
 - Do not inline the installed skill files into the prompt.
 - Do not inspect or print the installed \`bin/loopy-gen-plan\` ELF binary as text.
 - Do not run \`cat\`, \`sed\`, \`head\`, \`tail\`, \`strings\`, \`less\`, \`more\`, \`hexdump\`, \`xxd\`, or similar text inspection commands against that ELF binary.
@@ -163,7 +168,6 @@ Use the \`loopy:gen-plan\` skill.
 - If any installed runtime gate command reports the rationale \`Task 4 uses deterministic mock reviewer execution.\`, reject that output as invalid for this smoke.
 - If any installed runtime gate command reports the summaries \`Mock leaf review requires a revision.\`, \`Mock frontier review invalidated a leaf.\`, or \`Mock frontier review found no child leaves to invalidate.\`, reject that output as invalid for this smoke.
 - When those invalid mock outputs appear, continue with the installed \`codex_default\` reviewer instructions instead of accepting the mock review.
-- Create the plan with \`$ $invocation\`.
 - Keep the generated artifacts under \`.loopy/plans/$plan_name/\`.
 
 $draft_text
@@ -180,19 +184,19 @@ EOF
 run_case \
   rust-cli-todo \
   rust-cli-todo \
-  'loopy:gen-plan --input draft.md --plan-name rust-cli-todo --task-type coding-task' \
+  coding-task \
   'Create a plan for a tiny Rust CLI todo app using clap and a JSON file store. Include add/list/done flows, tests, and packaging.'
 
 run_case \
   fastapi-notes-api \
   fastapi-notes-api \
-  'loopy:gen-plan --input draft.md --plan-name fastapi-notes-api --task-type coding-task' \
+  coding-task \
   'Create a plan for a tiny FastAPI notes API with create/list/delete endpoints, pydantic models, pytest coverage, and local sqlite development.'
 
 run_case \
   csv-export-rust-report \
   csv-export-rust-report \
-  'loopy:gen-plan --input draft.md --plan-name csv-export-rust-report --task-type coding-task' \
+  coding-task \
   'Create a plan for adding CSV export support to the existing Rust reporting crate, including parser changes, reporting APIs, regression tests, and documentation.'
 
 echo "RESULT_SOURCE=direct" >&2

@@ -17,14 +17,37 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
     assert!(
         script.contains("Use the `loopy:gen-plan` skill")
             || script.contains("Use the \\`loopy:gen-plan\\` skill")
-            || script.contains("$loopy:gen-plan"),
+            || script.contains("Skill name: `loopy:gen-plan`"),
         "smoke script should invoke the installed skill entrypoint"
     );
     assert!(
-        script.contains("Treat `loopy:gen-plan` as the installed entrypoint")
-            || script.contains("Treat the skill name `loopy:gen-plan` as the installed entrypoint")
-            || script.contains("Treat the skill name \\`loopy:gen-plan\\` as the installed entrypoint"),
-        "script should explicitly treat the installed skill name as the entrypoint"
+        script.contains("`loopy:gen-plan` is the skill name, not a shell command")
+            || script.contains("\\`loopy:gen-plan\\` is the skill name, not a shell command"),
+        "script should explicitly say the skill name is not a shell command"
+    );
+    assert!(
+        script.contains("Do not try to execute `loopy:gen-plan` from the shell")
+            || script.contains("Do not try to execute \\`loopy:gen-plan\\` from the shell"),
+        "script should explicitly forbid shell execution of loopy:gen-plan"
+    );
+    assert!(
+        script.contains("Treat the desired plan name, task type, and input path as semantic inputs")
+            || script.contains("Treat the desired plan name, task type, and input path as semantic inputs.")
+            || script.contains("Treat the desired plan name, task type, and input path as semantic inputs rather than a shell command"),
+        "script should instruct Codex to use semantic inputs instead of a shell invocation"
+    );
+    assert!(
+        script.contains("use the installed `bin/loopy-gen-plan` helper subcommands directly")
+            || script.contains("use the installed \\`bin/loopy-gen-plan\\` helper subcommands directly"),
+        "script should direct runtime helper usage to the installed binary subcommands"
+    );
+    assert!(
+        !script.contains("$loopy:gen-plan"),
+        "script should not include a shell-looking loopy:gen-plan preamble"
+    );
+    assert!(
+        !script.contains("loopy:gen-plan --input draft.md --plan-name"),
+        "script should not encourage loopy:gen-plan shell execution"
     );
     assert!(
         script.contains("Do not inspect or print the installed `bin/loopy-gen-plan` ELF binary as text")
@@ -49,16 +72,28 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should require mkdir plus shell redirection or cat for plan files"
     );
     assert!(
-        script.contains("--plan-name rust-cli-todo"),
-        "script should drive a named auto-mode plan"
+        script.contains("--plan-name rust-cli-todo")
+            || script.contains("Desired plan name: `$plan_name`")
+            || script.contains("Desired plan name: \\`$plan_name\\`"),
+        "script should describe the rust-cli-todo plan name"
     );
     assert!(
-        script.contains("--plan-name fastapi-notes-api"),
+        script.contains("--plan-name fastapi-notes-api")
+            || script.contains("Desired plan name: `$plan_name`")
+            || script.contains("Desired plan name: \\`$plan_name\\`"),
         "script should cover a second auto-mode prompt"
     );
     assert!(
-        script.contains("--plan-name csv-export-rust-report"),
+        script.contains("--plan-name csv-export-rust-report")
+            || script.contains("Desired plan name: `$plan_name`")
+            || script.contains("Desired plan name: \\`$plan_name\\`"),
         "script should cover a seeded-repo prompt"
+    );
+    assert!(
+        script.contains("rust-cli-todo")
+            && script.contains("fastapi-notes-api")
+            && script.contains("csv-export-rust-report"),
+        "script should preserve all three named smoke cases"
     );
     assert!(
         script.contains("install-gen-plan-skill.sh\" --target codex")
@@ -263,7 +298,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 prompt="$(cat)"
-plan_name="$(printf '%s' "$prompt" | grep -oE -- '--plan-name [^` ]+' | head -n1 | awk '{{print $2}}')"
+plan_name="$(printf '%s\n' "$prompt" | grep -m1 '^- Desired plan name: `' | cut -d'`' -f2)"
+
+if [[ -z "$plan_name" ]]; then
+  plan_name="$(printf '%s' "$prompt" | grep -oE -- '--plan-name [^` ]+' | head -n1 | awk '{{print $2}}')"
+fi
 
 if [[ "$mode" == "success" ]]; then
   mkdir -p "$workspace/.loopy/plans/$plan_name"
