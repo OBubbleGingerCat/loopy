@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 fn install_script_copies_required_gen_plan_assets_with_positional_path() -> Result<()> {
     let workspace = support::workspace()?;
     support::assert_dir_exists(workspace.path());
-    let install_root = workspace.path().join("installed-skill");
+    let install_root = workspace.path().join("installed-skill/loopy-gen-plan");
 
     let output = run_installer(
         repo_root(),
@@ -307,6 +307,13 @@ fn install_script_rejects_unsafe_install_roots() -> Result<()> {
                 repo_overlapping_path.into_os_string(),
             ],
         ),
+        (
+            workspace.path().to_path_buf(),
+            vec![
+                OsString::from("--path"),
+                workspace.path().join("container/skills").into_os_string(),
+            ],
+        ),
     ];
 
     for (current_dir, args) in cases {
@@ -323,6 +330,27 @@ fn install_script_rejects_unsafe_install_roots() -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_symlinked_custom_roots_that_overlap_the_repo() -> Result<()> {
+    let workspace = support::workspace()?;
+    let symlink_path = workspace.path().join("repo-link");
+    std::os::unix::fs::symlink(repo_root(), &symlink_path)?;
+
+    let output = run_installer(
+        workspace.path(),
+        &[symlink_path.join("loopy-gen-plan").into_os_string()],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &[],
+    )?;
+
+    assert_installer_failure_contains(
+        &output,
+        "unsafe install root",
+        "symlinked repo-overlapping install roots should fail cleanly",
+    )?;
     Ok(())
 }
 
@@ -358,6 +386,70 @@ fn install_script_requires_home_for_claude_target() -> Result<()> {
         &output,
         "HOME is required for the claude install target",
         "claude target should fail cleanly when HOME is missing",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_duplicate_target_flags() -> Result<()> {
+    let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[
+            OsString::from("--target"),
+            OsString::from("codex"),
+            OsString::from("--target"),
+            OsString::from("claude"),
+        ],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &[],
+    )?;
+
+    assert_installer_failure_contains(
+        &output,
+        "conflicting install selectors: --target specified more than once",
+        "duplicate --target should fail cleanly",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_duplicate_path_flags() -> Result<()> {
+    let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[
+            OsString::from("--path"),
+            workspace.path().join("first/loopy-gen-plan").into_os_string(),
+            OsString::from("--path"),
+            workspace.path().join("second/loopy-gen-plan").into_os_string(),
+        ],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &[],
+    )?;
+
+    assert_installer_failure_contains(
+        &output,
+        "conflicting install selectors: --path specified more than once",
+        "duplicate --path should fail cleanly",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_unknown_target_values() -> Result<()> {
+    let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[OsString::from("--target"), OsString::from("bogus")],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &[],
+    )?;
+
+    assert_installer_failure_contains(
+        &output,
+        "unknown installer target: bogus",
+        "unknown target value should fail cleanly",
     )?;
     Ok(())
 }

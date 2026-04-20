@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 CALLER_CWD="$(pwd -P)"
 
 TARGET_MODE="codex"
@@ -10,6 +10,7 @@ TARGET_EXPLICIT=0
 POSITIONAL_PATH=""
 INSTALL_ROOT=""
 PATH_EXPLICIT=0
+CUSTOM_INSTALL_ROOT=0
 
 usage() {
   cat <<'EOF'
@@ -132,6 +133,29 @@ canonicalize_path() {
   fi
 }
 
+resolve_real_install_root() {
+  local raw_path="$1"
+  local current="$raw_path"
+  local -a suffix=()
+  local part
+  while [[ ! -e "$current" ]]; do
+    suffix=("$(basename "$current")" "${suffix[@]}")
+    current="$(dirname "$current")"
+  done
+
+  [[ -d "$current" ]] || {
+    echo "unsafe install root: existing ancestor is not a directory" >&2
+    exit 1
+  }
+
+  local resolved
+  resolved="$(cd -P "$current" && pwd -P)"
+  for part in "${suffix[@]}"; do
+    resolved="$resolved/$part"
+  done
+  canonicalize_path "$resolved"
+}
+
 path_overlaps() {
   local left="$1"
   local right="$2"
@@ -140,20 +164,27 @@ path_overlaps() {
 
 assert_safe_install_root() {
   local install_root="$1"
-  local caller_parent
-  caller_parent="$(canonicalize_path "$CALLER_CWD/..")"
+  local install_root_real
+  local caller_parent_real
+  install_root_real="$(resolve_real_install_root "$install_root")"
+  caller_parent_real="$(resolve_real_install_root "$CALLER_CWD/..")"
 
-  if [[ "$install_root" == "/" ]]; then
+  if [[ "$CUSTOM_INSTALL_ROOT" == "1" && "$(basename "$install_root")" != "loopy-gen-plan" ]]; then
+    echo "unsafe install root: custom install roots must end with loopy-gen-plan" >&2
+    exit 1
+  fi
+
+  if [[ "$install_root_real" == "/" ]]; then
     echo "unsafe install root: refusing to install into /" >&2
     exit 1
   fi
 
-  if [[ "$install_root" == "$CALLER_CWD" || "$install_root" == "$caller_parent" ]]; then
+  if [[ "$install_root_real" == "$CALLER_CWD" || "$install_root_real" == "$caller_parent_real" ]]; then
     echo "unsafe install root: refusing to install into the caller working directory or its parent" >&2
     exit 1
   fi
 
-  if path_overlaps "$install_root" "$REPO_ROOT"; then
+  if path_overlaps "$install_root_real" "$REPO_ROOT"; then
     echo "unsafe install root: destination must not overlap the repository" >&2
     exit 1
   fi
@@ -188,8 +219,10 @@ resolve_target_install_root() {
 }
 
 if [[ -n "$POSITIONAL_PATH" ]]; then
+  CUSTOM_INSTALL_ROOT=1
   INSTALL_ROOT="$(normalize_install_root "$POSITIONAL_PATH")"
 elif [[ -n "$INSTALL_ROOT" ]]; then
+  CUSTOM_INSTALL_ROOT=1
   INSTALL_ROOT="$(normalize_install_root "$INSTALL_ROOT")"
 else
   INSTALL_ROOT="$(resolve_target_install_root)"
