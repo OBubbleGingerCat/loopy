@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, PlannerMode,
@@ -68,34 +68,28 @@ fn main() -> Result<()> {
             task_type,
             project_directory,
         } => {
-            let _ = (
-                runtime,
-                EnsurePlanRequest {
-                    plan_name,
-                    task_type,
-                    project_directory,
-                },
-            );
-            println!("ensure-plan not implemented yet");
+            let response = runtime.ensure_plan(EnsurePlanRequest {
+                plan_name,
+                task_type,
+                project_directory,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::OpenPlan { plan_name } => {
-            let _ = (runtime, OpenPlanRequest { plan_name });
-            println!("open-plan not implemented yet");
+            let response = runtime.open_plan(OpenPlanRequest { plan_name })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::EnsureNodeId {
             plan_id,
             relative_path,
             parent_relative_path,
         } => {
-            let _ = (
-                runtime,
-                EnsureNodeIdRequest {
-                    plan_id,
-                    relative_path,
-                    parent_relative_path,
-                },
-            );
-            println!("ensure-node-id not implemented yet");
+            let response = runtime.ensure_node_id(EnsureNodeIdRequest {
+                plan_id,
+                relative_path,
+                parent_relative_path,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::RunLeafReviewGate {
             plan_id,
