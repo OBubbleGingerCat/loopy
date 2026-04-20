@@ -25,6 +25,7 @@ pub(crate) fn run_leaf_review_gate(
         planner_mode,
     } = request;
     require_node(connection, &plan_id, &node_id, "node_id")?;
+    require_leaf_review_eligible_node(connection, &plan_id, &node_id)?;
     let gate_run_id = Uuid::new_v4().to_string();
 
     let response = RunLeafReviewGateResponse {
@@ -175,6 +176,32 @@ fn require_node(connection: &Connection, plan_id: &str, node_id: &str, label: &s
     if exists.is_none() {
         return Err(anyhow!(
             "{label} `{node_id}` does not exist for plan `{plan_id}`"
+        ));
+    }
+
+    Ok(())
+}
+
+fn require_leaf_review_eligible_node(
+    connection: &Connection,
+    plan_id: &str,
+    node_id: &str,
+) -> Result<()> {
+    let has_children = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM GEN_PLAN__nodes
+                 WHERE plan_id = ?1 AND parent_node_id = ?2
+             )",
+            params![plan_id, node_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .context("failed to validate leaf review node eligibility")?;
+
+    if has_children != 0 {
+        return Err(anyhow!(
+            "node_id `{node_id}` is not eligible for leaf review because it has child nodes"
         ));
     }
 

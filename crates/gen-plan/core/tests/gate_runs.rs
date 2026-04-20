@@ -93,6 +93,67 @@ fn leaf_gate_persists_a_failed_mock_review() -> Result<()> {
 }
 
 #[test]
+fn leaf_gate_rejects_non_leaf_nodes() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "leaf-non-leaf-gate".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let target = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id,
+            node_id,
+            relative_path,
+            node_name,
+            parent_node_id,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &plan.plan_id,
+            "node-leaf-gate-child",
+            "api/implement-endpoint/details.md",
+            "details.md",
+            &target.node_id,
+            "0",
+            "0",
+        ],
+    )?;
+
+    let error = runtime
+        .run_leaf_review_gate(RunLeafReviewGateRequest {
+            plan_id: plan.plan_id.clone(),
+            node_id: target.node_id.clone(),
+            planner_mode: PlannerMode::Auto,
+        })
+        .expect_err("non-leaf node should be rejected for leaf review");
+    assert!(
+        format!("{error:#}").contains("leaf review"),
+        "unexpected error: {error:#}"
+    );
+
+    let persisted_run_count: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM GEN_PLAN__leaf_gate_runs
+         WHERE plan_id = ?1 AND node_id = ?2",
+        params![&plan.plan_id, &target.node_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(persisted_run_count, 0);
+
+    Ok(())
+}
+
+#[test]
 fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -211,7 +272,74 @@ fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
 fn bootstrap_migrates_old_gate_tables_to_add_summary_columns() -> Result<()> {
     let workspace = support::workspace()?;
     let loopy_dir = workspace.path().join(".loopy");
-    fs::create_dir_all(&loopy_dir)?;
+    create_old_schema_db(&loopy_dir)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let _ = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "migration-check".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    assert_summary_columns_present_once(&loopy_dir)?;
+
+    Ok(())
+}
+
+#[test]
+fn bootstrap_repeatedly_migrates_old_gate_tables_without_duplicate_summary_columns() -> Result<()> {
+    let workspace = support::workspace()?;
+    let loopy_dir = workspace.path().join(".loopy");
+    create_old_schema_db(&loopy_dir)?;
+
+    let first_runtime = Runtime::new(workspace.path())?;
+    let _ = first_runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "migration-check-first".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    assert_summary_columns_present_once(&loopy_dir)?;
+
+    let second_runtime = Runtime::new(workspace.path())?;
+    let _ = second_runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "migration-check-second".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    assert_summary_columns_present_once(&loopy_dir)?;
+
+    Ok(())
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root should resolve")
+}
+
+fn write_dev_registry(workspace_root: &Path, gen_plan_skill_root: &Path) -> Result<()> {
+    let registry_dir = workspace_root.join("skills");
+    fs::create_dir_all(&registry_dir)?;
+    fs::write(
+        registry_dir.join("dev-registry.toml"),
+        format!(
+            r#"[[skills]]
+skill_id = "loopy:gen-plan"
+loader_id = "loopy.gen-plan.v1"
+source_root = "{}"
+binary_package = "loopy-gen-plan"
+binary_name = "loopy-gen-plan"
+internal_manifest = "gen-plan.toml"
+"#,
+            gen_plan_skill_root.display()
+        ),
+    )?;
+    Ok(())
+}
+
+fn create_old_schema_db(loopy_dir: &Path) -> Result<()> {
+    fs::create_dir_all(loopy_dir)?;
     let connection = Connection::open(loopy_dir.join("loopy.db"))?;
     connection.execute_batch(
         r#"
@@ -265,15 +393,10 @@ fn bootstrap_migrates_old_gate_tables_to_add_summary_columns() -> Result<()> {
         );
         "#,
     )?;
-    drop(connection);
+    Ok(())
+}
 
-    let runtime = Runtime::new(workspace.path())?;
-    let _ = runtime.ensure_plan(EnsurePlanRequest {
-        plan_name: "migration-check".to_owned(),
-        task_type: "coding-task".to_owned(),
-        project_directory: workspace.path().to_path_buf(),
-    })?;
-
+fn assert_summary_columns_present_once(loopy_dir: &Path) -> Result<()> {
     let connection = Connection::open(loopy_dir.join("loopy.db"))?;
     let leaf_has_summary: i64 = connection.query_row(
         "SELECT COUNT(*)
@@ -293,32 +416,5 @@ fn bootstrap_migrates_old_gate_tables_to_add_summary_columns() -> Result<()> {
     assert_eq!(leaf_has_summary, 1);
     assert_eq!(frontier_has_summary, 1);
 
-    Ok(())
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root should resolve")
-}
-
-fn write_dev_registry(workspace_root: &Path, gen_plan_skill_root: &Path) -> Result<()> {
-    let registry_dir = workspace_root.join("skills");
-    fs::create_dir_all(&registry_dir)?;
-    fs::write(
-        registry_dir.join("dev-registry.toml"),
-        format!(
-            r#"[[skills]]
-skill_id = "loopy:gen-plan"
-loader_id = "loopy.gen-plan.v1"
-source_root = "{}"
-binary_package = "loopy-gen-plan"
-binary_name = "loopy-gen-plan"
-internal_manifest = "gen-plan.toml"
-"#,
-            gen_plan_skill_root.display()
-        ),
-    )?;
     Ok(())
 }

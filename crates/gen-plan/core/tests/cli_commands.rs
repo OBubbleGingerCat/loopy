@@ -1,7 +1,11 @@
+mod support;
+
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, Runtime};
+use serde_json::Value;
 
 fn cargo_binary() -> Result<std::ffi::OsString> {
     std::env::var_os("CARGO").context("CARGO should be set by cargo test")
@@ -29,23 +33,7 @@ fn workspace_manifest() -> Result<PathBuf> {
 
 #[test]
 fn help_lists_plan_and_gate_commands() -> Result<()> {
-    let manifest_path = workspace_manifest()?;
-    let output = Command::new(cargo_binary()?)
-        .args([
-            "run",
-            "--quiet",
-            "--offline",
-            "--manifest-path",
-            manifest_path
-                .to_str()
-                .context("workspace manifest path must be utf-8")?,
-            "-p",
-            "loopy-gen-plan",
-            "--",
-            "--help",
-        ])
-        .output()
-        .context("failed to run loopy-gen-plan --help")?;
+    let output = run_cli(&["--help"], None)?;
     if !output.status.success() {
         bail!(
             "expected --help to succeed, stderr was:\n{}",
@@ -68,4 +56,110 @@ fn help_lists_plan_and_gate_commands() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[test]
+fn leaf_gate_command_prints_pretty_json() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-leaf-gate".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let output = run_cli(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "run-leaf-review-gate",
+            "--plan-id",
+            &plan.plan_id,
+            "--node-id",
+            &node.node_id,
+            "--planner-mode",
+            "auto",
+        ],
+        Some("failed to run loopy-gen-plan run-leaf-review-gate"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected gate command to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("\n  \"gate_run_id\""),
+        "expected pretty-printed JSON output, stdout was:\n{stdout}"
+    );
+    let value: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(value["passed"], Value::Bool(false));
+    assert_eq!(value["verdict"], Value::String("revise_leaf".to_owned()));
+    assert_eq!(
+        value["summary"],
+        Value::String("Mock leaf review requires a revision.".to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn invalid_planner_mode_is_rejected_for_gate_command() -> Result<()> {
+    let output = run_cli(
+        &[
+            "run-leaf-review-gate",
+            "--plan-id",
+            "demo-plan",
+            "--node-id",
+            "demo-node",
+            "--planner-mode",
+            "bogus",
+        ],
+        Some("failed to run loopy-gen-plan with invalid planner mode"),
+    )?;
+
+    assert!(
+        !output.status.success(),
+        "expected invalid planner mode to fail, stdout was:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("invalid planner_mode `bogus`: expected `manual` or `auto`"),
+        "unexpected stderr:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+fn run_cli(args: &[&str], context_message: Option<&str>) -> Result<std::process::Output> {
+    let manifest_path = workspace_manifest()?;
+    let context_message = context_message.unwrap_or("failed to run loopy-gen-plan");
+    Command::new(cargo_binary()?)
+        .args([
+            "run",
+            "--quiet",
+            "--offline",
+            "--manifest-path",
+            manifest_path
+                .to_str()
+                .context("workspace manifest path must be utf-8")?,
+            "-p",
+            "loopy-gen-plan",
+            "--",
+        ])
+        .args(args)
+        .output()
+        .with_context(|| context_message.to_owned())
 }
