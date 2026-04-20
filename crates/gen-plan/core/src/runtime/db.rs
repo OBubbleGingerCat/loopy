@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, Error as SqliteError};
 
 pub const FIXED_DB_RELATIVE_PATH: &str = ".loopy/loopy.db";
+pub(crate) const PROJECT_DIRECTORY_SOURCE_EXPLICIT: &str = "explicit";
+pub(crate) const PROJECT_DIRECTORY_SOURCE_BACKFILLED_LEGACY: &str = "backfilled_legacy";
 
 pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
     connection
@@ -13,6 +15,7 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
                 plan_name TEXT NOT NULL,
                 plan_root TEXT NOT NULL,
                 project_directory TEXT NOT NULL,
+                project_directory_source TEXT NOT NULL DEFAULT 'explicit',
                 task_type TEXT NOT NULL,
                 plan_status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -70,20 +73,29 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
             "#,
         )
         .context("failed to bootstrap gen-plan runtime schema")?;
-    ensure_column_exists(
+    let project_directory_added = ensure_column_exists(
         connection,
         "GEN_PLAN__plans",
         "project_directory",
         "TEXT NOT NULL DEFAULT ''",
     )?;
-    connection
-        .execute(
-            "UPDATE GEN_PLAN__plans
-             SET project_directory = workspace_root
-             WHERE project_directory = ''",
-            [],
-        )
-        .context("failed to backfill project_directory for migrated plans")?;
+    ensure_column_exists(
+        connection,
+        "GEN_PLAN__plans",
+        "project_directory_source",
+        "TEXT NOT NULL DEFAULT 'explicit'",
+    )?;
+    if project_directory_added {
+        connection
+            .execute(
+                "UPDATE GEN_PLAN__plans
+                 SET project_directory = workspace_root,
+                     project_directory_source = ?1
+                 WHERE project_directory = ''",
+                [PROJECT_DIRECTORY_SOURCE_BACKFILLED_LEGACY],
+            )
+            .context("failed to backfill project_directory for migrated plans")?;
+    }
     ensure_column_exists(
         connection,
         "GEN_PLAN__leaf_gate_runs",
@@ -104,12 +116,12 @@ fn ensure_column_exists(
     table_name: &str,
     column_name: &str,
     column_definition: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let alter_sql =
         format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}");
     match connection.execute(&alter_sql, []) {
-        Ok(_) => Ok(()),
-        Err(error) if is_duplicate_column_error(&error) => Ok(()),
+        Ok(_) => Ok(true),
+        Err(error) if is_duplicate_column_error(&error) => Ok(false),
         Err(error) => Err(error)
             .with_context(|| format!("failed to add {column_name} column to {table_name}")),
     }

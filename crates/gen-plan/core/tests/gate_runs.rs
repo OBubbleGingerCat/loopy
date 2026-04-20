@@ -176,16 +176,19 @@ fn leaf_gate_uses_repaired_project_directory_for_existing_plan() -> Result<()> {
     };
     assert!(result.passed);
 
-    let persisted_project_directory: String =
+    let (persisted_project_directory, persisted_project_directory_source): (String, String) =
         Connection::open(workspace.path().join(".loopy/loopy.db"))?.query_row(
-            "SELECT project_directory FROM GEN_PLAN__plans WHERE plan_id = ?1",
+            "SELECT project_directory, project_directory_source
+             FROM GEN_PLAN__plans
+             WHERE plan_id = ?1",
             params![plan.plan_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
     assert_eq!(
         persisted_project_directory,
         project_directory.display().to_string()
     );
+    assert_eq!(persisted_project_directory_source, "explicit");
 
     Ok(())
 }
@@ -814,6 +817,13 @@ fn assert_migrated_columns_present_once(loopy_dir: &Path) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
+    let plan_has_project_directory_source: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM pragma_table_info('GEN_PLAN__plans')
+         WHERE name = 'project_directory_source'",
+        [],
+        |row| row.get(0),
+    )?;
     let leaf_has_summary: i64 = connection.query_row(
         "SELECT COUNT(*)
          FROM pragma_table_info('GEN_PLAN__leaf_gate_runs')
@@ -830,6 +840,7 @@ fn assert_migrated_columns_present_once(loopy_dir: &Path) -> Result<()> {
     )?;
 
     assert_eq!(plan_has_project_directory, 1);
+    assert_eq!(plan_has_project_directory_source, 1);
     assert_eq!(leaf_has_summary, 1);
     assert_eq!(frontier_has_summary, 1);
 

@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
+use super::db::{PROJECT_DIRECTORY_SOURCE_BACKFILLED_LEGACY, PROJECT_DIRECTORY_SOURCE_EXPLICIT};
 use crate::{
     EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse,
     OpenPlanRequest, OpenPlanResponse,
@@ -44,17 +45,22 @@ pub(crate) fn ensure_plan(
 
     if let Some(existing) = select_plan(connection, workspace_root, &plan_name, plan_root)? {
         if existing.project_directory != project_directory {
-            if is_legacy_project_directory_value(&existing.project_directory, workspace_root) {
+            if existing.project_directory_source == PROJECT_DIRECTORY_SOURCE_BACKFILLED_LEGACY {
                 repair_plan_project_directory(
                     connection,
                     &existing.plan_id,
                     &project_directory,
                     current_timestamp()?,
                 )?;
-            } else {
+            } else if existing.project_directory_source == PROJECT_DIRECTORY_SOURCE_EXPLICIT {
                 return Err(anyhow!(
                     "persisted project_directory for existing plan `{plan_name}` is `{}` and cannot be redirected to `{project_directory}`",
                     existing.project_directory
+                ));
+            } else {
+                return Err(anyhow!(
+                    "persisted project_directory_source `{}` for existing plan `{plan_name}` is invalid",
+                    existing.project_directory_source
                 ));
             }
         }
@@ -77,17 +83,19 @@ pub(crate) fn ensure_plan(
                 plan_name,
                 plan_root,
                 project_directory,
+                project_directory_source,
                 task_type,
                 plan_status,
                 created_at,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 plan_id,
                 workspace_root,
                 plan_name,
                 plan_root,
                 project_directory,
+                PROJECT_DIRECTORY_SOURCE_EXPLICIT,
                 task_type,
                 ACTIVE_PLAN_STATUS,
                 timestamp,
@@ -348,9 +356,15 @@ fn repair_plan_project_directory(
         .execute(
             "UPDATE GEN_PLAN__plans
              SET project_directory = ?1,
-                 updated_at = ?2
-             WHERE plan_id = ?3",
-            params![project_directory, updated_at, plan_id],
+                 project_directory_source = ?2,
+                 updated_at = ?3
+             WHERE plan_id = ?4",
+            params![
+                project_directory,
+                PROJECT_DIRECTORY_SOURCE_EXPLICIT,
+                updated_at,
+                plan_id
+            ],
         )
         .context("failed to repair persisted project_directory for existing plan")?;
     Ok(())
@@ -365,7 +379,7 @@ fn select_plan(
     let expected_plan_root = path_string(expected_plan_root);
     let plan = connection
         .query_row(
-            "SELECT plan_id, plan_root, plan_status, task_type, project_directory
+            "SELECT plan_id, plan_root, plan_status, task_type, project_directory, project_directory_source
              FROM GEN_PLAN__plans
              WHERE workspace_root = ?1 AND plan_name = ?2",
             params![workspace_root_string(workspace_root), plan_name],
@@ -376,6 +390,7 @@ fn select_plan(
                     plan_status: row.get(2)?,
                     task_type: row.get(3)?,
                     project_directory: row.get(4)?,
+                    project_directory_source: row.get(5)?,
                 })
             },
         )
@@ -475,10 +490,6 @@ fn workspace_root_string(workspace_root: &Path) -> String {
     path_string(workspace_root)
 }
 
-fn is_legacy_project_directory_value(project_directory: &str, workspace_root: &Path) -> bool {
-    project_directory.is_empty() || project_directory == workspace_root_string(workspace_root)
-}
-
 fn normalize_project_directory(workspace_root: &Path, project_directory: &Path) -> Result<String> {
     if project_directory.as_os_str().is_empty() {
         return Err(anyhow!("project_directory must not be empty"));
@@ -510,6 +521,7 @@ struct PlanRow {
     plan_status: String,
     task_type: String,
     project_directory: String,
+    project_directory_source: String,
 }
 
 struct NodeRow {
