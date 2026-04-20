@@ -8,6 +8,10 @@ use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, PlannerMode, RunFrontierReviewGateRequest,
     RunLeafReviewGateRequest, Runtime,
 };
+use rusqlite::{params, Connection};
+
+const MOCK_LEAF_SUMMARY: &str = "Mock leaf review requires a revision.";
+const MOCK_FRONTIER_SUMMARY: &str = "Mock frontier review invalidated a leaf.";
 
 #[test]
 fn ensure_plan_resolves_default_leaf_and_frontier_reviewers() -> Result<()> {
@@ -67,8 +71,20 @@ fn leaf_gate_persists_a_failed_mock_review() -> Result<()> {
     })?;
 
     assert!(!result.passed);
+    assert!(!result.gate_run_id.is_empty());
     assert_eq!(result.verdict, "revise_leaf");
+    assert_eq!(result.summary, MOCK_LEAF_SUMMARY);
     assert_eq!(result.issues.len(), 1);
+
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    let persisted_summary: String = connection.query_row(
+        "SELECT summary
+         FROM GEN_PLAN__leaf_gate_runs
+         WHERE leaf_gate_run_id = ?1",
+        params![result.gate_run_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(persisted_summary, MOCK_LEAF_SUMMARY);
 
     Ok(())
 }
@@ -96,11 +112,23 @@ fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
     })?;
 
     assert!(!result.passed);
+    assert!(!result.gate_run_id.is_empty());
     assert_eq!(result.verdict, "revise_frontier");
+    assert_eq!(result.summary, MOCK_FRONTIER_SUMMARY);
     assert_eq!(
         result.invalidated_leaf_node_ids,
         vec!["node-leaf-1".to_owned()]
     );
+
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    let persisted_summary: String = connection.query_row(
+        "SELECT summary
+         FROM GEN_PLAN__frontier_gate_runs
+         WHERE frontier_gate_run_id = ?1",
+        params![result.gate_run_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(persisted_summary, MOCK_FRONTIER_SUMMARY);
 
     Ok(())
 }

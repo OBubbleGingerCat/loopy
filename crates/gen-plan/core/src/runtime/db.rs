@@ -42,6 +42,7 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
                 reviewer_role_id TEXT NOT NULL,
                 passed INTEGER NOT NULL,
                 verdict TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
                 issues_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(plan_id) REFERENCES GEN_PLAN__plans(plan_id) ON DELETE CASCADE,
@@ -57,6 +58,7 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
                 reviewer_role_id TEXT NOT NULL,
                 passed INTEGER NOT NULL,
                 verdict TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
                 issues_json TEXT NOT NULL,
                 invalidated_leaf_node_ids_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -67,5 +69,46 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
             "#,
         )
         .context("failed to bootstrap gen-plan runtime schema")?;
+    ensure_column_exists(
+        connection,
+        "GEN_PLAN__leaf_gate_runs",
+        "summary",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column_exists(
+        connection,
+        "GEN_PLAN__frontier_gate_runs",
+        "summary",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    Ok(())
+}
+
+fn ensure_column_exists(
+    connection: &Connection,
+    table_name: &str,
+    column_name: &str,
+    column_definition: &str,
+) -> Result<()> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .with_context(|| format!("failed to inspect schema for {table_name}"))?;
+    let has_column = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .with_context(|| format!("failed to enumerate columns for {table_name}"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to read columns for {table_name}"))?
+        .into_iter()
+        .any(|name| name == column_name);
+
+    if !has_column {
+        connection
+            .execute(
+                &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
+                [],
+            )
+            .with_context(|| format!("failed to add {column_name} column to {table_name}"))?;
+    }
+
     Ok(())
 }

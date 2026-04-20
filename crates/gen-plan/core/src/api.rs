@@ -79,8 +79,10 @@ pub struct RunLeafReviewGateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunLeafReviewGateResponse {
+    pub gate_run_id: String,
     pub passed: bool,
     pub verdict: String,
+    pub summary: String,
     pub reviewer_role_id: String,
     pub issues: Vec<ReviewIssue>,
 }
@@ -94,8 +96,10 @@ pub struct RunFrontierReviewGateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunFrontierReviewGateResponse {
+    pub gate_run_id: String,
     pub passed: bool,
     pub verdict: String,
+    pub summary: String,
     pub reviewer_role_id: String,
     pub issues: Vec<ReviewIssue>,
     pub invalidated_leaf_node_ids: Vec<String>,

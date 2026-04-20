@@ -10,6 +10,8 @@ use crate::{
 };
 
 const MOCK_REVIEWER_ROLE_ID: &str = "mock";
+const MOCK_LEAF_SUMMARY: &str = "Mock leaf review requires a revision.";
+const MOCK_FRONTIER_SUMMARY: &str = "Mock frontier review invalidated a leaf.";
 
 pub(crate) fn run_leaf_review_gate(
     connection: &Connection,
@@ -21,17 +23,20 @@ pub(crate) fn run_leaf_review_gate(
         planner_mode,
     } = request;
     require_node(connection, &plan_id, &node_id, "node_id")?;
+    let gate_run_id = Uuid::new_v4().to_string();
 
     let response = RunLeafReviewGateResponse {
+        gate_run_id: gate_run_id.clone(),
         passed: false,
         verdict: "revise_leaf".to_owned(),
+        summary: MOCK_LEAF_SUMMARY.to_owned(),
         reviewer_role_id: MOCK_REVIEWER_ROLE_ID.to_owned(),
         issues: vec![ReviewIssue {
             issue_kind: "mock_leaf_issue".to_owned(),
             target_node_id: Some(node_id.clone()),
             target_parent_node_id: None,
             target_node_ids: None,
-            summary: "Mock leaf review requires a revision.".to_owned(),
+            summary: MOCK_LEAF_SUMMARY.to_owned(),
             rationale: "Task 4 uses deterministic mock reviewer execution.".to_owned(),
             expected_revision: "Revise the leaf before continuing.".to_owned(),
             question_for_user: None,
@@ -49,17 +54,19 @@ pub(crate) fn run_leaf_review_gate(
                 reviewer_role_id,
                 passed,
                 verdict,
+                summary,
                 issues_json,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                Uuid::new_v4().to_string(),
+                &gate_run_id,
                 &plan_id,
                 &node_id,
                 planner_mode.as_str(),
                 &response.reviewer_role_id,
                 response.passed,
                 &response.verdict,
+                &response.summary,
                 serde_json::to_string(&response.issues)
                     .context("failed to serialize leaf gate issues")?,
                 current_timestamp()?,
@@ -81,17 +88,20 @@ pub(crate) fn run_frontier_review_gate(
     } = request;
     require_node(connection, &plan_id, &parent_node_id, "parent_node_id")?;
 
+    let gate_run_id = Uuid::new_v4().to_string();
     let invalidated_leaf_node_ids = vec!["node-leaf-1".to_owned()];
     let response = RunFrontierReviewGateResponse {
+        gate_run_id: gate_run_id.clone(),
         passed: false,
         verdict: "revise_frontier".to_owned(),
+        summary: MOCK_FRONTIER_SUMMARY.to_owned(),
         reviewer_role_id: MOCK_REVIEWER_ROLE_ID.to_owned(),
         issues: vec![ReviewIssue {
             issue_kind: "mock_frontier_issue".to_owned(),
             target_node_id: None,
             target_parent_node_id: Some(parent_node_id.clone()),
             target_node_ids: Some(invalidated_leaf_node_ids.clone()),
-            summary: "Mock frontier review invalidated a leaf.".to_owned(),
+            summary: MOCK_FRONTIER_SUMMARY.to_owned(),
             rationale: "Task 4 uses deterministic mock reviewer execution.".to_owned(),
             expected_revision: "Revise the frontier and regenerate the invalidated leaf."
                 .to_owned(),
@@ -111,18 +121,20 @@ pub(crate) fn run_frontier_review_gate(
                 reviewer_role_id,
                 passed,
                 verdict,
+                summary,
                 issues_json,
                 invalidated_leaf_node_ids_json,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
-                Uuid::new_v4().to_string(),
+                &gate_run_id,
                 &plan_id,
                 &parent_node_id,
                 planner_mode.as_str(),
                 &response.reviewer_role_id,
                 response.passed,
                 &response.verdict,
+                &response.summary,
                 serde_json::to_string(&response.issues)
                     .context("failed to serialize frontier gate issues")?,
                 serde_json::to_string(&response.invalidated_leaf_node_ids)
