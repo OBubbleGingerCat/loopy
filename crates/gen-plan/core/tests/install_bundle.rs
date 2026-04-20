@@ -93,6 +93,41 @@ fn install_script_supports_target_codex() -> Result<()> {
 }
 
 #[test]
+fn install_script_resolves_relative_codex_home_from_caller_cwd() -> Result<()> {
+    let workspace = support::workspace()?;
+    let caller_cwd = workspace.path().join("caller-codex");
+    fs::create_dir_all(&caller_cwd)?;
+    let relative_home = format!(
+        "rel-codex-{}/codex-home",
+        workspace
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("workspace fixture name should be utf-8")?
+    );
+    let install_root = caller_cwd.join(&relative_home).join("skills/loopy-gen-plan");
+
+    let output = run_installer(
+        &caller_cwd,
+        &[OsString::from("--target"), OsString::from("codex")],
+        &[
+            ("CARGO_NET_OFFLINE", OsString::from("true")),
+            ("CODEX_HOME", OsString::from(&relative_home)),
+        ],
+        &[],
+    )?;
+    assert_installer_success(&output, "install-gen-plan-skill.sh --target codex with relative CODEX_HOME")?;
+
+    assert_eq!(installed_root_from_output(&output)?, install_root);
+    assert_installed_bundle(&install_root)?;
+    assert!(
+        !repo_root().join(&relative_home).exists(),
+        "relative CODEX_HOME must not be resolved from the repo root"
+    );
+    Ok(())
+}
+
+#[test]
 fn install_script_supports_target_claude() -> Result<()> {
     let workspace = support::workspace()?;
     let home = workspace.path().join("home");
@@ -111,6 +146,43 @@ fn install_script_supports_target_claude() -> Result<()> {
 
     assert_eq!(installed_root_from_output(&output)?, install_root);
     assert_installed_bundle(&install_root)?;
+    Ok(())
+}
+
+#[test]
+fn install_script_resolves_relative_home_for_claude_target_from_caller_cwd() -> Result<()> {
+    let workspace = support::workspace()?;
+    let caller_cwd = workspace.path().join("caller-claude");
+    fs::create_dir_all(&caller_cwd)?;
+    let relative_home = format!(
+        "rel-home-{}/home",
+        workspace
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("workspace fixture name should be utf-8")?
+    );
+    let install_root = caller_cwd
+        .join(&relative_home)
+        .join(".claude/skills/loopy-gen-plan");
+
+    let output = run_installer(
+        &caller_cwd,
+        &[OsString::from("--target"), OsString::from("claude")],
+        &[
+            ("CARGO_NET_OFFLINE", OsString::from("true")),
+            ("HOME", OsString::from(&relative_home)),
+        ],
+        &["CODEX_HOME"],
+    )?;
+    assert_installer_success(&output, "install-gen-plan-skill.sh --target claude with relative HOME")?;
+
+    assert_eq!(installed_root_from_output(&output)?, install_root);
+    assert_installed_bundle(&install_root)?;
+    assert!(
+        !repo_root().join(&relative_home).exists(),
+        "relative HOME must not be resolved from the repo root"
+    );
     Ok(())
 }
 
@@ -220,7 +292,9 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
     for required_snippet in [
         "Every candidate leaf must pass `leaf review gate`",
         "Every frontier parent expansion must pass `frontier review gate`",
+        "send the review-driven revision back to the user",
         "If review-driven changes altered the structure, the Agent MUST ask the user to re-confirm the revised expansion before writing it or continuing.",
+        "pause only for true user-owned decisions that cannot be inferred safely",
     ] {
         assert!(
             installed_skill.contains(required_snippet),

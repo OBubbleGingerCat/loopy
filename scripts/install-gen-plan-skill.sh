@@ -12,10 +12,13 @@ INSTALL_ROOT=""
 usage() {
   cat <<'EOF'
 Usage:
+  scripts/install-gen-plan-skill.sh
   scripts/install-gen-plan-skill.sh --target codex
   scripts/install-gen-plan-skill.sh --target claude
   scripts/install-gen-plan-skill.sh --path /custom/location/loopy-gen-plan
   scripts/install-gen-plan-skill.sh /custom/location/loopy-gen-plan
+
+With no arguments, installs to the default Codex skill location.
 EOF
 }
 
@@ -65,7 +68,7 @@ if [[ -n "$POSITIONAL_PATH" ]]; then
   INSTALL_ROOT="$(normalize_install_root "$POSITIONAL_PATH")"
 elif [[ -n "$INSTALL_ROOT" ]]; then
   INSTALL_ROOT="$(normalize_install_root "$INSTALL_ROOT")"
-elif [[ -z "$INSTALL_ROOT" ]]; then
+else
   case "$TARGET_MODE" in
     codex)
       INSTALL_ROOT="${CODEX_HOME:-$HOME/.codex}/skills/loopy-gen-plan"
@@ -80,6 +83,8 @@ elif [[ -z "$INSTALL_ROOT" ]]; then
       ;;
   esac
 fi
+
+INSTALL_ROOT="$(normalize_install_root "$INSTALL_ROOT")"
 
 BUILD_PROFILE="${CARGO_BUILD_PROFILE:-debug}"
 BUILD_FLAGS=()
