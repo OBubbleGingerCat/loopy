@@ -32,6 +32,23 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should forbid inspecting the bundled ELF binary as text"
     );
     assert!(
+        script.contains("Do not use `apply_patch` in this smoke.")
+            || script.contains("Do not use \\`apply_patch\\` in this smoke."),
+        "script should explicitly forbid apply_patch for this smoke"
+    );
+    assert!(
+        script.contains("Write plan artifacts with shell file-writing commands")
+            || script.contains("Write the plan artifacts with shell file-writing commands")
+            || script.contains("Write plan artifacts with shell commands"),
+        "script should require shell-based file writing for plan artifacts"
+    );
+    assert!(
+        script.contains("Use `mkdir -p`, shell redirection, and `cat > file` style commands")
+            || script.contains("Use \\`mkdir -p\\`, shell redirection, and \\`cat > file\\` style commands")
+            || script.contains("Use shell redirection / mkdir / cat > file style commands instead."),
+        "script should require mkdir plus shell redirection or cat for plan files"
+    );
+    assert!(
         script.contains("--plan-name rust-cli-todo"),
         "script should drive a named auto-mode plan"
     );

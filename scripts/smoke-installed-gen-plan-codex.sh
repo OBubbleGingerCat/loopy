@@ -151,6 +151,10 @@ Use the \`loopy:gen-plan\` skill.
 - Do not inline the installed skill files into the prompt.
 - Do not inspect or print the installed \`bin/loopy-gen-plan\` ELF binary as text.
 - Do not run \`cat\`, \`sed\`, \`head\`, \`tail\`, \`strings\`, \`less\`, \`more\`, \`hexdump\`, \`xxd\`, or similar text inspection commands against that ELF binary.
+- Do not use \`apply_patch\` in this smoke.
+- Write the plan artifacts with shell file-writing commands.
+- Use \`mkdir -p\`, shell redirection, and \`cat > file\` style commands instead.
+- If you need to update any artifact under \`.loopy/plans/$plan_name/\`, rewrite the whole file with shell commands instead of patching it.
 - Use auto mode.
 - Continue automatically until the plan is ready.
 - Require real reviewer behavior only.
