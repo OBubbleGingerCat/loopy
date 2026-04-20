@@ -12,6 +12,7 @@ use rusqlite::{params, Connection};
 
 const MOCK_LEAF_SUMMARY: &str = "Mock leaf review requires a revision.";
 const MOCK_FRONTIER_SUMMARY: &str = "Mock frontier review invalidated a leaf.";
+const FRONTIER_CHILD_NODE_ID: &str = "node-frontier-child";
 
 #[test]
 fn ensure_plan_resolves_default_leaf_and_frontier_reviewers() -> Result<()> {
@@ -104,10 +105,31 @@ fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
         relative_path: "backend/backend.md".to_owned(),
         parent_relative_path: None,
     })?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id,
+            node_id,
+            relative_path,
+            node_name,
+            parent_node_id,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &plan.plan_id,
+            FRONTIER_CHILD_NODE_ID,
+            "backend/implement-endpoint.md",
+            "implement-endpoint.md",
+            &parent.node_id,
+            "0",
+            "0",
+        ],
+    )?;
 
     let result = runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
-        plan_id: plan.plan_id,
-        parent_node_id: parent.node_id,
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: parent.node_id.clone(),
         planner_mode: PlannerMode::Auto,
     })?;
 
@@ -117,10 +139,17 @@ fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
     assert_eq!(result.summary, MOCK_FRONTIER_SUMMARY);
     assert_eq!(
         result.invalidated_leaf_node_ids,
-        vec!["node-leaf-1".to_owned()]
+        vec![FRONTIER_CHILD_NODE_ID.to_owned()]
     );
+    let existing_invalidated_leaf_count: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM GEN_PLAN__nodes
+         WHERE plan_id = ?1 AND parent_node_id = ?2 AND node_id = ?3",
+        params![&plan.plan_id, &parent.node_id, FRONTIER_CHILD_NODE_ID],
+        |row| row.get(0),
+    )?;
+    assert_eq!(existing_invalidated_leaf_count, 1);
 
-    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
     let persisted_summary: String = connection.query_row(
         "SELECT summary
          FROM GEN_PLAN__frontier_gate_runs
@@ -129,6 +158,95 @@ fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(persisted_summary, MOCK_FRONTIER_SUMMARY);
+
+    Ok(())
+}
+
+#[test]
+fn bootstrap_migrates_old_gate_tables_to_add_summary_columns() -> Result<()> {
+    let workspace = support::workspace()?;
+    let loopy_dir = workspace.path().join(".loopy");
+    fs::create_dir_all(&loopy_dir)?;
+    let connection = Connection::open(loopy_dir.join("loopy.db"))?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE GEN_PLAN__plans (
+            plan_id TEXT PRIMARY KEY,
+            workspace_root TEXT NOT NULL,
+            plan_name TEXT NOT NULL,
+            plan_root TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            plan_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(workspace_root, plan_name)
+        );
+
+        CREATE TABLE GEN_PLAN__nodes (
+            plan_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            parent_node_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(plan_id, node_id),
+            UNIQUE(plan_id, relative_path)
+        );
+
+        CREATE TABLE GEN_PLAN__leaf_gate_runs (
+            leaf_gate_run_id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            planner_mode TEXT NOT NULL,
+            reviewer_role_id TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            verdict TEXT NOT NULL,
+            issues_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE GEN_PLAN__frontier_gate_runs (
+            frontier_gate_run_id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            parent_node_id TEXT NOT NULL,
+            planner_mode TEXT NOT NULL,
+            reviewer_role_id TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            verdict TEXT NOT NULL,
+            issues_json TEXT NOT NULL,
+            invalidated_leaf_node_ids_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        "#,
+    )?;
+    drop(connection);
+
+    let runtime = Runtime::new(workspace.path())?;
+    let _ = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "migration-check".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let connection = Connection::open(loopy_dir.join("loopy.db"))?;
+    let leaf_has_summary: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM pragma_table_info('GEN_PLAN__leaf_gate_runs')
+         WHERE name = 'summary'",
+        [],
+        |row| row.get(0),
+    )?;
+    let frontier_has_summary: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM pragma_table_info('GEN_PLAN__frontier_gate_runs')
+         WHERE name = 'summary'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    assert_eq!(leaf_has_summary, 1);
+    assert_eq!(frontier_has_summary, 1);
 
     Ok(())
 }

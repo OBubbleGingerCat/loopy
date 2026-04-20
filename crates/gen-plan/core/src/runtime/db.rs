@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, Error as SqliteError};
 
 pub const FIXED_DB_RELATIVE_PATH: &str = ".loopy/loopy.db";
 
@@ -90,25 +90,21 @@ fn ensure_column_exists(
     column_name: &str,
     column_definition: &str,
 ) -> Result<()> {
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({table_name})"))
-        .with_context(|| format!("failed to inspect schema for {table_name}"))?;
-    let has_column = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .with_context(|| format!("failed to enumerate columns for {table_name}"))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .with_context(|| format!("failed to read columns for {table_name}"))?
-        .into_iter()
-        .any(|name| name == column_name);
-
-    if !has_column {
-        connection
-            .execute(
-                &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
-                [],
-            )
-            .with_context(|| format!("failed to add {column_name} column to {table_name}"))?;
+    let alter_sql =
+        format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}");
+    match connection.execute(&alter_sql, []) {
+        Ok(_) => Ok(()),
+        Err(error) if is_duplicate_column_error(&error) => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to add {column_name} column to {table_name}")),
     }
+}
 
-    Ok(())
+fn is_duplicate_column_error(error: &SqliteError) -> bool {
+    match error {
+        SqliteError::SqliteFailure(_, Some(message)) => message
+            .to_ascii_lowercase()
+            .contains("duplicate column name"),
+        _ => false,
+    }
 }

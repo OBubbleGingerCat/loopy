@@ -12,6 +12,8 @@ use crate::{
 const MOCK_REVIEWER_ROLE_ID: &str = "mock";
 const MOCK_LEAF_SUMMARY: &str = "Mock leaf review requires a revision.";
 const MOCK_FRONTIER_SUMMARY: &str = "Mock frontier review invalidated a leaf.";
+const MOCK_FRONTIER_EMPTY_SUMMARY: &str =
+    "Mock frontier review found no child leaves to invalidate.";
 
 pub(crate) fn run_leaf_review_gate(
     connection: &Connection,
@@ -89,22 +91,32 @@ pub(crate) fn run_frontier_review_gate(
     require_node(connection, &plan_id, &parent_node_id, "parent_node_id")?;
 
     let gate_run_id = Uuid::new_v4().to_string();
-    let invalidated_leaf_node_ids = vec!["node-leaf-1".to_owned()];
+    let invalidated_leaf_node_ids = select_child_node_ids(connection, &plan_id, &parent_node_id)?;
+    let summary = if invalidated_leaf_node_ids.is_empty() {
+        MOCK_FRONTIER_EMPTY_SUMMARY
+    } else {
+        MOCK_FRONTIER_SUMMARY
+    };
+    let expected_revision = if invalidated_leaf_node_ids.is_empty() {
+        "Revise the frontier and add child leaves before continuing."
+    } else {
+        "Revise the frontier and regenerate the invalidated leaf."
+    };
     let response = RunFrontierReviewGateResponse {
         gate_run_id: gate_run_id.clone(),
         passed: false,
         verdict: "revise_frontier".to_owned(),
-        summary: MOCK_FRONTIER_SUMMARY.to_owned(),
+        summary: summary.to_owned(),
         reviewer_role_id: MOCK_REVIEWER_ROLE_ID.to_owned(),
         issues: vec![ReviewIssue {
             issue_kind: "mock_frontier_issue".to_owned(),
             target_node_id: None,
             target_parent_node_id: Some(parent_node_id.clone()),
-            target_node_ids: Some(invalidated_leaf_node_ids.clone()),
-            summary: MOCK_FRONTIER_SUMMARY.to_owned(),
+            target_node_ids: (!invalidated_leaf_node_ids.is_empty())
+                .then_some(invalidated_leaf_node_ids.clone()),
+            summary: summary.to_owned(),
             rationale: "Task 4 uses deterministic mock reviewer execution.".to_owned(),
-            expected_revision: "Revise the frontier and regenerate the invalidated leaf."
-                .to_owned(),
+            expected_revision: expected_revision.to_owned(),
             question_for_user: None,
             decision_impact: None,
         }],
@@ -166,6 +178,27 @@ fn require_node(connection: &Connection, plan_id: &str, node_id: &str, label: &s
     }
 
     Ok(())
+}
+
+fn select_child_node_ids(
+    connection: &Connection,
+    plan_id: &str,
+    parent_node_id: &str,
+) -> Result<Vec<String>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT node_id
+             FROM GEN_PLAN__nodes
+             WHERE plan_id = ?1 AND parent_node_id = ?2
+             ORDER BY relative_path, node_id",
+        )
+        .context("failed to prepare child node lookup")?;
+
+    statement
+        .query_map(params![plan_id, parent_node_id], |row| row.get(0))
+        .context("failed to query child nodes for frontier gate")?
+        .collect::<std::result::Result<Vec<String>, _>>()
+        .context("failed to read child nodes for frontier gate")
 }
 
 fn current_timestamp() -> Result<String> {
