@@ -62,13 +62,19 @@ Without explicit confirmation, the Agent must not generate deeper layers or the 
 
 In this skill, breadth-first planning is performed over a frontier of confirmed parent nodes at the current working depth.
 
+Every candidate leaf must pass `leaf review gate` before it can be accepted as a leaf.
+Every frontier parent expansion must pass `frontier review gate` before it can be considered complete.
+
 In manual mode, the Agent MUST NOT expand the direct children of multiple frontier parents in the same unconfirmed planning step.
 
 Instead, the Agent must:
 - select one confirmed parent node from the current frontier,
-- expand only that parent node’s direct children,
-- ask the user to confirm that parent-scoped expansion,
-- write only that confirmed parent-scoped expansion to disk,
+- expand only that parent node’s direct children as a candidate parent-scoped expansion,
+- ask the user to confirm that candidate parent-scoped expansion,
+- run the required leaf and frontier review gates for that parent-scoped expansion,
+- send any review-driven revisions back to the user,
+- ask for renewed confirmation if review-driven changes altered the structure,
+- write only the confirmed, review-passing parent-scoped expansion to disk,
 - provide a short subtree summary for that parent,
 - only then return to the remaining frontier or ask whether to switch to auto-generation.
 
@@ -563,11 +569,12 @@ Each layer should follow the same flow:
 12. run `frontier review gate` only after all required leaf reviews are issue-free,
 13. if frontier review returns issues, send the review-driven revision back to the user with rationale and proposed revision direction, then repeat review until the frontier is issue-free,
 14. if review changed the expansion, show the revised version to the user again before continuing,
-15. write only the confirmed, review-passing parent-scoped expansion to the filesystem,
-16. provide a subtree summary for that parent,
-17. ask the explicit mode-choice question and indicate which same-frontier parent nodes remain,
-18. if the user chooses to continue manually, repeat steps 6-17 for the remaining frontier,
-19. only after the current breadth frontier has been processed may the Agent derive the next breadth-first layer.
+15. If review-driven changes altered the structure, the Agent MUST ask the user to re-confirm the revised expansion before writing it or continuing.
+16. write only the confirmed, review-passing parent-scoped expansion to the filesystem,
+17. provide a subtree summary for that parent,
+18. ask the explicit mode-choice question and indicate which same-frontier parent nodes remain,
+19. if the user chooses to continue manually, repeat steps 6-18 for the remaining frontier,
+20. only after the current breadth frontier has been processed may the Agent derive the next breadth-first layer.
 
 ### 15.2.1 Mode Choice Gate
 
@@ -842,6 +849,7 @@ Invalid:
 - running `frontier review gate` while required leaf reviews still have issues,
 - continuing past a frontier whose `frontier review gate` still has issues,
 - modifying structure after review in manual mode without returning the review-driven revision to the user,
+- writing or continuing after a review-driven structural change in manual mode without renewed user confirmation,
 - treating reviewer issues as optional suggestions instead of gate barriers,
 - making a true user-owned decision in auto mode instead of pausing,
 - marking a node as a leaf even though execution would still require asking the planner to choose among major options,
@@ -900,6 +908,7 @@ After each layer, the Agent should at least check:
 - whether the current layer is stable enough to enter the next layer,
 - whether the current reply expanded more than one frontier parent in manual mode,
 - whether review-driven revisions in manual mode were sent back to the user before continuing,
+- whether review-driven structural changes in manual mode received renewed user confirmation before writing or continuing,
 - whether the required subtree summary has been provided for the just-completed parent,
 - whether the required mode-choice checkpoint has been asked after the latest write,
 - whether Auto-Generation was preceded by the necessary clarification questions about material missing details,

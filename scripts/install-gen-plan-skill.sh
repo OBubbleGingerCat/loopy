@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CALLER_CWD="$(pwd)"
 
 TARGET_MODE="codex"
 POSITIONAL_PATH=""
@@ -34,6 +35,11 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
+    --*)
+      echo "unexpected flag: $1" >&2
+      usage >&2
+      exit 1
+      ;;
     *)
       if [[ -z "$POSITIONAL_PATH" ]]; then
         POSITIONAL_PATH="$1"
@@ -47,8 +53,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+normalize_install_root() {
+  local raw_path="$1"
+  case "$raw_path" in
+    /*) printf '%s\n' "$raw_path" ;;
+    *) printf '%s\n' "$CALLER_CWD/$raw_path" ;;
+  esac
+}
+
 if [[ -n "$POSITIONAL_PATH" ]]; then
-  INSTALL_ROOT="$POSITIONAL_PATH"
+  INSTALL_ROOT="$(normalize_install_root "$POSITIONAL_PATH")"
+elif [[ -n "$INSTALL_ROOT" ]]; then
+  INSTALL_ROOT="$(normalize_install_root "$INSTALL_ROOT")"
 elif [[ -z "$INSTALL_ROOT" ]]; then
   case "$TARGET_MODE" in
     codex)
