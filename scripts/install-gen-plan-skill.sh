@@ -44,6 +44,11 @@ while [[ $# -gt 0 ]]; do
         usage >&2
         exit 1
       }
+      [[ -n "$2" ]] || {
+        echo "empty install root is not allowed for --path" >&2
+        usage >&2
+        exit 1
+      }
       INSTALL_ROOT="$2"
       PATH_EXPLICIT=1
       shift 2
@@ -59,6 +64,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       if [[ -z "$POSITIONAL_PATH" ]]; then
+        [[ -n "$1" ]] || {
+          echo "empty positional install root is not allowed" >&2
+          usage >&2
+          exit 1
+        }
         POSITIONAL_PATH="$1"
         shift
       else

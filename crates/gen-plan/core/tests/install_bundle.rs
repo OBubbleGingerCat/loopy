@@ -115,6 +115,46 @@ fn install_script_defaults_to_codex_target_with_no_args() -> Result<()> {
 }
 
 #[test]
+fn install_script_defaults_to_home_codex_target_with_no_args_when_codex_home_is_unset() -> Result<()> {
+    let workspace = support::workspace()?;
+    let caller_cwd = workspace.path().join("caller-home-default");
+    fs::create_dir_all(&caller_cwd)?;
+    let relative_home = format!(
+        "rel-home-default-{}/home",
+        workspace
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("workspace fixture name should be utf-8")?
+    );
+    let install_root = caller_cwd
+        .join(&relative_home)
+        .join(".codex/skills/loopy-gen-plan");
+
+    let output = run_installer(
+        &caller_cwd,
+        &[],
+        &[
+            ("CARGO_NET_OFFLINE", OsString::from("true")),
+            ("HOME", OsString::from(&relative_home)),
+        ],
+        &["CODEX_HOME"],
+    )?;
+    assert_installer_success(
+        &output,
+        "install-gen-plan-skill.sh with no args and HOME fallback",
+    )?;
+
+    assert_eq!(installed_root_from_output(&output)?, install_root);
+    assert_installed_bundle(&install_root)?;
+    assert!(
+        !repo_root().join(&relative_home).exists(),
+        "relative HOME fallback must not be resolved from the repo root"
+    );
+    Ok(())
+}
+
+#[test]
 fn install_script_resolves_relative_codex_home_from_caller_cwd() -> Result<()> {
     let workspace = support::workspace()?;
     let caller_cwd = workspace.path().join("caller-codex");
@@ -191,6 +231,54 @@ fn install_script_rejects_conflicting_install_selectors() -> Result<()> {
             "expected clean conflicting-selector error, stderr was:\n{stderr}"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_empty_path_flag_value() -> Result<()> {
+    let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[OsString::from("--path"), OsString::from("")],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &[],
+    )?;
+
+    assert!(
+        !output.status.success(),
+        "expected empty --path to fail, stdout was:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("empty install root is not allowed for --path"),
+        "expected clean empty --path error, stderr was:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_empty_positional_install_root() -> Result<()> {
+    let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[OsString::from("")],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &[],
+    )?;
+
+    assert!(
+        !output.status.success(),
+        "expected empty positional install root to fail, stdout was:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("empty positional install root is not allowed"),
+        "expected clean empty positional error, stderr was:\n{stderr}"
+    );
 
     Ok(())
 }
