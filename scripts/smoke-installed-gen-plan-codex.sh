@@ -12,6 +12,13 @@ PROMPT_DIR="$RUN_ROOT/prompts"
 LAST_MESSAGE_DIR="$RUN_ROOT/last-messages"
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 STRICT_VALIDATION="${LOOPY_SMOKE_STRICT_VALIDATION:-1}"
+CASE_FILTER="${LOOPY_SMOKE_CASE_FILTER:-}"
+KNOWN_CASES=(
+  rust-cli-todo
+  fastapi-notes-api
+  csv-export-rust-report
+)
+RAN_CASE_COUNT=0
 CODEX_ENV_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loopy-gen-plan-codex-home.XXXXXX")"
 CODEX_HOME_DIR="$CODEX_ENV_ROOT/.codex"
 CODEX_SKILL_ROOT="$CODEX_HOME_DIR/skills/loopy-gen-plan"
@@ -113,20 +120,39 @@ validate_plan_tree() {
   }
 }
 
-validate_no_mock_markers() {
-  local log_file="$1"
-  local marker
-  for marker in \
-    "reviewer_role_id=mock" \
-    "Task 4 uses deterministic mock reviewer execution." \
-    "Mock leaf review requires a revision." \
-    "Mock frontier review invalidated a leaf." \
-    "Mock frontier review found no child leaves to invalidate."; do
-    if grep -Fq "$marker" "$log_file"; then
-      echo "invalid mock reviewer marker in $log_file: $marker" >&2
-      return 1
-    fi
-  done
+validate_no_mock_gate_artifacts() {
+  local workspace="$1" last_message="$2"
+  python3 - "$workspace" "$last_message" <<'PY'
+import pathlib
+import sys
+
+workspace = pathlib.Path(sys.argv[1])
+last_message = pathlib.Path(sys.argv[2])
+artifacts = []
+if last_message.is_file():
+    artifacts.append(last_message)
+gate_runs = workspace / ".loopy" / "gate-runs"
+if gate_runs.is_dir():
+    artifacts.extend(sorted(gate_runs.glob("*/last-message.json")))
+
+needles = [
+    '"reviewer_role_id":"mock"',
+    '"reviewer_role_id": "mock"',
+    "Task 4 uses deterministic mock reviewer execution.",
+    "Mock leaf review requires a revision.",
+    "Mock frontier review invalidated a leaf.",
+    "Mock frontier review found no child leaves to invalidate.",
+]
+
+for artifact in artifacts:
+    text = artifact.read_text(encoding="utf-8", errors="ignore")
+    for needle in needles:
+        if needle in text:
+            sys.stderr.write(
+                f"invalid mock reviewer marker in {artifact}: {needle}\n"
+            )
+            sys.exit(1)
+PY
 }
 
 validate_no_direct_db_mutation_attempts() {
@@ -138,6 +164,10 @@ import sys
 
 log_path = pathlib.Path(sys.argv[1])
 text = log_path.read_text(encoding="utf-8", errors="ignore")
+command_blocks = re.findall(
+    r"(?ms)^exec\s*\n(.*?)(?=^\s*(?:succeeded|failed) in )",
+    text,
+)
 patterns = [
     re.compile(
         r"(?is)(?:\bsqlite3?\b|import\s+sqlite3|python3?.{0,80}sqlite3)"
@@ -150,19 +180,20 @@ patterns = [
     ),
 ]
 
-for pattern in patterns:
-    match = pattern.search(text)
-    if match:
-        snippet = text[max(0, match.start() - 120):match.end() + 120].strip()
-        sys.stderr.write(
-            f"detected direct sqlite write attempt against .loopy/loopy.db in {log_path}:\n{snippet}\n"
-        )
-        sys.exit(1)
+for block in command_blocks:
+    for pattern in patterns:
+        match = pattern.search(block)
+        if match:
+            snippet = block[max(0, match.start() - 120):match.end() + 120].strip()
+            sys.stderr.write(
+                f"detected direct sqlite write attempt against .loopy/loopy.db in {log_path}:\n{snippet}\n"
+            )
+            sys.exit(1)
 PY
 }
 
 validate_strict_case() {
-  local workspace="$1" plan_name="$2" log_file="$3"
+  local workspace="$1" plan_name="$2" log_file="$3" last_message="$4"
   local db_path="$workspace/.loopy/loopy.db"
 
   [[ -f "$db_path" ]] || {
@@ -170,7 +201,7 @@ validate_strict_case() {
     return 1
   }
 
-  validate_no_mock_markers "$log_file"
+  validate_no_mock_gate_artifacts "$workspace" "$last_message"
   validate_no_direct_db_mutation_attempts "$log_file"
 
   python3 - "$db_path" "$plan_name" <<'PY'
@@ -234,6 +265,49 @@ if leaf_mock or frontier_mock:
     )
     sys.exit(1)
 PY
+}
+
+should_run_case() {
+  local case_name="$1"
+  if [[ -z "$CASE_FILTER" ]]; then
+    return 0
+  fi
+
+  local candidate
+  IFS=',' read -r -a case_names <<<"$CASE_FILTER"
+  for candidate in "${case_names[@]}"; do
+    if [[ "$candidate" == "$case_name" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_case_filter() {
+  [[ -z "$CASE_FILTER" ]] && return 0
+
+  local requested known found
+  IFS=',' read -r -a requested_cases <<<"$CASE_FILTER"
+  for requested in "${requested_cases[@]}"; do
+    [[ -n "$requested" ]] || {
+      echo "empty smoke case name in LOOPY_SMOKE_CASE_FILTER" >&2
+      exit 1
+    }
+
+    found=0
+    for known in "${KNOWN_CASES[@]}"; do
+      if [[ "$requested" == "$known" ]]; then
+        found=1
+        break
+      fi
+    done
+
+    if [[ "$found" -ne 1 ]]; then
+      echo "unknown smoke case in LOOPY_SMOKE_CASE_FILTER: $requested" >&2
+      echo "known cases: ${KNOWN_CASES[*]}" >&2
+      exit 1
+    fi
+  done
 }
 
 run_case() {
@@ -311,26 +385,41 @@ EOF
 
   validate_plan_tree "$workspace" "$plan_name"
   if [[ "$STRICT_VALIDATION" != "0" ]]; then
-    validate_strict_case "$workspace" "$plan_name" "$log_file"
+    validate_strict_case "$workspace" "$plan_name" "$log_file" "$last_message"
   fi
+
+  RAN_CASE_COUNT=$((RAN_CASE_COUNT + 1))
 }
 
-run_case \
-  rust-cli-todo \
-  rust-cli-todo \
-  coding-task \
-  'Create a plan for a tiny Rust CLI todo app using clap and a JSON file store. Include add/list/done flows, tests, and packaging.'
+validate_case_filter
 
-run_case \
-  fastapi-notes-api \
-  fastapi-notes-api \
-  coding-task \
-  'Create a plan for a tiny FastAPI notes API with create/list/delete endpoints, pydantic models, pytest coverage, and local sqlite development.'
+if should_run_case rust-cli-todo; then
+  run_case \
+    rust-cli-todo \
+    rust-cli-todo \
+    coding-task \
+    'Create a plan for a tiny Rust CLI todo app using clap and a JSON file store. Include add/list/done flows, tests, and packaging.'
+fi
 
-run_case \
-  csv-export-rust-report \
-  csv-export-rust-report \
-  coding-task \
-  'Create a plan for adding CSV export support to the existing Rust reporting crate, including parser changes, reporting APIs, regression tests, and documentation.'
+if should_run_case fastapi-notes-api; then
+  run_case \
+    fastapi-notes-api \
+    fastapi-notes-api \
+    coding-task \
+    'Create a plan for a tiny FastAPI notes API with create/list/delete endpoints, pydantic models, pytest coverage, and local sqlite development.'
+fi
+
+if should_run_case csv-export-rust-report; then
+  run_case \
+    csv-export-rust-report \
+    csv-export-rust-report \
+    coding-task \
+    'Create a plan for adding CSV export support to the existing Rust reporting crate. Assume the raw report input contract is `&str` with newline-delimited rows and comma-delimited fields. Include parser changes, reporting APIs, regression tests, and documentation.'
+fi
+
+if [[ "$RAN_CASE_COUNT" -eq 0 ]]; then
+  echo "no smoke cases executed" >&2
+  exit 1
+fi
 
 echo "RESULT_SOURCE=direct" >&2

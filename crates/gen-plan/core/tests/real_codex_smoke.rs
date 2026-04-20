@@ -121,6 +121,18 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should explicitly reject mock reviewer role ids"
     );
     assert!(
+        script.contains("validate_no_mock_gate_artifacts"),
+        "script should validate mock markers against persisted gate artifacts"
+    );
+    assert!(
+        script.contains("gate-runs") && script.contains("last-message.json"),
+        "script should inspect gate last-message artifacts rather than only the top-level log"
+    );
+    assert!(
+        !script.contains("grep -Fq \"$marker\" \"$log_file\""),
+        "script should not reject runs based on prompt text echoed into the top-level log"
+    );
+    assert!(
         script.contains("Task 4 uses deterministic mock reviewer execution."),
         "script should explicitly reject the deterministic mock rationale"
     );
@@ -311,6 +323,136 @@ fn smoke_script_preserves_artifacts_for_all_auto_mode_cases() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn smoke_script_rejects_unknown_case_filter() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "success")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let run_root = temp.path().join("run-unknown-filter");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "does-not-exist")
+        .env("PATH", path)
+        .output()
+        .context("failed to run smoke script with invalid case filter")?;
+
+    assert!(
+        !output.status.success(),
+        "invalid case filter should fail\n{}",
+        combined_output(&output)
+    );
+
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("unknown smoke case in LOOPY_SMOKE_CASE_FILTER"),
+        "expected unknown-case error in output:\n{combined}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn smoke_script_strict_validation_passes_with_fake_strict_artifacts() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_success")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let run_root = temp.path().join("run-strict-success");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "rust-cli-todo")
+        .env("PATH", path)
+        .output()
+        .context("failed to run smoke script with strict fake codex")?;
+
+    if !output.status.success() {
+        bail!("strict fake smoke failed\n{}", combined_output(&output));
+    }
+
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("RESULT_SOURCE=direct"),
+        "expected direct result marker in output:\n{combined}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn smoke_script_rejects_direct_db_write_attempts_from_exec_transcript() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_direct_db_write")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let run_root = temp.path().join("run-strict-db-write");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "rust-cli-todo")
+        .env("PATH", path)
+        .output()
+        .context("failed to run smoke script with fake direct-db-write transcript")?;
+
+    assert!(
+        !output.status.success(),
+        "strict validation should reject direct DB writes\n{}",
+        combined_output(&output)
+    );
+
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("detected direct sqlite write attempt against .loopy/loopy.db"),
+        "expected direct DB write validation error in output:\n{combined}"
+    );
+
+    Ok(())
+}
+
 fn repo_root() -> &'static Path {
     static REPO_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     REPO_ROOT.get_or_init(|| {
@@ -365,19 +507,148 @@ if [[ -z "$plan_name" ]]; then
   plan_name="$(printf '%s' "$prompt" | grep -oE -- '--plan-name [^` ]+' | head -n1 | awk '{{print $2}}')"
 fi
 
-if [[ "$mode" == "success" ]]; then
-  mkdir -p "$workspace/.loopy/plans/$plan_name"
-  cat >"$workspace/.loopy/plans/$plan_name/$plan_name.md" <<EOF
+    if [[ "$mode" == "success" || "$mode" == "strict_success" || "$mode" == "strict_direct_db_write" ]]; then
+      mkdir -p "$workspace/.loopy/plans/$plan_name"
+      cat >"$workspace/.loopy/plans/$plan_name/$plan_name.md" <<EOF
 # $plan_name
 
 - generated by fake codex
 EOF
-  cat >"$output_file" <<EOF
+      if [[ "$mode" == "strict_success" || "$mode" == "strict_direct_db_write" ]]; then
+        mkdir -p "$workspace/.loopy/gate-runs/leaf-1" "$workspace/.loopy/gate-runs/frontier-1"
+        python3 - "$workspace" "$plan_name" <<'PY'
+import pathlib
+import sqlite3
+import sys
+
+workspace = pathlib.Path(sys.argv[1])
+plan_name = sys.argv[2]
+db_path = workspace / ".loopy" / "loopy.db"
+db_path.parent.mkdir(parents=True, exist_ok=True)
+con = sqlite3.connect(db_path)
+con.executescript(
+    """
+    CREATE TABLE GEN_PLAN__plans (
+      plan_id TEXT PRIMARY KEY,
+      workspace_root TEXT,
+      plan_name TEXT,
+      plan_root TEXT,
+      task_type TEXT,
+      plan_status TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE GEN_PLAN__nodes (
+      plan_id TEXT,
+      node_id TEXT,
+      relative_path TEXT,
+      node_name TEXT,
+      parent_node_id TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE GEN_PLAN__leaf_gate_runs (
+      leaf_gate_run_id TEXT,
+      plan_id TEXT,
+      node_id TEXT,
+      reviewer_role_id TEXT,
+      planner_mode TEXT,
+      passed INTEGER,
+      verdict TEXT,
+      summary TEXT,
+      issues_json TEXT,
+      created_at TEXT
+    );
+    CREATE TABLE GEN_PLAN__frontier_gate_runs (
+      frontier_gate_run_id TEXT,
+      plan_id TEXT,
+      parent_node_id TEXT,
+      reviewer_role_id TEXT,
+      planner_mode TEXT,
+      passed INTEGER,
+      verdict TEXT,
+      summary TEXT,
+      issues_json TEXT,
+      invalidated_leaf_node_ids_json TEXT,
+      created_at TEXT
+    );
+    """
+)
+con.execute(
+    "INSERT INTO GEN_PLAN__plans VALUES (?, ?, ?, ?, ?, ?, '', '')",
+    (
+        "plan-1",
+        str(workspace),
+        plan_name,
+        f"./.loopy/plans/{{plan_name}}",
+        "coding-task",
+        "ready",
+    ),
+)
+con.execute(
+    "INSERT INTO GEN_PLAN__nodes VALUES (?, ?, ?, ?, ?, '', '')",
+    ("plan-1", "parent-1", f"{{plan_name}}.md", plan_name, None),
+)
+con.execute(
+    "INSERT INTO GEN_PLAN__nodes VALUES (?, ?, ?, ?, ?, '', '')",
+    ("plan-1", "leaf-1", f"{{plan_name}}/leaf.md", "leaf", "parent-1"),
+)
+con.execute(
+    "INSERT INTO GEN_PLAN__leaf_gate_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')",
+    (
+        "leaf-run-1",
+        "plan-1",
+        "leaf-1",
+        "codex_default",
+        "auto",
+        1,
+        "approved_as_leaf",
+        "ok",
+        "[]",
+    ),
+)
+con.execute(
+    "INSERT INTO GEN_PLAN__frontier_gate_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')",
+    (
+        "frontier-run-1",
+        "plan-1",
+        "parent-1",
+        "codex_default",
+        "auto",
+        1,
+        "approved_frontier",
+        "ok",
+        "[]",
+        "[]",
+    ),
+)
+con.commit()
+PY
+        cat >"$workspace/.loopy/gate-runs/leaf-1/last-message.json" <<EOF
+{{"reviewer_role_id":"codex_default","summary":"ok"}}
+EOF
+        cat >"$workspace/.loopy/gate-runs/frontier-1/last-message.json" <<EOF
+{{"reviewer_role_id":"codex_default","summary":"ok"}}
+EOF
+      fi
+      cat >"$output_file" <<EOF
 {{"plan_name":"$plan_name","status":"ok"}}
 EOF
-  echo "fake-codex-direct-path"
-  exit 0
-fi
+      if [[ "$mode" == "strict_direct_db_write" ]]; then
+        cat <<'EOF'
+exec
+bash -lc "python3 - <<'PY'
+import sqlite3
+connection = sqlite3.connect('.loopy/loopy.db')
+connection.execute(\"update GEN_PLAN__plans set plan_status = 'active'\")
+connection.commit()
+PY"
+ succeeded in 0ms:
+EOF
+      fi
+      echo "fake-codex-direct-path"
+      exit 0
+    fi
 
 echo "fake codex failure for $plan_name" >&2
 exit 1
