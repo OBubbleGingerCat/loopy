@@ -93,6 +93,28 @@ fn install_script_supports_target_codex() -> Result<()> {
 }
 
 #[test]
+fn install_script_defaults_to_codex_target_with_no_args() -> Result<()> {
+    let workspace = support::workspace()?;
+    let codex_home = workspace.path().join("codex-home-default");
+    let install_root = codex_home.join("skills/loopy-gen-plan");
+
+    let output = run_installer(
+        repo_root(),
+        &[],
+        &[
+            ("CARGO_NET_OFFLINE", OsString::from("true")),
+            ("CODEX_HOME", codex_home.into_os_string()),
+        ],
+        &[],
+    )?;
+    assert_installer_success(&output, "install-gen-plan-skill.sh with no args")?;
+
+    assert_eq!(installed_root_from_output(&output)?, install_root);
+    assert_installed_bundle(&install_root)?;
+    Ok(())
+}
+
+#[test]
 fn install_script_resolves_relative_codex_home_from_caller_cwd() -> Result<()> {
     let workspace = support::workspace()?;
     let caller_cwd = workspace.path().join("caller-codex");
@@ -124,6 +146,52 @@ fn install_script_resolves_relative_codex_home_from_caller_cwd() -> Result<()> {
         !repo_root().join(&relative_home).exists(),
         "relative CODEX_HOME must not be resolved from the repo root"
     );
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_conflicting_install_selectors() -> Result<()> {
+    let workspace = support::workspace()?;
+    let install_root = workspace.path().join("custom-install");
+    let cases = [
+        vec![
+            OsString::from("--path"),
+            install_root.clone().into_os_string(),
+            OsString::from("positional-install"),
+        ],
+        vec![
+            OsString::from("--target"),
+            OsString::from("codex"),
+            OsString::from("--path"),
+            install_root.clone().into_os_string(),
+        ],
+        vec![
+            OsString::from("--target"),
+            OsString::from("claude"),
+            OsString::from("positional-install"),
+        ],
+    ];
+
+    for args in cases {
+        let output = run_installer(
+            workspace.path(),
+            &args,
+            &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+            &[],
+        )?;
+
+        assert!(
+            !output.status.success(),
+            "expected conflicting selectors to fail, stdout was:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8(output.stderr.clone())?;
+        assert!(
+            stderr.contains("conflicting install selectors"),
+            "expected clean conflicting-selector error, stderr was:\n{stderr}"
+        );
+    }
+
     Ok(())
 }
 
@@ -264,7 +332,9 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
         "prompts/frontier_runtime.md",
         "roles/coding-task/task-type.toml",
         "roles/coding-task/leaf_reviewer/codex_default.md",
+        "roles/coding-task/leaf_reviewer/mock.md",
         "roles/coding-task/frontier_reviewer/codex_default.md",
+        "roles/coding-task/frontier_reviewer/mock.md",
         "bin/loopy-gen-plan",
     ] {
         assert!(
@@ -288,6 +358,10 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
     assert!(
         !installed_skill.contains("--output"),
         "installed SKILL.md should no longer mention --output"
+    );
+    assert!(
+        installed_skill.contains(".loopy/plans/<plan-name>/"),
+        "installed SKILL.md should describe the fixed write root under .loopy/plans/<plan-name>/"
     );
     for required_snippet in [
         "Every candidate leaf must pass `leaf review gate`",

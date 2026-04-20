@@ -6,8 +6,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CALLER_CWD="$(pwd)"
 
 TARGET_MODE="codex"
+TARGET_EXPLICIT=0
 POSITIONAL_PATH=""
 INSTALL_ROOT=""
+PATH_EXPLICIT=0
 
 usage() {
   cat <<'EOF'
@@ -26,12 +28,24 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
       [[ $# -ge 2 ]] || { echo "missing value for --target" >&2; exit 1; }
+      [[ "$TARGET_EXPLICIT" == "0" ]] || {
+        echo "conflicting install selectors: --target specified more than once" >&2
+        usage >&2
+        exit 1
+      }
       TARGET_MODE="$2"
+      TARGET_EXPLICIT=1
       shift 2
       ;;
     --path)
       [[ $# -ge 2 ]] || { echo "missing value for --path" >&2; exit 1; }
+      [[ "$PATH_EXPLICIT" == "0" ]] || {
+        echo "conflicting install selectors: --path specified more than once" >&2
+        usage >&2
+        exit 1
+      }
       INSTALL_ROOT="$2"
+      PATH_EXPLICIT=1
       shift 2
       ;;
     --help|-h)
@@ -55,6 +69,18 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$INSTALL_ROOT" && -n "$POSITIONAL_PATH" ]]; then
+  echo "conflicting install selectors: cannot combine --path with a positional install root" >&2
+  usage >&2
+  exit 1
+fi
+
+if [[ "$TARGET_EXPLICIT" == "1" && ( -n "$INSTALL_ROOT" || -n "$POSITIONAL_PATH" ) ]]; then
+  echo "conflicting install selectors: cannot combine --target with a custom install root" >&2
+  usage >&2
+  exit 1
+fi
 
 normalize_install_root() {
   local raw_path="$1"
