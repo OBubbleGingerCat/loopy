@@ -12,6 +12,7 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
                 workspace_root TEXT NOT NULL,
                 plan_name TEXT NOT NULL,
                 plan_root TEXT NOT NULL,
+                project_directory TEXT NOT NULL,
                 task_type TEXT NOT NULL,
                 plan_status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -69,6 +70,20 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
             "#,
         )
         .context("failed to bootstrap gen-plan runtime schema")?;
+    ensure_column_exists(
+        connection,
+        "GEN_PLAN__plans",
+        "project_directory",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    connection
+        .execute(
+            "UPDATE GEN_PLAN__plans
+             SET project_directory = workspace_root
+             WHERE project_directory = ''",
+            [],
+        )
+        .context("failed to backfill project_directory for migrated plans")?;
     ensure_column_exists(
         connection,
         "GEN_PLAN__leaf_gate_runs",

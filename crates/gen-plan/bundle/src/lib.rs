@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
-use loopy_common_bundle::{BundleDescriptor, read_descriptor};
+use anyhow::{anyhow, bail, Context, Result};
+use loopy_common_bundle::{read_descriptor, BundleDescriptor};
 use serde::{Deserialize, Serialize};
 
 pub const SKILL_ID: &str = "loopy:gen-plan";
@@ -244,6 +244,69 @@ pub fn load_prompt_template(skill_root: &Path, template_name: &str) -> Result<St
     let prompt_markdown = fs::read_to_string(&prompt_path)
         .with_context(|| format!("failed to read {}", prompt_path.display()))?;
     Ok(prompt_markdown.trim().to_owned())
+}
+
+pub fn resolve_executor_command(
+    executor_profile: &ExecutorProfile,
+    bundle_bin: &Path,
+    workspace_root: &Path,
+    project_directory: &Path,
+    invocation_payload_path: &Path,
+    output_last_message_path: &Path,
+) -> Vec<String> {
+    let mut command = Vec::with_capacity(1 + executor_profile.args.len());
+    command.push(resolve_template_value(
+        &executor_profile.command,
+        bundle_bin,
+        workspace_root,
+        project_directory,
+        invocation_payload_path,
+        output_last_message_path,
+    ));
+    command.extend(executor_profile.args.iter().map(|arg| {
+        resolve_template_value(
+            arg,
+            bundle_bin,
+            workspace_root,
+            project_directory,
+            invocation_payload_path,
+            output_last_message_path,
+        )
+    }));
+    command
+}
+
+pub fn resolve_executor_cwd(cwd: &str, workspace_root: &Path, project_directory: &Path) -> String {
+    match cwd {
+        "project" => project_directory.display().to_string(),
+        "workspace" => workspace_root.display().to_string(),
+        other => other.to_owned(),
+    }
+}
+
+fn resolve_template_value(
+    value: &str,
+    bundle_bin: &Path,
+    workspace_root: &Path,
+    project_directory: &Path,
+    invocation_payload_path: &Path,
+    output_last_message_path: &Path,
+) -> String {
+    value
+        .replace("{bundle_bin}", &bundle_bin.display().to_string())
+        .replace("{workspace_root}", &workspace_root.display().to_string())
+        .replace(
+            "{project_directory}",
+            &project_directory.display().to_string(),
+        )
+        .replace(
+            "{invocation_payload_path}",
+            &invocation_payload_path.display().to_string(),
+        )
+        .replace(
+            "{output_last_message_path}",
+            &output_last_message_path.display().to_string(),
+        )
 }
 
 fn normalize_non_blank(field_name: &str, value: &str) -> Result<String> {
@@ -724,6 +787,13 @@ mod tests {
         for executor in [&leaf_executor, &frontier_executor] {
             assert_eq!(executor.cwd, "project");
             assert!(
+                executor.args.windows(2).any(|window| {
+                    window[0] == "-o" && window[1] == "{output_last_message_path}"
+                }),
+                "executor args should capture the stable last-message path: {:?}",
+                executor.args
+            );
+            assert!(
                 !executor.args.iter().any(|arg| arg.contains("worktree")),
                 "executor args should not assume worktrees: {:?}",
                 executor.args
@@ -737,8 +807,69 @@ mod tests {
                 executor.args
             );
         }
+        assert!(frontier_runtime.contains("approved_frontier"));
 
         Ok(())
+    }
+
+    #[test]
+    fn resolve_executor_command_replaces_project_and_last_message_placeholders() -> Result<()> {
+        let executor_profile = ExecutorProfile {
+            kind: "local_command".to_owned(),
+            command: "codex".to_owned(),
+            args: vec![
+                "exec".to_owned(),
+                "-C".to_owned(),
+                "{project_directory}".to_owned(),
+                "-o".to_owned(),
+                "{output_last_message_path}".to_owned(),
+                "{invocation_payload_path}".to_owned(),
+            ],
+            cwd: "project".to_owned(),
+            timeout_sec: 60,
+            transcript_capture: "stdio".to_owned(),
+            env_allow: None,
+        };
+
+        let command = resolve_executor_command(
+            &executor_profile,
+            Path::new("/tmp/skill/bin/loopy-gen-plan"),
+            Path::new("/tmp/workspace"),
+            Path::new("/tmp/workspace/project"),
+            Path::new("/tmp/workspace/.loopy/gates/gate-1/prompt.md"),
+            Path::new("/tmp/workspace/.loopy/gates/gate-1/last-message.json"),
+        );
+
+        assert_eq!(command[0], "codex");
+        assert_eq!(command[1], "exec");
+        assert_eq!(command[3], "/tmp/workspace/project");
+        assert_eq!(
+            command[5],
+            "/tmp/workspace/.loopy/gates/gate-1/last-message.json"
+        );
+        assert_eq!(command[6], "/tmp/workspace/.loopy/gates/gate-1/prompt.md");
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_executor_cwd_maps_project_to_project_directory() {
+        assert_eq!(
+            resolve_executor_cwd(
+                "project",
+                Path::new("/tmp/workspace"),
+                Path::new("/tmp/workspace/project"),
+            ),
+            "/tmp/workspace/project"
+        );
+        assert_eq!(
+            resolve_executor_cwd(
+                "workspace",
+                Path::new("/tmp/workspace"),
+                Path::new("/tmp/workspace/project"),
+            ),
+            "/tmp/workspace"
+        );
     }
 
     fn write_valid_bundle(skill_root: &Path) -> Result<()> {

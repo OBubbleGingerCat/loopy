@@ -2,8 +2,8 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
-use rusqlite::{Connection, OptionalExtension, params};
+use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::{
@@ -12,6 +12,21 @@ use crate::{
 };
 
 const ACTIVE_PLAN_STATUS: &str = "active";
+
+#[derive(Debug, Clone)]
+pub(crate) struct GatePlanContext {
+    pub plan_id: String,
+    pub task_type: String,
+    pub plan_root: PathBuf,
+    pub project_directory: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NodeRecord {
+    pub node_id: String,
+    pub relative_path: String,
+    pub parent_node_id: Option<String>,
+}
 
 pub(crate) fn ensure_plan(
     connection: &Connection,
@@ -22,9 +37,10 @@ pub(crate) fn ensure_plan(
     let EnsurePlanRequest {
         plan_name,
         task_type,
-        project_directory: _project_directory,
+        project_directory,
     } = request;
     let task_type = loopy_gen_plan_bundle::validate_task_type_identifier(&task_type)?;
+    let project_directory = normalize_project_directory(workspace_root, &project_directory)?;
 
     if let Some(existing) = select_plan(connection, workspace_root, &plan_name, plan_root)? {
         return Ok(EnsurePlanResponse {
@@ -45,16 +61,18 @@ pub(crate) fn ensure_plan(
                 workspace_root,
                 plan_name,
                 plan_root,
+                project_directory,
                 task_type,
                 plan_status,
                 created_at,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 plan_id,
                 workspace_root,
                 plan_name,
                 plan_root,
+                project_directory,
                 task_type,
                 ACTIVE_PLAN_STATUS,
                 timestamp,
@@ -110,6 +128,127 @@ pub(crate) fn ensure_node_id(
         parent_relative_path.as_deref(),
     )?;
     Ok(EnsureNodeIdResponse { node_id })
+}
+
+pub(crate) fn load_gate_plan_context(
+    connection: &Connection,
+    plan_id: &str,
+) -> Result<GatePlanContext> {
+    connection
+        .query_row(
+            "SELECT plan_id, task_type, plan_root, project_directory
+             FROM GEN_PLAN__plans
+             WHERE plan_id = ?1",
+            params![plan_id],
+            |row| {
+                Ok(GatePlanContext {
+                    plan_id: row.get(0)?,
+                    task_type: row.get(1)?,
+                    plan_root: PathBuf::from(row.get::<_, String>(2)?),
+                    project_directory: PathBuf::from(row.get::<_, String>(3)?),
+                })
+            },
+        )
+        .optional()
+        .context("failed to load persisted plan context")?
+        .ok_or_else(|| anyhow!("plan `{plan_id}` does not exist"))
+}
+
+pub(crate) fn load_node_record(
+    connection: &Connection,
+    plan_id: &str,
+    node_id: &str,
+) -> Result<NodeRecord> {
+    connection
+        .query_row(
+            "SELECT node_id, relative_path, parent_node_id
+             FROM GEN_PLAN__nodes
+             WHERE plan_id = ?1 AND node_id = ?2",
+            params![plan_id, node_id],
+            |row| {
+                Ok(NodeRecord {
+                    node_id: row.get(0)?,
+                    relative_path: row.get(1)?,
+                    parent_node_id: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .context("failed to load persisted node metadata")?
+        .ok_or_else(|| anyhow!("node_id `{node_id}` does not exist for plan `{plan_id}`"))
+}
+
+pub(crate) fn load_child_nodes(
+    connection: &Connection,
+    plan_id: &str,
+    parent_node_id: Option<&str>,
+) -> Result<Vec<NodeRecord>> {
+    let sql = match parent_node_id {
+        Some(_) => {
+            "SELECT node_id, relative_path, parent_node_id
+             FROM GEN_PLAN__nodes
+             WHERE plan_id = ?1 AND parent_node_id = ?2
+             ORDER BY relative_path, node_id"
+        }
+        None => {
+            "SELECT node_id, relative_path, parent_node_id
+             FROM GEN_PLAN__nodes
+             WHERE plan_id = ?1 AND parent_node_id IS NULL
+             ORDER BY relative_path, node_id"
+        }
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .context("failed to prepare child node lookup")?;
+    match parent_node_id {
+        Some(parent_node_id) => statement
+            .query_map(params![plan_id, parent_node_id], |row| {
+                Ok(NodeRecord {
+                    node_id: row.get(0)?,
+                    relative_path: row.get(1)?,
+                    parent_node_id: row.get(2)?,
+                })
+            })
+            .context("failed to query child nodes")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read child nodes"),
+        None => statement
+            .query_map(params![plan_id], |row| {
+                Ok(NodeRecord {
+                    node_id: row.get(0)?,
+                    relative_path: row.get(1)?,
+                    parent_node_id: row.get(2)?,
+                })
+            })
+            .context("failed to query child nodes")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read child nodes"),
+    }
+}
+
+pub(crate) fn load_latest_passed_leaf_gate_summary(
+    connection: &Connection,
+    plan_id: &str,
+    node_id: &str,
+) -> Result<Option<LeafGateSummary>> {
+    connection
+        .query_row(
+            "SELECT leaf_gate_run_id, reviewer_role_id, summary
+             FROM GEN_PLAN__leaf_gate_runs
+             WHERE plan_id = ?1 AND node_id = ?2 AND passed = 1
+             ORDER BY CAST(created_at AS INTEGER) DESC, leaf_gate_run_id DESC
+             LIMIT 1",
+            params![plan_id, node_id],
+            |row| {
+                Ok(LeafGateSummary {
+                    gate_run_id: row.get(0)?,
+                    reviewer_role_id: row.get(1)?,
+                    summary: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .context("failed to load passed leaf gate summary")
 }
 
 fn ensure_node_id_for_path(
@@ -193,7 +332,7 @@ fn select_plan(
     let expected_plan_root = path_string(expected_plan_root);
     let plan = connection
         .query_row(
-            "SELECT plan_id, plan_root, plan_status, task_type
+            "SELECT plan_id, plan_root, plan_status, task_type, project_directory
              FROM GEN_PLAN__plans
              WHERE workspace_root = ?1 AND plan_name = ?2",
             params![workspace_root_string(workspace_root), plan_name],
@@ -203,6 +342,7 @@ fn select_plan(
                     plan_root: row.get(1)?,
                     plan_status: row.get(2)?,
                     task_type: row.get(3)?,
+                    _project_directory: row.get(4)?,
                 })
             },
         )
@@ -302,6 +442,18 @@ fn workspace_root_string(workspace_root: &Path) -> String {
     path_string(workspace_root)
 }
 
+fn normalize_project_directory(workspace_root: &Path, project_directory: &Path) -> Result<String> {
+    if project_directory.as_os_str().is_empty() {
+        return Err(anyhow!("project_directory must not be empty"));
+    }
+    let project_directory = if project_directory.is_absolute() {
+        project_directory.to_path_buf()
+    } else {
+        workspace_root.join(project_directory)
+    };
+    Ok(path_string(&project_directory))
+}
+
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -320,9 +472,16 @@ struct PlanRow {
     plan_root: String,
     plan_status: String,
     task_type: String,
+    _project_directory: String,
 }
 
 struct NodeRow {
     node_id: String,
     parent_node_id: Option<String>,
+}
+
+pub(crate) struct LeafGateSummary {
+    pub gate_run_id: String,
+    pub reviewer_role_id: String,
+    pub summary: String,
 }

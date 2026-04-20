@@ -25,7 +25,7 @@ transcript_capture = "stdio"
 [executors.codex_leaf_reviewer]
 kind = "local_command"
 command = "codex"
-args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-"]
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-o", "{output_last_message_path}", "-"]
 cwd = "project"
 timeout_sec = 1200
 transcript_capture = "stdio"
@@ -34,7 +34,7 @@ env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]
 [executors.codex_frontier_reviewer]
 kind = "local_command"
 command = "codex"
-args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-"]
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-o", "{output_last_message_path}", "-"]
 cwd = "project"
 timeout_sec = 1200
 transcript_capture = "stdio"

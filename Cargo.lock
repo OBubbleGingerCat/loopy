@@ -494,6 +494,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "loopy-common-bundle",
+ "loopy-common-invocation",
  "loopy-common-sqlite",
  "loopy-gen-plan-bundle",
  "rusqlite",

@@ -15,6 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 loopy-common-sqlite = { path = "../../common/sqlite" }
+loopy-common-invocation = { path = "../../common/invocation" }
 
 [dev-dependencies]
 anyhow.workspace = true

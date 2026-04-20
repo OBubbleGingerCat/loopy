@@ -22,12 +22,14 @@ Decide whether the current frontier expansion:
 
 ## Allowed Verdicts
 You must return exactly one verdict:
+- approved_frontier
 - revise_frontier
 - reopen_parent_scope
 - pause_for_user_decision
 
 ## Output Rules
 - Return only structured output.
+- Return exactly one JSON object with no markdown fences or surrounding commentary.
 - Do not emit nonblocking issues.
 - Do not emit improvement opportunities.
 - If there are any issues, the gate does not pass.
@@ -36,6 +38,31 @@ You must return exactly one verdict:
 - If the verdict is pause_for_user_decision, each relevant issue must also include:
   - question_for_user
   - decision_impact
+
+## Required JSON Shape
+Return exactly this object shape:
+
+```json
+{
+  "verdict": "approved_frontier",
+  "summary": "one-sentence review summary",
+  "issues": [],
+  "invalidated_leaf_node_ids": []
+}
+```
+
+When the gate does not pass, keep the same top-level keys and populate `issues` with one or more objects using exactly these keys:
+- issue_kind
+- target_node_id
+- target_parent_node_id
+- target_node_ids
+- summary
+- rationale
+- expected_revision
+- question_for_user
+- decision_impact
+
+Do not add extra top-level keys.
 
 ## Input Semantics
 
@@ -154,6 +181,7 @@ Check at minimum:
 - Does the current split force confusion or duplication downstream?
 
 ## Decision Routing Rule
+- If the expansion is structurally acceptable, return approved_frontier.
 - If the expansion can be repaired with local restructuring, return revise_frontier.
 - If the current decomposition approach is fundamentally wrong for this parent, return reopen_parent_scope.
 - If the blocker is a true user-owned decision not fixed by existing context, return pause_for_user_decision.

@@ -26,6 +26,12 @@ pub struct Runtime {
     workspace_root: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSkillBundle {
+    pub bundle_root: PathBuf,
+    pub bundle_bin: PathBuf,
+}
+
 impl Runtime {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Result<Self> {
         let runtime = Self {
@@ -72,9 +78,9 @@ impl Runtime {
             .optional()
             .context("failed to read persisted plan task_type")?
             .ok_or_else(|| anyhow!("plan `{plan_id}` does not exist"))?;
-        let skill_root = self.resolved_skill_root()?;
-        let manifest = loopy_gen_plan_bundle::load_manifest(&skill_root)?;
-        loopy_gen_plan_bundle::resolve_gate_roles(&skill_root, &manifest, &task_type)
+        let skill_bundle = self.resolved_skill_bundle()?;
+        let manifest = loopy_gen_plan_bundle::load_manifest(&skill_bundle.bundle_root)?;
+        loopy_gen_plan_bundle::resolve_gate_roles(&skill_bundle.bundle_root, &manifest, &task_type)
     }
 
     pub fn run_leaf_review_gate(
@@ -82,7 +88,7 @@ impl Runtime {
         request: RunLeafReviewGateRequest,
     ) -> Result<RunLeafReviewGateResponse> {
         let connection = self.open_connection()?;
-        gates::run_leaf_review_gate(&connection, request)
+        gates::run_leaf_review_gate(self, &connection, request)
     }
 
     pub fn run_frontier_review_gate(
@@ -90,7 +96,7 @@ impl Runtime {
         request: RunFrontierReviewGateRequest,
     ) -> Result<RunFrontierReviewGateResponse> {
         let connection = self.open_connection()?;
-        gates::run_frontier_review_gate(&connection, request)
+        gates::run_frontier_review_gate(self, &connection, request)
     }
 
     fn bootstrap_filesystem(&self) -> Result<()> {
@@ -125,21 +131,21 @@ impl Runtime {
             .join(plan_name)
     }
 
-    fn resolved_skill_root(&self) -> Result<PathBuf> {
+    pub(crate) fn resolved_skill_bundle(&self) -> Result<ResolvedSkillBundle> {
         if let Some(bundle_root) = discover_current_process_bundle()? {
-            return Ok(bundle_root);
+            return resolved_bundle_from_root(bundle_root);
         }
         if let Some(development_skill) = resolve_development_skill_if_registered(
             &self.workspace_root,
             loopy_gen_plan_bundle::SKILL_ID,
         )? {
             loopy_gen_plan_bundle::load_bundle_descriptor(&development_skill.bundle_root)?;
-            return Ok(development_skill.bundle_root);
+            return resolved_bundle_from_root(development_skill.bundle_root);
         }
         let installed_skill =
             discover_installed_skill_in_default_roots(loopy_gen_plan_bundle::SKILL_ID)?;
         loopy_gen_plan_bundle::load_bundle_descriptor(&installed_skill.bundle_root)?;
-        Ok(installed_skill.bundle_root)
+        resolved_bundle_from_root(installed_skill.bundle_root)
     }
 }
 
@@ -150,6 +156,15 @@ fn discover_current_process_bundle() -> Result<Option<PathBuf>> {
     };
     loopy_gen_plan_bundle::load_bundle_descriptor(&discovered_bundle.bundle_root)?;
     Ok(Some(discovered_bundle.bundle_root))
+}
+
+fn resolved_bundle_from_root(bundle_root: PathBuf) -> Result<ResolvedSkillBundle> {
+    let descriptor = loopy_gen_plan_bundle::load_bundle_descriptor(&bundle_root)?;
+    let bundle_bin = bundle_root.join(descriptor.binary_path);
+    Ok(ResolvedSkillBundle {
+        bundle_root,
+        bundle_bin,
+    })
 }
 
 fn validate_plan_name(plan_name: &str) -> Result<&str> {

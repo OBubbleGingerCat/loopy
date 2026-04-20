@@ -29,13 +29,38 @@ You must return exactly one verdict:
 
 ## Output Rules
 - Return only structured output.
+- Return exactly one JSON object with no markdown fences or surrounding commentary.
 - Do not emit nonblocking issues.
 - Do not emit improvement opportunities.
 - If there are any issues, the gate does not pass.
 - Every issue must include an explicit target.
 - If the verdict is pause_for_user_decision, each relevant issue must also include:
   - question_for_user
-  - decision_impact
+- decision_impact
+
+## Required JSON Shape
+Return exactly this object shape:
+
+```json
+{
+  "verdict": "approved_as_leaf",
+  "summary": "one-sentence review summary",
+  "issues": []
+}
+```
+
+When the gate does not pass, keep the same top-level keys and populate `issues` with one or more objects using exactly these keys:
+- issue_kind
+- target_node_id
+- target_parent_node_id
+- target_node_ids
+- summary
+- rationale
+- expected_revision
+- question_for_user
+- decision_impact
+
+Do not add extra top-level keys.
 
 ## Core Leaf Test
 Use this core test when judging leaf readiness:
