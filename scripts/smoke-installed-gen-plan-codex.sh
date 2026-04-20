@@ -145,11 +145,20 @@ EOF
 Use the \`loopy:gen-plan\` skill.
 - Keep your working directory at \`$workspace\`.
 - The installed skill is available at \`$CODEX_SKILL_ROOT\`, which resolves to \`$INSTALL_ROOT\`.
+- Treat the skill name \`loopy:gen-plan\` as the installed entrypoint.
 - Use the installed skill entrypoint.
+- Do not hunt for a shell alias, alternate binary, or wrapper for \`loopy:gen-plan\`.
 - Do not inline the installed skill files into the prompt.
+- Do not inspect or print the installed \`bin/loopy-gen-plan\` ELF binary as text.
+- Do not run \`cat\`, \`sed\`, \`head\`, \`tail\`, \`strings\`, \`less\`, \`more\`, \`hexdump\`, \`xxd\`, or similar text inspection commands against that ELF binary.
 - Use auto mode.
 - Continue automatically until the plan is ready.
+- Require real reviewer behavior only.
 - Use the real installed \`coding-task\` reviewer defaults; do not switch to mock reviewers.
+- If any installed runtime gate command reports \`reviewer_role_id=mock\`, reject that output as invalid for this smoke.
+- If any installed runtime gate command reports the rationale \`Task 4 uses deterministic mock reviewer execution.\`, reject that output as invalid for this smoke.
+- If any installed runtime gate command reports the summaries \`Mock leaf review requires a revision.\`, \`Mock frontier review invalidated a leaf.\`, or \`Mock frontier review found no child leaves to invalidate.\`, reject that output as invalid for this smoke.
+- When those invalid mock outputs appear, continue with the installed \`codex_default\` reviewer instructions instead of accepting the mock review.
 - Create the plan with \`$ $invocation\`.
 - Keep the generated artifacts under \`.loopy/plans/$plan_name/\`.
 

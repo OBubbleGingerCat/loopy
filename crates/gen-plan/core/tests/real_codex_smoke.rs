@@ -21,6 +21,17 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "smoke script should invoke the installed skill entrypoint"
     );
     assert!(
+        script.contains("Treat `loopy:gen-plan` as the installed entrypoint")
+            || script.contains("Treat the skill name `loopy:gen-plan` as the installed entrypoint")
+            || script.contains("Treat the skill name \\`loopy:gen-plan\\` as the installed entrypoint"),
+        "script should explicitly treat the installed skill name as the entrypoint"
+    );
+    assert!(
+        script.contains("Do not inspect or print the installed `bin/loopy-gen-plan` ELF binary as text")
+            || script.contains("Do not inspect or print the installed \\`bin/loopy-gen-plan\\` ELF binary as text"),
+        "script should forbid inspecting the bundled ELF binary as text"
+    );
+    assert!(
         script.contains("--plan-name rust-cli-todo"),
         "script should drive a named auto-mode plan"
     );
@@ -40,6 +51,30 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
     assert!(
         script.contains("Use auto mode."),
         "script should opt into auto mode explicitly"
+    );
+    assert!(
+        script.contains("Require real reviewer behavior only.")
+            || script.contains("Use real reviewer behavior only."),
+        "script should require real reviewer behavior in the prompt contract"
+    );
+    assert!(
+        script.contains("reviewer_role_id=mock"),
+        "script should explicitly reject mock reviewer role ids"
+    );
+    assert!(
+        script.contains("Task 4 uses deterministic mock reviewer execution."),
+        "script should explicitly reject the deterministic mock rationale"
+    );
+    assert!(
+        script.contains("Mock leaf review requires a revision.")
+            && script.contains("Mock frontier review invalidated a leaf.")
+            && script.contains("Mock frontier review found no child leaves to invalidate."),
+        "script should explicitly reject the deterministic mock summaries"
+    );
+    assert!(
+        script.contains("continue with the installed `codex_default` reviewer instructions")
+            || script.contains("continue with the installed \\`codex_default\\` reviewer instructions"),
+        "script should instruct Codex to fall back to the installed codex_default reviewer instructions"
     );
     assert!(
         !script.contains("mock_leaf_reviewer") && !script.contains("mock_frontier_reviewer"),
