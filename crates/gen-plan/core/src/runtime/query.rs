@@ -2,8 +2,8 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use anyhow::{Context, Result, anyhow};
+use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::{
@@ -44,12 +44,19 @@ pub(crate) fn ensure_plan(
 
     if let Some(existing) = select_plan(connection, workspace_root, &plan_name, plan_root)? {
         if existing.project_directory != project_directory {
-            repair_plan_project_directory(
-                connection,
-                &existing.plan_id,
-                &project_directory,
-                current_timestamp()?,
-            )?;
+            if is_legacy_project_directory_value(&existing.project_directory, workspace_root) {
+                repair_plan_project_directory(
+                    connection,
+                    &existing.plan_id,
+                    &project_directory,
+                    current_timestamp()?,
+                )?;
+            } else {
+                return Err(anyhow!(
+                    "persisted project_directory for existing plan `{plan_name}` is `{}` and cannot be redirected to `{project_directory}`",
+                    existing.project_directory
+                ));
+            }
         }
         return Ok(EnsurePlanResponse {
             plan_id: existing.plan_id,
@@ -466,6 +473,10 @@ fn current_timestamp() -> Result<String> {
 
 fn workspace_root_string(workspace_root: &Path) -> String {
     path_string(workspace_root)
+}
+
+fn is_legacy_project_directory_value(project_directory: &str, workspace_root: &Path) -> bool {
+    project_directory.is_empty() || project_directory == workspace_root_string(workspace_root)
 }
 
 fn normalize_project_directory(workspace_root: &Path, project_directory: &Path) -> Result<String> {

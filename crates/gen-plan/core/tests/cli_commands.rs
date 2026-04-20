@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, Runtime};
 use serde_json::Value;
 
@@ -52,6 +52,8 @@ fn help_lists_plan_and_gate_commands() -> Result<()> {
         "ensure-node-id",
         "run-leaf-review-gate",
         "run-frontier-review-gate",
+        "mock-leaf-reviewer",
+        "mock-frontier-reviewer",
     ] {
         assert!(
             stdout.contains(subcommand),
@@ -325,6 +327,95 @@ fn invalid_planner_mode_is_rejected_for_gate_command() -> Result<()> {
     assert!(
         stderr.contains("invalid planner_mode `bogus`: expected `manual` or `auto`"),
         "unexpected stderr:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mock_leaf_reviewer_command_writes_last_message_json() -> Result<()> {
+    let workspace = support::workspace()?;
+    let invocation_payload_path = workspace.path().join("leaf-payload.md");
+    let output_last_message_path = workspace.path().join("artifacts/leaf-last-message.json");
+    fs::write(
+        &invocation_payload_path,
+        "Gate: leaf_review\n- Target Node ID: node-leaf-123\n",
+    )?;
+
+    let output = run_cli(
+        &[
+            "mock-leaf-reviewer",
+            "--output-last-message",
+            output_last_message_path
+                .to_str()
+                .context("output path must be utf-8")?,
+            invocation_payload_path
+                .to_str()
+                .context("payload path must be utf-8")?,
+        ],
+        Some("failed to run loopy-gen-plan mock-leaf-reviewer"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected mock-leaf-reviewer to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let written: Value = serde_json::from_str(&fs::read_to_string(&output_last_message_path)?)?;
+    assert_eq!(written["verdict"], Value::String("revise_leaf".to_owned()));
+    assert_eq!(
+        written["issues"][0]["target_node_id"],
+        Value::String("node-leaf-123".to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mock_frontier_reviewer_command_writes_last_message_json() -> Result<()> {
+    let workspace = support::workspace()?;
+    let invocation_payload_path = workspace.path().join("frontier-payload.md");
+    let output_last_message_path = workspace
+        .path()
+        .join("artifacts/frontier-last-message.json");
+    fs::write(
+        &invocation_payload_path,
+        "Gate: frontier_review\n- Parent Node ID: node-parent-456\n",
+    )?;
+
+    let output = run_cli(
+        &[
+            "mock-frontier-reviewer",
+            "--output-last-message",
+            output_last_message_path
+                .to_str()
+                .context("output path must be utf-8")?,
+            invocation_payload_path
+                .to_str()
+                .context("payload path must be utf-8")?,
+        ],
+        Some("failed to run loopy-gen-plan mock-frontier-reviewer"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected mock-frontier-reviewer to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let written: Value = serde_json::from_str(&fs::read_to_string(&output_last_message_path)?)?;
+    assert_eq!(
+        written["verdict"],
+        Value::String("revise_frontier".to_owned())
+    );
+    assert_eq!(
+        written["issues"][0]["target_parent_node_id"],
+        Value::String("node-parent-456".to_owned())
+    );
+    assert_eq!(
+        written["invalidated_leaf_node_ids"],
+        Value::Array(Vec::new())
     );
 
     Ok(())

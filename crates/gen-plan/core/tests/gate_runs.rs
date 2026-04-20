@@ -10,7 +10,7 @@ use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, PlannerMode, RunFrontierReviewGateRequest,
     RunLeafReviewGateRequest, Runtime,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 const REAL_LEAF_SUMMARY: &str = "Leaf review passed through fake codex.";
 const REAL_FRONTIER_SUMMARY: &str = "Frontier review passed through fake codex.";
@@ -409,6 +409,58 @@ fn leaf_gate_requires_pause_for_user_decision_issues_to_include_user_question_fi
 }
 
 #[test]
+fn leaf_gate_fails_closed_when_issue_payload_has_unknown_fields() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        r#"{"verdict":"revise_leaf","summary":"unknown issue field","issues":[{"issue_kind":"missing_detail","target_node_id":"placeholder-node","target_parent_node_id":null,"target_node_ids":null,"summary":"needs more detail","rationale":"contract should reject extras","expected_revision":"tighten the section","question_for_user":null,"decision_impact":null,"unexpected_field":"boom"}]}"#,
+        r#"{"verdict":"approved_frontier","summary":"unused","issues":[],"invalidated_leaf_node_ids":[]}"#,
+    )?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "unknown-issue-field-leaf".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory,
+    })?;
+    let leaf_path = workspace
+        .path()
+        .join(".loopy/plans/unknown-issue-field-leaf/api/implement-endpoint.md");
+    fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
+    fs::write(&leaf_path, "# Implement endpoint\n")?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_leaf_review_gate(RunLeafReviewGateRequest {
+                plan_id: plan.plan_id,
+                node_id: node.node_id,
+                planner_mode: PlannerMode::Auto,
+            })
+            .expect_err("unknown nested issue fields should fail closed")
+    };
+    assert!(
+        format!("{error:#}").contains("failed to parse leaf reviewer JSON result"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Result<()> {
     let workspace = support::workspace()?;
     write_dev_registry(
@@ -528,9 +580,11 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
         |row| row.get(0),
     )?;
     assert_eq!(existing_invalidated_leaf_count, 1);
-    assert!(!result
-        .invalidated_leaf_node_ids
-        .contains(&FRONTIER_NON_LEAF_CHILD_NODE_ID.to_owned()));
+    assert!(
+        !result
+            .invalidated_leaf_node_ids
+            .contains(&FRONTIER_NON_LEAF_CHILD_NODE_ID.to_owned())
+    );
 
     let (persisted_reviewer_role_id, persisted_summary): (String, String) = connection.query_row(
         "SELECT reviewer_role_id, summary

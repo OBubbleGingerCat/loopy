@@ -58,6 +58,7 @@ pub struct EnsureNodeIdResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewIssue {
     pub issue_kind: String,
     pub target_node_id: Option<String>,

@@ -4,7 +4,7 @@ use std::fs;
 
 use anyhow::Result;
 use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, Runtime};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 #[test]
 fn ensure_plan_creates_fixed_plan_root_and_persists_metadata() -> Result<()> {
@@ -136,6 +136,47 @@ fn ensure_plan_repairs_existing_project_directory_for_reopened_plan() -> Result<
     assert_eq!(
         persisted_project_directory,
         corrected_project_directory.display().to_string()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ensure_plan_rejects_project_directory_redirect_for_existing_non_legacy_plan() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let original_project_directory = workspace.path().join("proj-a");
+    let redirected_project_directory = workspace.path().join("proj-b");
+    fs::create_dir_all(&original_project_directory)?;
+    fs::create_dir_all(&redirected_project_directory)?;
+
+    let ensured = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: original_project_directory.clone(),
+    })?;
+
+    let error = runtime
+        .ensure_plan(EnsurePlanRequest {
+            plan_name: "demo-plan".to_owned(),
+            task_type: "coding-task".to_owned(),
+            project_directory: redirected_project_directory,
+        })
+        .expect_err("non-legacy project_directory mismatch should be rejected");
+    assert!(
+        format!("{error:#}").contains("project_directory"),
+        "unexpected error: {error:#}"
+    );
+
+    let persisted_project_directory: String =
+        Connection::open(workspace.path().join(".loopy/loopy.db"))?.query_row(
+            "SELECT project_directory FROM GEN_PLAN__plans WHERE plan_id = ?1",
+            params![ensured.plan_id],
+            |row| row.get(0),
+        )?;
+    assert_eq!(
+        persisted_project_directory,
+        original_project_directory.display().to_string()
     );
 
     Ok(())
