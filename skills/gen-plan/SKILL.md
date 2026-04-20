@@ -175,13 +175,13 @@ The output must satisfy the following:
 
 Using Codex as an example, the invocation looks like this:
 
-`$ loopy:gen-plan --input draft.md --output docs/plan`
+`$ loopy:gen-plan --input draft.md --plan-name rust-cli-todo --task-type coding-task`
 
 This means:
 - read the draft from `draft.md`,
-- write the generated result under `docs/plan`,
-- automatically generate an appropriate root directory name based on the draft’s topic and goal,
-- create that plan directory under `docs/plan`,
+- write the generated result under `.loopy/plans/rust-cli-todo/`,
+- use `rust-cli-todo` as the stable plan root directory name,
+- use `coding-task` to resolve the installed task-type contract and review roles,
 - start the plan generation workflow in interactive mode by default rather than batch generation.
 
 This invocation does not, by itself, authorize full-tree generation in one shot.
@@ -194,9 +194,9 @@ If the surrounding workflow records an early request for auto-generation, that r
 
 ## 7. Root Directory Naming
 
-The skill must not use a fixed root directory name.
+The skill must use the explicit `--plan-name` value as the root directory name when the invocation provides one.
 
-Instead, it should generate a clear, stable, readable root directory name based on the core goal, topic, or project object of the draft.
+If a surrounding workflow ever allows plan-name inference, that inferred name must still be clear, stable, readable, and suitable for a directory under `.loopy/plans/`.
 
 The root directory name should:
 - reflect the theme of the plan,
@@ -206,9 +206,9 @@ The root directory name should:
 - remain stylistically consistent across similar tasks.
 
 Examples:
-- `launch-personal-portfolio-site`
-- `ai-product-research-plan`
-- `quarterly-retro-preparation`
+- `rust-cli-todo`
+- `fastapi-notes-api`
+- `csv-export-rust-report`
 
 ## 8. Output Tree Structure
 
@@ -300,7 +300,8 @@ Every leaf node must also satisfy these hard requirements:
 - if inputs are listed, they should prefer explicit upstream files, named artifacts, datasets, configs, tables, or other concrete materials over generic labels such as "project goals" or "requirements",
 - if expected outputs are listed, they must name concrete deliverables or checks that the execution Agent can produce directly,
 - the node must not hand unresolved first-order product, architecture, or scope decisions back to the execution Agent unless an explicit decision rule is already provided,
-- the node must have acceptance criteria that are binary-checkable or strongly falsifiable rather than merely descriptive.
+- the node must have acceptance criteria that are binary-checkable or strongly falsifiable rather than merely descriptive,
+- the node must pass `leaf review gate` before it can be accepted as a leaf.
 
 Each leaf markdown file must include at least:
 - task name,
@@ -359,6 +360,8 @@ Before the Agent stops expanding a node and marks it as a leaf, it MUST check al
 - Does the node represent one cohesive execution unit rather than multiple bundled workstreams or phases?
 
 If any answer is no, the node is not yet a leaf and must continue expanding.
+
+Even if all answers are yes, the node may stop at leaf only after `leaf review gate` returns issue-free.
 
 ## 11. Must-Expand Rule
 
@@ -552,14 +555,19 @@ Each layer should follow the same flow:
 4. write the confirmed layer outline to the filesystem,
 5. ask the user whether to continue manually, switch to auto-generation, or pause,
 6. if the user chooses manual mode, select one parent node from the current frontier,
-7. expand only that parent node’s direct children,
+7. expand only that parent node’s direct children as a candidate parent-scoped expansion,
 8. if any unresolved user choice or missing constraint would materially change that expansion, ask the necessary clarification question or questions and wait for the user,
-9. ask the user to confirm that parent-scoped expansion,
-10. write the confirmed parent-scoped expansion to the filesystem,
-11. provide a subtree summary for that parent,
-12. ask the explicit mode-choice question and indicate which same-frontier parent nodes remain,
-13. if the user chooses to continue manually, repeat steps 6-12 for the remaining frontier,
-14. only after the current breadth frontier has been processed may the Agent derive the next breadth-first layer.
+9. ask the user to confirm that candidate parent-scoped expansion,
+10. run `leaf review gate` on every candidate leaf under that parent before accepting any of them as leaves,
+11. if any leaf review returns issues, send the review-driven revision back to the user with rationale and proposed revision direction, then repeat leaf review until every required candidate leaf is issue-free,
+12. run `frontier review gate` only after all required leaf reviews are issue-free,
+13. if frontier review returns issues, send the review-driven revision back to the user with rationale and proposed revision direction, then repeat review until the frontier is issue-free,
+14. if review changed the expansion, show the revised version to the user again before continuing,
+15. write only the confirmed, review-passing parent-scoped expansion to the filesystem,
+16. provide a subtree summary for that parent,
+17. ask the explicit mode-choice question and indicate which same-frontier parent nodes remain,
+18. if the user chooses to continue manually, repeat steps 6-17 for the remaining frontier,
+19. only after the current breadth frontier has been processed may the Agent derive the next breadth-first layer.
 
 ### 15.2.1 Mode Choice Gate
 
@@ -619,7 +627,7 @@ The Agent must not enter Auto-Generation based on:
 - the initial command alone,
 - the Agent’s own judgment that the current layer is complete,
 - the need to reduce context pressure,
-- the existence of an output directory.
+- the existence of a named plan directory or install target.
 
 ### 15.4.1 Auto-Generation Clarification Gate
 
@@ -630,6 +638,18 @@ If any unresolved user choice, missing constraint, or ambiguous assumption would
 The Agent should try to ask the minimum high-leverage clarification questions needed to reduce future guesswork. The goal is not to interrogate the user for every minor preference, but to resolve the details that would otherwise cause structural drift or hidden planner decisions during Auto-Generation.
 
 If the user explicitly delegates a choice, approves a recommended default, or instructs the Agent to proceed despite a named uncertainty, the Agent may record that instruction and continue.
+
+### 15.4.1.1 Auto-Generation Review-Gate Flow
+
+When Auto-Generation is active, the Agent must still process each parent-scoped expansion through the review barriers:
+- propose a candidate parent-scoped expansion,
+- run required `leaf review gate` checks,
+- self-remediate ordinary leaf-review issues without pausing,
+- pause only for true user-owned decisions that cannot be inferred safely,
+- run `frontier review gate` after required leaf reviews pass,
+- self-remediate ordinary frontier-review issues without pausing,
+- pause only for true user-owned decisions that cannot be inferred safely,
+- treat the frontier as complete only after required leaf reviews and frontier review are issue-free.
 
 ### 15.4.2 Auto-Generation Leaf Lint Gate
 
@@ -713,6 +733,11 @@ Core constraints include:
 - do not enter the next layer before the confirmed current layer has been written to disk,
 - do not skip the mode-choice checkpoint after a confirmed write,
 - do not expand multiple frontier parents in one manual round,
+- do not accept a candidate leaf before it passes `leaf review gate`,
+- do not run `frontier review gate` while any required leaf review for that frontier still has issues,
+- do not treat a frontier as complete until both required leaf reviews and `frontier review gate` are issue-free,
+- in manual mode, do not keep review-driven revisions private to the Agent; revised expansions must go back to the user,
+- in auto mode, do not convert a true user-owned decision into an agent-owned decision merely to avoid pausing,
 - do not enter `Auto-Generation` before the Auto Clarification Gate has been satisfied,
 - do not move to a sibling parent or a deeper layer before emitting the required parent subtree summary.
 
@@ -732,9 +757,9 @@ If any answer is no, the Agent must stop and ask rather than continue.
 
 The final output must be an actual markdown file tree written to the filesystem.
 
-Under the `--output` directory, create:
+Under the workspace plan root, create:
 
-`<output>/<plan-name>/`
+`.loopy/plans/<plan-name>/`
 
 ### 18.0 Writing Gate
 
@@ -812,6 +837,13 @@ Invalid:
 - silently choosing a programming language, framework, database, deployment target, or similar first-order decision in manual mode when that choice materially changes the child structure or leaf contracts,
 - moving on after a write checkpoint without asking the required manual/auto/pause mode-choice question,
 - finishing one parent’s expansion and then jumping to another parent without providing the subtree summary,
+- accepting a candidate leaf without running `leaf review gate`,
+- treating a candidate leaf as complete even though `leaf review gate` still has issues,
+- running `frontier review gate` while required leaf reviews still have issues,
+- continuing past a frontier whose `frontier review gate` still has issues,
+- modifying structure after review in manual mode without returning the review-driven revision to the user,
+- treating reviewer issues as optional suggestions instead of gate barriers,
+- making a true user-owned decision in auto mode instead of pausing,
 - marking a node as a leaf even though execution would still require asking the planner to choose among major options,
 - using planner-shaped leaf titles such as `define-*`, `choose-*`, or `plan-*` when the actual deliverable and decision rule remain unspecified,
 - using abstract outputs such as "a plan", "a document", or "a strategy" as leaf deliverables without concrete artifact structure or completion rules,
@@ -861,11 +893,17 @@ After each layer, the Agent should at least check:
 - whether some leaves should actually continue expanding,
 - whether any candidate leaf still carries unresolved planner-level decisions,
 - whether any candidate leaf is still using planner-shaped naming or abstract deliverables,
+- whether every candidate leaf under the current frontier has passed required `leaf review gate`,
+- whether any leaf-review issues remain unresolved,
+- whether the current frontier has passed `frontier review gate`,
+- whether any frontier-review issues remain unresolved,
 - whether the current layer is stable enough to enter the next layer,
 - whether the current reply expanded more than one frontier parent in manual mode,
+- whether review-driven revisions in manual mode were sent back to the user before continuing,
 - whether the required subtree summary has been provided for the just-completed parent,
 - whether the required mode-choice checkpoint has been asked after the latest write,
 - whether Auto-Generation was preceded by the necessary clarification questions about material missing details,
+- whether auto mode paused only for true user-owned decisions instead of silently making them,
 - whether the current response size is starting to overload context and should be split into smaller parent-scoped rounds.
 
 Before final writing or each incremental write, the Agent should at least check:
@@ -877,6 +915,8 @@ Before final writing or each incremental write, the Agent should at least check:
 - whether there are naming conflicts, dangling nodes, or unreferenced nodes,
 - whether node content matches the template for its node type,
 - whether every leaf passes the leaf readiness gate,
+- whether every accepted leaf passed `leaf review gate`,
+- whether every completed frontier passed `frontier review gate`,
 - whether each leaf binds to concrete inputs and concrete outputs,
 - whether each leaf has falsifiable acceptance criteria,
 - whether any leaf still bundles multiple phases or independent workstreams,
