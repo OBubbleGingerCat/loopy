@@ -91,7 +91,8 @@ pub(crate) fn run_frontier_review_gate(
     require_node(connection, &plan_id, &parent_node_id, "parent_node_id")?;
 
     let gate_run_id = Uuid::new_v4().to_string();
-    let invalidated_leaf_node_ids = select_child_node_ids(connection, &plan_id, &parent_node_id)?;
+    let invalidated_leaf_node_ids =
+        select_leaf_child_node_ids(connection, &plan_id, &parent_node_id)?;
     let summary = if invalidated_leaf_node_ids.is_empty() {
         MOCK_FRONTIER_EMPTY_SUMMARY
     } else {
@@ -180,7 +181,7 @@ fn require_node(connection: &Connection, plan_id: &str, node_id: &str, label: &s
     Ok(())
 }
 
-fn select_child_node_ids(
+fn select_leaf_child_node_ids(
     connection: &Connection,
     plan_id: &str,
     parent_node_id: &str,
@@ -188,17 +189,24 @@ fn select_child_node_ids(
     let mut statement = connection
         .prepare(
             "SELECT node_id
-             FROM GEN_PLAN__nodes
-             WHERE plan_id = ?1 AND parent_node_id = ?2
-             ORDER BY relative_path, node_id",
+             FROM GEN_PLAN__nodes AS child
+             WHERE child.plan_id = ?1
+               AND child.parent_node_id = ?2
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM GEN_PLAN__nodes AS grandchild
+                   WHERE grandchild.plan_id = child.plan_id
+                     AND grandchild.parent_node_id = child.node_id
+               )
+             ORDER BY child.relative_path, child.node_id",
         )
-        .context("failed to prepare child node lookup")?;
+        .context("failed to prepare frontier leaf child lookup")?;
 
     statement
         .query_map(params![plan_id, parent_node_id], |row| row.get(0))
-        .context("failed to query child nodes for frontier gate")?
+        .context("failed to query leaf child nodes for frontier gate")?
         .collect::<std::result::Result<Vec<String>, _>>()
-        .context("failed to read child nodes for frontier gate")
+        .context("failed to read leaf child nodes for frontier gate")
 }
 
 fn current_timestamp() -> Result<String> {

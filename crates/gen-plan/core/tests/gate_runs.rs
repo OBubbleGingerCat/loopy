@@ -12,7 +12,9 @@ use rusqlite::{params, Connection};
 
 const MOCK_LEAF_SUMMARY: &str = "Mock leaf review requires a revision.";
 const MOCK_FRONTIER_SUMMARY: &str = "Mock frontier review invalidated a leaf.";
-const FRONTIER_CHILD_NODE_ID: &str = "node-frontier-child";
+const FRONTIER_LEAF_CHILD_NODE_ID: &str = "node-frontier-leaf-child";
+const FRONTIER_NON_LEAF_CHILD_NODE_ID: &str = "node-frontier-non-leaf-child";
+const FRONTIER_GRANDCHILD_NODE_ID: &str = "node-frontier-grandchild";
 
 #[test]
 fn ensure_plan_resolves_default_leaf_and_frontier_reviewers() -> Result<()> {
@@ -118,10 +120,50 @@ fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             &plan.plan_id,
-            FRONTIER_CHILD_NODE_ID,
+            FRONTIER_LEAF_CHILD_NODE_ID,
             "backend/implement-endpoint.md",
             "implement-endpoint.md",
             &parent.node_id,
+            "0",
+            "0",
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id,
+            node_id,
+            relative_path,
+            node_name,
+            parent_node_id,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &plan.plan_id,
+            FRONTIER_NON_LEAF_CHILD_NODE_ID,
+            "backend/subtree.md",
+            "subtree.md",
+            &parent.node_id,
+            "0",
+            "0",
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id,
+            node_id,
+            relative_path,
+            node_name,
+            parent_node_id,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &plan.plan_id,
+            FRONTIER_GRANDCHILD_NODE_ID,
+            "backend/subtree/details.md",
+            "details.md",
+            FRONTIER_NON_LEAF_CHILD_NODE_ID,
             "0",
             "0",
         ],
@@ -139,16 +181,19 @@ fn frontier_gate_returns_invalidated_leaf_ids() -> Result<()> {
     assert_eq!(result.summary, MOCK_FRONTIER_SUMMARY);
     assert_eq!(
         result.invalidated_leaf_node_ids,
-        vec![FRONTIER_CHILD_NODE_ID.to_owned()]
+        vec![FRONTIER_LEAF_CHILD_NODE_ID.to_owned()]
     );
     let existing_invalidated_leaf_count: i64 = connection.query_row(
         "SELECT COUNT(*)
          FROM GEN_PLAN__nodes
          WHERE plan_id = ?1 AND parent_node_id = ?2 AND node_id = ?3",
-        params![&plan.plan_id, &parent.node_id, FRONTIER_CHILD_NODE_ID],
+        params![&plan.plan_id, &parent.node_id, FRONTIER_LEAF_CHILD_NODE_ID],
         |row| row.get(0),
     )?;
     assert_eq!(existing_invalidated_leaf_count, 1);
+    assert!(!result
+        .invalidated_leaf_node_ids
+        .contains(&FRONTIER_NON_LEAF_CHILD_NODE_ID.to_owned()));
 
     let persisted_summary: String = connection.query_row(
         "SELECT summary
