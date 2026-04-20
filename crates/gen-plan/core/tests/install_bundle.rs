@@ -284,10 +284,37 @@ fn install_script_rejects_empty_positional_install_root() -> Result<()> {
 }
 
 #[test]
-fn install_script_rejects_unsafe_install_roots() -> Result<()> {
+fn install_script_rejects_custom_roots_that_do_not_end_with_bundle_name() -> Result<()> {
     let workspace = support::workspace()?;
+    let output = run_installer(
+        workspace.path(),
+        &[
+            OsString::from("--path"),
+            workspace.path().join("container/skills").into_os_string(),
+        ],
+        &[("CARGO_NET_OFFLINE", OsString::from("true"))],
+        &[],
+    )?;
+
+    assert_installer_failure_contains(
+        &output,
+        "unsafe install root: custom install roots must end with loopy-gen-plan",
+        "custom roots that target parent containers should fail cleanly",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn install_script_rejects_specific_overlap_roots() -> Result<()> {
+    let workspace = support::workspace()?;
+    let caller_cwd = workspace.path().join("caller-cwd/loopy-gen-plan");
+    fs::create_dir_all(&caller_cwd)?;
+
+    let caller_parent_child = workspace.path().join("caller-parent/loopy-gen-plan/child");
+    fs::create_dir_all(&caller_parent_child)?;
+
     let repo_overlapping_path = repo_root().join(format!(
-        "tmp-gen-plan-unsafe-install-{}",
+        "tmp-gen-plan-unsafe-install-{}/loopy-gen-plan",
         workspace
             .path()
             .file_name()
@@ -296,27 +323,26 @@ fn install_script_rejects_unsafe_install_roots() -> Result<()> {
     ));
     let cases = [
         (
-            workspace.path().to_path_buf(),
+            caller_cwd,
             vec![OsString::from("--path"), OsString::from(".")],
+            "unsafe install root: refusing to install into the caller working directory or its parent",
         ),
-        (workspace.path().to_path_buf(), vec![OsString::from("..")]),
+        (
+            caller_parent_child,
+            vec![OsString::from("../")],
+            "unsafe install root: refusing to install into the caller working directory or its parent",
+        ),
         (
             workspace.path().to_path_buf(),
             vec![
                 OsString::from("--path"),
                 repo_overlapping_path.into_os_string(),
             ],
-        ),
-        (
-            workspace.path().to_path_buf(),
-            vec![
-                OsString::from("--path"),
-                workspace.path().join("container/skills").into_os_string(),
-            ],
+            "unsafe install root: destination must not overlap the repository",
         ),
     ];
 
-    for (current_dir, args) in cases {
+    for (current_dir, args, expected_stderr) in cases {
         let output = run_installer(
             &current_dir,
             &args,
@@ -325,8 +351,8 @@ fn install_script_rejects_unsafe_install_roots() -> Result<()> {
         )?;
         assert_installer_failure_contains(
             &output,
-            "unsafe install root",
-            "unsafe install root should fail cleanly",
+            expected_stderr,
+            "unsafe overlap roots should fail with the expected guard",
         )?;
     }
 
@@ -348,7 +374,7 @@ fn install_script_rejects_symlinked_custom_roots_that_overlap_the_repo() -> Resu
 
     assert_installer_failure_contains(
         &output,
-        "unsafe install root",
+        "unsafe install root: destination must not overlap the repository",
         "symlinked repo-overlapping install roots should fail cleanly",
     )?;
     Ok(())
