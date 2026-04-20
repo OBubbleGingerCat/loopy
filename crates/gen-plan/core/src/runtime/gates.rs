@@ -19,20 +19,19 @@ const FRONTIER_REVIEWER_ROLE_KIND: &str = "frontier_reviewer";
 const STDIO_TRANSCRIPT_CAPTURE: &str = "stdio";
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LeafReviewerOutput {
     verdict: String,
     summary: String,
-    #[serde(default)]
     issues: Vec<ReviewIssue>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FrontierReviewerOutput {
     verdict: String,
     summary: String,
-    #[serde(default)]
     issues: Vec<ReviewIssue>,
-    #[serde(default)]
     invalidated_leaf_node_ids: Vec<String>,
 }
 
@@ -107,7 +106,7 @@ pub(crate) fn run_leaf_review_gate(
         "revise_leaf" | "must_expand" | "pause_for_user_decision" => false,
         other => bail!("unsupported leaf reviewer verdict `{other}`"),
     };
-    validate_review_issues(&output.issues, passed)?;
+    validate_review_issues(&output.verdict, &output.issues, passed)?;
     let response = RunLeafReviewGateResponse {
         gate_run_id: gate_run_id.clone(),
         passed,
@@ -220,7 +219,7 @@ pub(crate) fn run_frontier_review_gate(
         "revise_frontier" | "reopen_parent_scope" | "pause_for_user_decision" => false,
         other => bail!("unsupported frontier reviewer verdict `{other}`"),
     };
-    validate_review_issues(&output.issues, passed)?;
+    validate_review_issues(&output.verdict, &output.issues, passed)?;
     let valid_invalidations = select_leaf_child_node_ids(connection, &plan_id, &parent_node_id)?;
     for invalidated_node_id in &output.invalidated_leaf_node_ids {
         if !valid_invalidations
@@ -449,7 +448,7 @@ fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
     rendered
 }
 
-fn validate_review_issues(issues: &[ReviewIssue], passed: bool) -> Result<()> {
+fn validate_review_issues(verdict: &str, issues: &[ReviewIssue], passed: bool) -> Result<()> {
     if passed {
         if !issues.is_empty() {
             bail!("approved reviewer results must not include issues");
@@ -468,6 +467,24 @@ fn validate_review_issues(issues: &[ReviewIssue], passed: bool) -> Result<()> {
                 .is_none_or(|target_node_ids| target_node_ids.is_empty())
     }) {
         bail!("review issues must include an explicit target");
+    }
+    if verdict == "pause_for_user_decision"
+        && issues.iter().any(|issue| {
+            issue
+                .question_for_user
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+                || issue
+                    .decision_impact
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+        })
+    {
+        bail!(
+            "pause_for_user_decision issues must include non-empty question_for_user and decision_impact"
+        );
     }
     Ok(())
 }

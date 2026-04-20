@@ -43,6 +43,14 @@ pub(crate) fn ensure_plan(
     let project_directory = normalize_project_directory(workspace_root, &project_directory)?;
 
     if let Some(existing) = select_plan(connection, workspace_root, &plan_name, plan_root)? {
+        if existing.project_directory != project_directory {
+            repair_plan_project_directory(
+                connection,
+                &existing.plan_id,
+                &project_directory,
+                current_timestamp()?,
+            )?;
+        }
         return Ok(EnsurePlanResponse {
             plan_id: existing.plan_id,
             plan_root: existing.plan_root,
@@ -323,6 +331,24 @@ fn ensure_node_id_for_path(
     Ok(node_id)
 }
 
+fn repair_plan_project_directory(
+    connection: &Connection,
+    plan_id: &str,
+    project_directory: &str,
+    updated_at: String,
+) -> Result<()> {
+    connection
+        .execute(
+            "UPDATE GEN_PLAN__plans
+             SET project_directory = ?1,
+                 updated_at = ?2
+             WHERE plan_id = ?3",
+            params![project_directory, updated_at, plan_id],
+        )
+        .context("failed to repair persisted project_directory for existing plan")?;
+    Ok(())
+}
+
 fn select_plan(
     connection: &Connection,
     workspace_root: &Path,
@@ -342,7 +368,7 @@ fn select_plan(
                     plan_root: row.get(1)?,
                     plan_status: row.get(2)?,
                     task_type: row.get(3)?,
-                    _project_directory: row.get(4)?,
+                    project_directory: row.get(4)?,
                 })
             },
         )
@@ -472,7 +498,7 @@ struct PlanRow {
     plan_root: String,
     plan_status: String,
     task_type: String,
-    _project_directory: String,
+    project_directory: String,
 }
 
 struct NodeRow {

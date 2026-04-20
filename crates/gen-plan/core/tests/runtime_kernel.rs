@@ -1,8 +1,10 @@
 mod support;
 
+use std::fs;
+
 use anyhow::Result;
 use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, Runtime};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 #[test]
 fn ensure_plan_creates_fixed_plan_root_and_persists_metadata() -> Result<()> {
@@ -27,6 +29,114 @@ fn ensure_plan_creates_fixed_plan_root_and_persists_metadata() -> Result<()> {
     assert_eq!(reopened.plan_id, ensured.plan_id);
     assert_eq!(reopened.plan_root, ensured.plan_root);
     assert_eq!(reopened.plan_status, ensured.plan_status);
+
+    Ok(())
+}
+
+#[test]
+fn ensure_plan_repairs_existing_project_directory_for_reopened_plan() -> Result<()> {
+    let workspace = support::workspace()?;
+    let loopy_dir = workspace.path().join(".loopy");
+    fs::create_dir_all(&loopy_dir)?;
+    let connection = Connection::open(loopy_dir.join("loopy.db"))?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE GEN_PLAN__plans (
+            plan_id TEXT PRIMARY KEY,
+            workspace_root TEXT NOT NULL,
+            plan_name TEXT NOT NULL,
+            plan_root TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            plan_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(workspace_root, plan_name)
+        );
+
+        CREATE TABLE GEN_PLAN__nodes (
+            plan_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            parent_node_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(plan_id, node_id),
+            UNIQUE(plan_id, relative_path)
+        );
+
+        CREATE TABLE GEN_PLAN__leaf_gate_runs (
+            leaf_gate_run_id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            planner_mode TEXT NOT NULL,
+            reviewer_role_id TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            verdict TEXT NOT NULL,
+            issues_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE GEN_PLAN__frontier_gate_runs (
+            frontier_gate_run_id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL,
+            parent_node_id TEXT NOT NULL,
+            planner_mode TEXT NOT NULL,
+            reviewer_role_id TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            verdict TEXT NOT NULL,
+            issues_json TEXT NOT NULL,
+            invalidated_leaf_node_ids_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        "#,
+    )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__plans (
+            plan_id,
+            workspace_root,
+            plan_name,
+            plan_root,
+            task_type,
+            plan_status,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            "plan-existing",
+            workspace.path().display().to_string(),
+            "demo-plan",
+            workspace
+                .path()
+                .join(".loopy/plans/demo-plan")
+                .display()
+                .to_string(),
+            "coding-task",
+            "active",
+            "0",
+            "0",
+        ],
+    )?;
+
+    let corrected_project_directory = workspace.path().join("project");
+    let runtime = Runtime::new(workspace.path())?;
+    let ensured = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: corrected_project_directory.clone(),
+    })?;
+
+    assert_eq!(ensured.plan_id, "plan-existing");
+    let persisted_project_directory: String = Connection::open(loopy_dir.join("loopy.db"))?
+        .query_row(
+            "SELECT project_directory FROM GEN_PLAN__plans WHERE plan_id = ?1",
+            params!["plan-existing"],
+            |row| row.get(0),
+        )?;
+    assert_eq!(
+        persisted_project_directory,
+        corrected_project_directory.display().to_string()
+    );
 
     Ok(())
 }

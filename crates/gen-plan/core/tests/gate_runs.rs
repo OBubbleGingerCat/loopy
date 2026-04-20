@@ -110,6 +110,87 @@ fn leaf_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Result<
 }
 
 #[test]
+fn leaf_gate_uses_repaired_project_directory_for_existing_plan() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    create_old_schema_db(&workspace.path().join(".loopy"))?;
+    let repaired_plan_root = workspace.path().join(".loopy/plans/repair-plan");
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__plans (
+            plan_id,
+            workspace_root,
+            plan_name,
+            plan_root,
+            task_type,
+            plan_status,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            "plan-repair",
+            workspace.path().display().to_string(),
+            "repair-plan",
+            repaired_plan_root.display().to_string(),
+            "coding-task",
+            "active",
+            "0",
+            "0",
+        ],
+    )?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), &project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "repair-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    assert_eq!(plan.plan_id, "plan-repair");
+
+    fs::create_dir_all(repaired_plan_root.join("api"))?;
+    fs::write(
+        repaired_plan_root.join("api/implement-endpoint.md"),
+        "# Implement endpoint\n",
+    )?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let result = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime.run_leaf_review_gate(RunLeafReviewGateRequest {
+            plan_id: plan.plan_id.clone(),
+            node_id: node.node_id,
+            planner_mode: PlannerMode::Auto,
+        })?
+    };
+    assert!(result.passed);
+
+    let persisted_project_directory: String =
+        Connection::open(workspace.path().join(".loopy/loopy.db"))?.query_row(
+            "SELECT project_directory FROM GEN_PLAN__plans WHERE plan_id = ?1",
+            params![plan.plan_id],
+            |row| row.get(0),
+        )?;
+    assert_eq!(
+        persisted_project_directory,
+        project_directory.display().to_string()
+    );
+
+    Ok(())
+}
+
+#[test]
 fn leaf_gate_rejects_non_leaf_nodes() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -166,6 +247,163 @@ fn leaf_gate_rejects_non_leaf_nodes() -> Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(persisted_run_count, 0);
+
+    Ok(())
+}
+
+#[test]
+fn leaf_gate_fails_closed_on_malformed_reviewer_json() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        "{not-json",
+        r#"{"verdict":"approved_frontier","summary":"unused","issues":[],"invalidated_leaf_node_ids":[]}"#,
+    )?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "malformed-leaf".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory,
+    })?;
+    let leaf_path = workspace
+        .path()
+        .join(".loopy/plans/malformed-leaf/api/implement-endpoint.md");
+    fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
+    fs::write(&leaf_path, "# Implement endpoint\n")?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_leaf_review_gate(RunLeafReviewGateRequest {
+                plan_id: plan.plan_id,
+                node_id: node.node_id,
+                planner_mode: PlannerMode::Auto,
+            })
+            .expect_err("malformed reviewer JSON should fail closed")
+    };
+    assert!(
+        format!("{error:#}").contains("failed to parse leaf reviewer JSON result"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn leaf_gate_fails_closed_when_required_fields_are_missing() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        r#"{"verdict":"approved_as_leaf","summary":"missing issues"}"#,
+        r#"{"verdict":"approved_frontier","summary":"unused","issues":[],"invalidated_leaf_node_ids":[]}"#,
+    )?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "missing-fields-leaf".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory,
+    })?;
+    let leaf_path = workspace
+        .path()
+        .join(".loopy/plans/missing-fields-leaf/api/implement-endpoint.md");
+    fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
+    fs::write(&leaf_path, "# Implement endpoint\n")?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_leaf_review_gate(RunLeafReviewGateRequest {
+                plan_id: plan.plan_id,
+                node_id: node.node_id,
+                planner_mode: PlannerMode::Auto,
+            })
+            .expect_err("missing required reviewer fields should fail closed")
+    };
+    assert!(
+        format!("{error:#}").contains("failed to parse leaf reviewer JSON result"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn leaf_gate_requires_pause_for_user_decision_issues_to_include_user_question_fields() -> Result<()>
+{
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        r#"{"verdict":"pause_for_user_decision","summary":"need user input","issues":[{"issue_kind":"user_choice","target_node_id":"placeholder-node","target_parent_node_id":null,"target_node_ids":null,"summary":"missing question fields","rationale":"user choice required","expected_revision":"ask the user","question_for_user":null,"decision_impact":null}]}"#,
+        r#"{"verdict":"approved_frontier","summary":"unused","issues":[],"invalidated_leaf_node_ids":[]}"#,
+    )?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "pause-leaf".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory,
+    })?;
+    let leaf_path = workspace
+        .path()
+        .join(".loopy/plans/pause-leaf/api/implement-endpoint.md");
+    fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
+    fs::write(&leaf_path, "# Implement endpoint\n")?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_leaf_review_gate(RunLeafReviewGateRequest {
+                plan_id: plan.plan_id,
+                node_id: node.node_id,
+                planner_mode: PlannerMode::Auto,
+            })
+            .expect_err("pause verdict without user question fields should fail closed")
+    };
+    assert!(
+        format!("{error:#}").contains("question_for_user"),
+        "unexpected error: {error:#}"
+    );
 
     Ok(())
 }
@@ -303,6 +541,84 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
     )?;
     assert_eq!(persisted_reviewer_role_id, "codex_default");
     assert_eq!(persisted_summary, REAL_FRONTIER_SUMMARY);
+
+    Ok(())
+}
+
+#[test]
+fn frontier_gate_fails_closed_when_invalidations_field_is_missing() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        r#"{"verdict":"approved_as_leaf","summary":"unused","issues":[]}"#,
+        r#"{"verdict":"approved_frontier","summary":"missing invalidations","issues":[]}"#,
+    )?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "missing-frontier-fields".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory,
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/missing-frontier-fields");
+    fs::create_dir_all(plan_root.join("backend"))?;
+    fs::write(plan_root.join("backend/backend.md"), "# Backend\n")?;
+    fs::write(
+        plan_root.join("backend/implement-endpoint.md"),
+        "# Implement endpoint\n",
+    )?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/backend.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    Connection::open(workspace.path().join(".loopy/loopy.db"))?.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id,
+            node_id,
+            relative_path,
+            node_name,
+            parent_node_id,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &plan.plan_id,
+            FRONTIER_LEAF_CHILD_NODE_ID,
+            "backend/implement-endpoint.md",
+            "implement-endpoint.md",
+            &parent.node_id,
+            "0",
+            "0",
+        ],
+    )?;
+
+    let error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_frontier_review_gate(RunFrontierReviewGateRequest {
+                plan_id: plan.plan_id,
+                parent_node_id: parent.node_id,
+                planner_mode: PlannerMode::Auto,
+            })
+            .expect_err("missing invalidated_leaf_node_ids should fail closed")
+    };
+    assert!(
+        format!("{error:#}").contains("failed to parse frontier reviewer JSON result"),
+        "unexpected error: {error:#}"
+    );
 
     Ok(())
 }
@@ -467,11 +783,27 @@ fn assert_migrated_columns_present_once(loopy_dir: &Path) -> Result<()> {
 }
 
 fn write_fake_codex(bin_path: &Path, expected_project_directory: &Path) -> Result<()> {
+    write_fake_codex_with_outputs(
+        bin_path,
+        expected_project_directory,
+        r#"{"verdict":"approved_as_leaf","summary":"Leaf review passed through fake codex.","issues":[]}"#,
+        r#"{"verdict":"approved_frontier","summary":"Frontier review passed through fake codex.","issues":[],"invalidated_leaf_node_ids":[]}"#,
+    )
+}
+
+fn write_fake_codex_with_outputs(
+    bin_path: &Path,
+    expected_project_directory: &Path,
+    leaf_output_json: &str,
+    frontier_output_json: &str,
+) -> Result<()> {
     let script = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
 
 expected_project_directory="{expected_project_directory}"
+leaf_output_json='{leaf_output_json}'
+frontier_output_json='{frontier_output_json}'
 workspace_arg=""
 output_file=""
 
@@ -518,13 +850,9 @@ fi
 mkdir -p "$(dirname "$output_file")"
 
 if [[ "$prompt" == *"Gate: leaf_review"* ]]; then
-  cat >"$output_file" <<'EOF'
-{{"verdict":"approved_as_leaf","summary":"Leaf review passed through fake codex.","issues":[]}}
-EOF
+  printf '%s\n' "$leaf_output_json" >"$output_file"
 elif [[ "$prompt" == *"Gate: frontier_review"* ]]; then
-  cat >"$output_file" <<'EOF'
-{{"verdict":"approved_frontier","summary":"Frontier review passed through fake codex.","issues":[],"invalidated_leaf_node_ids":[]}}
-EOF
+  printf '%s\n' "$frontier_output_json" >"$output_file"
 else
   echo "unexpected prompt payload" >&2
   exit 1
@@ -533,6 +861,8 @@ fi
 echo "stdout is not the machine-readable result"
 "#,
         expected_project_directory = expected_project_directory.display(),
+        leaf_output_json = leaf_output_json.replace('\'', r"'\''"),
+        frontier_output_json = frontier_output_json.replace('\'', r"'\''"),
     );
     fs::write(bin_path, script)?;
     let mut permissions = fs::metadata(bin_path)?.permissions();
@@ -544,7 +874,9 @@ echo "stdout is not the machine-readable result"
 fn fake_codex_env(fake_bin_dir: &Path) -> FakeCodexEnvGuard {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let env_lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
-    let guard = env_lock.lock().expect("env lock should not be poisoned");
+    let guard = env_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let original_path = std::env::var_os("PATH");
     let mut path_entries = vec![fake_bin_dir.to_path_buf()];
     if let Some(existing) = original_path.as_ref() {

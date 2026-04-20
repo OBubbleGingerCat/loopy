@@ -784,6 +784,15 @@ mod tests {
         assert!(!leaf_prompt.trim().is_empty());
         assert!(!frontier_prompt.trim().is_empty());
 
+        let mock_leaf_executor = manifest
+            .executors
+            .get("mock_leaf_reviewer")
+            .expect("checked-in manifest should define mock leaf reviewer");
+        let mock_frontier_executor = manifest
+            .executors
+            .get("mock_frontier_reviewer")
+            .expect("checked-in manifest should define mock frontier reviewer");
+
         for executor in [&leaf_executor, &frontier_executor] {
             assert_eq!(executor.cwd, "project");
             assert!(
@@ -804,6 +813,17 @@ mod tests {
                     .iter()
                     .any(|arg| arg.contains("dangerously-bypass-approvals-and-sandbox")),
                 "executor args should not enable bypass-sandbox mode: {:?}",
+                executor.args
+            );
+        }
+        for executor in [mock_leaf_executor, mock_frontier_executor] {
+            assert_eq!(executor.cwd, "project");
+            assert!(
+                executor.args.windows(2).any(|window| {
+                    window[0] == "--output-last-message"
+                        && window[1] == "{output_last_message_path}"
+                }),
+                "mock executor args should capture the stable last-message path: {:?}",
                 executor.args
             );
         }
