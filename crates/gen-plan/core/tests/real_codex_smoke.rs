@@ -38,7 +38,8 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
     );
     assert!(
         script.contains("use the installed `bin/loopy-gen-plan` helper subcommands directly")
-            || script.contains("use the installed \\`bin/loopy-gen-plan\\` helper subcommands directly"),
+            || script
+                .contains("use the installed \\`bin/loopy-gen-plan\\` helper subcommands directly"),
         "script should direct runtime helper usage to the installed binary subcommands"
     );
     assert!(
@@ -50,8 +51,11 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should not encourage loopy:gen-plan shell execution"
     );
     assert!(
-        script.contains("Do not inspect or print the installed `bin/loopy-gen-plan` ELF binary as text")
-            || script.contains("Do not inspect or print the installed \\`bin/loopy-gen-plan\\` ELF binary as text"),
+        script.contains(
+            "Do not inspect or print the installed `bin/loopy-gen-plan` ELF binary as text"
+        ) || script.contains(
+            "Do not inspect or print the installed \\`bin/loopy-gen-plan\\` ELF binary as text"
+        ),
         "script should forbid inspecting the bundled ELF binary as text"
     );
     assert!(
@@ -67,8 +71,11 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
     );
     assert!(
         script.contains("Use `mkdir -p`, shell redirection, and `cat > file` style commands")
-            || script.contains("Use \\`mkdir -p\\`, shell redirection, and \\`cat > file\\` style commands")
-            || script.contains("Use shell redirection / mkdir / cat > file style commands instead."),
+            || script.contains(
+                "Use \\`mkdir -p\\`, shell redirection, and \\`cat > file\\` style commands"
+            )
+            || script
+                .contains("Use shell redirection / mkdir / cat > file style commands instead."),
         "script should require mkdir plus shell redirection or cat for plan files"
     );
     assert!(
@@ -125,8 +132,61 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
     );
     assert!(
         script.contains("continue with the installed `codex_default` reviewer instructions")
-            || script.contains("continue with the installed \\`codex_default\\` reviewer instructions"),
+            || script
+                .contains("continue with the installed \\`codex_default\\` reviewer instructions"),
         "script should instruct Codex to fall back to the installed codex_default reviewer instructions"
+    );
+    assert!(
+        script.contains("always pass `--parent-relative-path`")
+            || script.contains("always pass \\`--parent-relative-path\\`"),
+        "script should require parent-relative-path for child node registration"
+    );
+    assert!(
+        script.contains("parent node's self-description markdown path")
+            || script.contains("parent node’s self-description markdown path"),
+        "script should explain what --parent-relative-path must point to"
+    );
+    assert!(
+        script.contains("Do not run leaf review on non-leaf parent nodes.")
+            || script.contains("Do not run leaf review on non-leaf parent nodes"),
+        "script should forbid leaf review on non-leaf parent nodes"
+    );
+    assert!(
+        script.contains("Never mutate `.loopy/loopy.db` directly.")
+            || script.contains("Never mutate \\`.loopy/loopy.db\\` directly."),
+        "script should explicitly forbid direct loopy.db mutation"
+    );
+    assert!(
+        script.contains("fail rather than patching the DB"),
+        "script should require the run to fail instead of repairing inconsistent runtime metadata"
+    );
+    assert!(
+        script.contains("LOOPY_SMOKE_STRICT_VALIDATION"),
+        "script should expose strict validation control"
+    );
+    assert!(
+        script.contains("strict validation") || script.contains("STRICT_VALIDATION"),
+        "script should describe the strict validation mode"
+    );
+    assert!(
+        script.contains("parent_node_id IS NOT NULL")
+            || script.contains("parent_node_id is not null")
+            || script.contains("non-flat node metadata"),
+        "script should validate that runtime metadata is not flat"
+    );
+    assert!(
+        script.contains("reviewer_role_id <> 'mock'")
+            || script.contains("reviewer_role_id != 'mock'")
+            || script.contains("non-mock gate usage"),
+        "script should validate that real reviewer roles were persisted"
+    );
+    assert!(
+        script.contains(".loopy/loopy.db")
+            && script.contains("sqlite")
+            && script.contains("update")
+            && script.contains("insert")
+            && script.contains("delete"),
+        "script should reject direct sqlite write attempts against the runtime DB"
     );
     assert!(
         !script.contains("mock_leaf_reviewer") && !script.contains("mock_frontier_reviewer"),
@@ -185,6 +245,7 @@ fn smoke_script_preserves_artifacts_for_all_auto_mode_cases() -> Result<()> {
         .current_dir(repo_root)
         .env("CARGO_NET_OFFLINE", "true")
         .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_STRICT_VALIDATION", "0")
         .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
         .env("PATH", path)
         .output()

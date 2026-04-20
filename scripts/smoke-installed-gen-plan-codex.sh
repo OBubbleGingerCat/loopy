@@ -11,6 +11,7 @@ LOG_DIR="$RUN_ROOT/logs"
 PROMPT_DIR="$RUN_ROOT/prompts"
 LAST_MESSAGE_DIR="$RUN_ROOT/last-messages"
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+STRICT_VALIDATION="${LOOPY_SMOKE_STRICT_VALIDATION:-1}"
 CODEX_ENV_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loopy-gen-plan-codex-home.XXXXXX")"
 CODEX_HOME_DIR="$CODEX_ENV_ROOT/.codex"
 CODEX_SKILL_ROOT="$CODEX_HOME_DIR/skills/loopy-gen-plan"
@@ -112,6 +113,129 @@ validate_plan_tree() {
   }
 }
 
+validate_no_mock_markers() {
+  local log_file="$1"
+  local marker
+  for marker in \
+    "reviewer_role_id=mock" \
+    "Task 4 uses deterministic mock reviewer execution." \
+    "Mock leaf review requires a revision." \
+    "Mock frontier review invalidated a leaf." \
+    "Mock frontier review found no child leaves to invalidate."; do
+    if grep -Fq "$marker" "$log_file"; then
+      echo "invalid mock reviewer marker in $log_file: $marker" >&2
+      return 1
+    fi
+  done
+}
+
+validate_no_direct_db_mutation_attempts() {
+  local log_file="$1"
+  python3 - "$log_file" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+patterns = [
+    re.compile(
+        r"(?is)(?:\bsqlite3?\b|import\s+sqlite3|python3?.{0,80}sqlite3)"
+        r".{0,400}\.loopy/loopy\.db.{0,400}\b(update|insert|delete|alter|drop|create|replace|vacuum|reindex)\b"
+    ),
+    re.compile(
+        r"(?is)\.loopy/loopy\.db.{0,400}"
+        r"(?:\bsqlite3?\b|import\s+sqlite3|python3?.{0,80}sqlite3)"
+        r".{0,400}\b(update|insert|delete|alter|drop|create|replace|vacuum|reindex)\b"
+    ),
+]
+
+for pattern in patterns:
+    match = pattern.search(text)
+    if match:
+        snippet = text[max(0, match.start() - 120):match.end() + 120].strip()
+        sys.stderr.write(
+            f"detected direct sqlite write attempt against .loopy/loopy.db in {log_path}:\n{snippet}\n"
+        )
+        sys.exit(1)
+PY
+}
+
+validate_strict_case() {
+  local workspace="$1" plan_name="$2" log_file="$3"
+  local db_path="$workspace/.loopy/loopy.db"
+
+  [[ -f "$db_path" ]] || {
+    echo "strict validation requires runtime DB: $db_path" >&2
+    return 1
+  }
+
+  validate_no_mock_markers "$log_file"
+  validate_no_direct_db_mutation_attempts "$log_file"
+
+  python3 - "$db_path" "$plan_name" <<'PY'
+import sqlite3
+import sys
+
+db_path, plan_name = sys.argv[1], sys.argv[2]
+connection = sqlite3.connect(db_path)
+
+def scalar(sql, params=()):
+    row = connection.execute(sql, params).fetchone()
+    return row[0] if row else None
+
+plan_id = scalar(
+    "SELECT plan_id FROM GEN_PLAN__plans WHERE plan_name = ?",
+    (plan_name,),
+)
+if not plan_id:
+    sys.stderr.write(f"strict validation missing plan row for {plan_name} in {db_path}\n")
+    sys.exit(1)
+
+leaf_non_mock = scalar(
+    "SELECT COUNT(*) FROM GEN_PLAN__leaf_gate_runs WHERE plan_id = ? AND reviewer_role_id <> 'mock'",
+    (plan_id,),
+)
+frontier_non_mock = scalar(
+    "SELECT COUNT(*) FROM GEN_PLAN__frontier_gate_runs WHERE plan_id = ? AND reviewer_role_id <> 'mock'",
+    (plan_id,),
+)
+leaf_mock = scalar(
+    "SELECT COUNT(*) FROM GEN_PLAN__leaf_gate_runs WHERE plan_id = ? AND reviewer_role_id = 'mock'",
+    (plan_id,),
+)
+frontier_mock = scalar(
+    "SELECT COUNT(*) FROM GEN_PLAN__frontier_gate_runs WHERE plan_id = ? AND reviewer_role_id = 'mock'",
+    (plan_id,),
+)
+non_flat_nodes = scalar(
+    "SELECT COUNT(*) FROM GEN_PLAN__nodes WHERE plan_id = ? AND parent_node_id IS NOT NULL",
+    (plan_id,),
+)
+
+if leaf_non_mock < 1:
+    sys.stderr.write(
+        f"strict validation expected non-mock leaf gate usage for {plan_name} in {db_path}\n"
+    )
+    sys.exit(1)
+if frontier_non_mock < 1:
+    sys.stderr.write(
+        f"strict validation expected non-mock frontier gate usage for {plan_name} in {db_path}\n"
+    )
+    sys.exit(1)
+if non_flat_nodes < 1:
+    sys.stderr.write(
+        f"strict validation expected non-flat node metadata for {plan_name} in {db_path}\n"
+    )
+    sys.exit(1)
+if leaf_mock or frontier_mock:
+    sys.stderr.write(
+        f"strict validation rejected mock gate rows for {plan_name} in {db_path}\n"
+    )
+    sys.exit(1)
+PY
+}
+
 run_case() {
   local case_name="$1" plan_name="$2" task_type="$3" draft_text="$4"
   local workspace="$WORKSPACES_ROOT/$case_name"
@@ -153,6 +277,13 @@ Use the \`loopy:gen-plan\` skill.
 - Desired input path: \`draft.md\`
 - Use the installed skill entrypoint.
 - If runtime helpers are needed, use the installed \`bin/loopy-gen-plan\` helper subcommands directly rather than hunting for a \`loopy:gen-plan\` executable.
+- When registering child node ids with \`ensure-node-id\`, always pass \`--parent-relative-path\` pointing at the parent node's self-description markdown path.
+- Do not omit \`--parent-relative-path\` for child nodes.
+- Do not run leaf review on non-leaf parent nodes.
+- Use frontier review for parent nodes that already have child nodes.
+- Never mutate \`.loopy/loopy.db\` directly.
+- Do not use \`sqlite3\`, Python sqlite writes, or any \`update\`, \`insert\`, \`delete\`, \`alter\`, \`drop\`, or \`create\` statement to repair runtime state.
+- If runtime metadata is inconsistent, fail rather than patching the DB.
 - Do not inline the installed skill files into the prompt.
 - Do not inspect or print the installed \`bin/loopy-gen-plan\` ELF binary as text.
 - Do not run \`cat\`, \`sed\`, \`head\`, \`tail\`, \`strings\`, \`less\`, \`more\`, \`hexdump\`, \`xxd\`, or similar text inspection commands against that ELF binary.
@@ -179,6 +310,9 @@ EOF
   fi
 
   validate_plan_tree "$workspace" "$plan_name"
+  if [[ "$STRICT_VALIDATION" != "0" ]]; then
+    validate_strict_case "$workspace" "$plan_name" "$log_file"
+  fi
 }
 
 run_case \
