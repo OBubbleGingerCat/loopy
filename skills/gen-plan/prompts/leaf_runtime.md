@@ -73,6 +73,7 @@ Only treat the node as still leaf-ready if the missing answer can already be inf
 - explicit user instructions
 - previously confirmed plan decisions
 - relevant plan-tree context
+- explicit prerequisite leaf contracts and their expected outputs
 - repository conventions, when repository context is relevant
 
 ## Input Semantics
@@ -152,6 +153,8 @@ If a contextual summary or surrounding structure appears to conflict with the ta
 - Use parent context to understand boundary and decomposition role.
 - Proactively inspect the relevant subtree before finalizing the review.
 - Use repository evidence when the role requires it.
+- If prerequisite leaves explicitly own scaffold or setup work, judge whether this node becomes directly executable once those prerequisites are satisfied.
+- Do not reject a leaf solely because prerequisite-owned files are not yet materialized in the repository when the prerequisite contract and post-prerequisite execution boundary are already explicit in the plan tree.
 - Report issues against the target node when material execution detail is missing from the node itself.
 - Do not infer that a missing detail is acceptable merely because the parent snapshot, broader plan context, or repository suggests a likely answer.
 
@@ -173,6 +176,7 @@ A valid leaf node should let an executor begin work without needing to ask the p
 
 Check at minimum:
 - Is the execution boundary concrete?
+- If the node depends on earlier leaves, are those prerequisites explicit and is the post-prerequisite execution boundary concrete?
 - Are the inputs concrete?
 - Are the expected outputs concrete?
 - Is the acceptance criteria concrete?

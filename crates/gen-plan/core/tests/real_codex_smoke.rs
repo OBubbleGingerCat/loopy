@@ -154,6 +154,69 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should require parent-relative-path for child node registration"
     );
     assert!(
+        script.contains("Treat the installed runtime APIs as the only authoritative source of plan runtime state.")
+            || script.contains("Treat the installed runtime APIs as the only authoritative source of plan runtime state"),
+        "script should require planner to treat runtime APIs as the only authoritative state source"
+    );
+    assert!(
+        script.contains("A plan is not established until installed `ensure-plan` or `open-plan` succeeds.")
+            || script.contains("A plan is not established until installed \\`ensure-plan\\` or \\`open-plan\\` succeeds."),
+        "script should require ensure-plan/open-plan before tracked plan work"
+    );
+    assert!(
+        script.contains("A node is not tracked until installed `ensure-node-id` succeeds.")
+            || script.contains("A node is not tracked until installed \\`ensure-node-id\\` succeeds."),
+        "script should require ensure-node-id before treating nodes as tracked"
+    );
+    assert!(
+        script.contains(
+            "A review gate has not happened unless installed `run-leaf-review-gate` or `run-frontier-review-gate` returns a valid gate result."
+        ) || script.contains(
+            "A review gate has not happened unless installed \\`run-leaf-review-gate\\` or \\`run-frontier-review-gate\\` returns a valid gate result."
+        ),
+        "script should forbid treating self-review as a gate substitute"
+    );
+    assert!(
+        script.contains("Always invoke installed runtime helpers against the project workspace root, not a nested `.loopy/plans/` directory.")
+            || script.contains("Always invoke installed runtime helpers against the project workspace root, not a nested \\`.loopy/plans/\\` directory."),
+        "script should require runtime helpers to use the project workspace root"
+    );
+    assert!(
+        script.contains("Do not self-review, hand-wave, or write free-text reviewer verdicts in place of runtime gate output.")
+            || script.contains("Do not self-review, hand-wave, or write free-text reviewer verdicts in place of runtime gate output"),
+        "script should explicitly forbid bypassing runtime review gates"
+    );
+    assert!(
+        script.contains("Do not inspect `.loopy/loopy.db` directly, including broad file-dump commands that would read it as text.")
+            || script.contains("Do not inspect \\`.loopy/loopy.db\\` directly, including broad file-dump commands that would read it as text."),
+        "script should explicitly forbid direct loopy.db reads"
+    );
+    assert!(
+        script.contains("For this smoke, if packaging or crate metadata needs a license decision, use `MIT` as an explicitly user-approved default.")
+            || script.contains("For this smoke, if packaging or crate metadata needs a license decision, use \\`MIT\\` as an explicitly user-approved default."),
+        "script should provide an explicit user-approved license default for auto-mode packaging leaves"
+    );
+    assert!(
+        script.contains("Use installed `ensure-plan`, then installed `open-plan`, before continuing with tracked plan work.")
+            || script.contains("Use installed \\`ensure-plan\\`, then installed \\`open-plan\\`, before continuing with tracked plan work."),
+        "script should require both ensure-plan and open-plan in the smoke workflow"
+    );
+    assert!(
+        script.contains("If installed `ensure-plan`, `open-plan`, or `ensure-node-id` fails because of request construction or missing prerequisite runtime state, use the returned runtime error plus the current plan tree/runtime state to repair the runtime call sequence.")
+            || script.contains("If installed \\`ensure-plan\\`, \\`open-plan\\`, or \\`ensure-node-id\\` fails because of request construction or missing prerequisite runtime state, use the returned runtime error plus the current plan tree/runtime state to repair the runtime call sequence."),
+        "script should allow controlled recovery for recoverable runtime API failures"
+    );
+    assert!(
+        script.contains("During runtime-call recovery for `ensure-plan`, `open-plan`, or `ensure-node-id`, do not change plan content.")
+            || script.contains("During runtime-call recovery for \\`ensure-plan\\`, \\`open-plan\\`, or \\`ensure-node-id\\`, do not change plan content."),
+        "script should forbid plan-content edits during runtime-call recovery"
+    );
+    assert!(
+        script.contains("Do not blindly guess parameters or keep replaying the same class of runtime error without new runtime evidence or relevant state changes.")
+            || script.contains("Do not blindly guess parameters or keep replaying the same class of runtime error without new runtime evidence or relevant state changes"),
+        "script should forbid blind runtime API guessing loops"
+    );
+    assert!(
         script.contains("parent node's self-description markdown path")
             || script.contains("parent node’s self-description markdown path"),
         "script should explain what --parent-relative-path must point to"
@@ -169,8 +232,31 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should explicitly forbid direct loopy.db mutation"
     );
     assert!(
+        script.contains("Never read `.loopy/loopy.db` directly as a planning aid or recovery shortcut.")
+            || script.contains("Never read \\`.loopy/loopy.db\\` directly as a planning aid or recovery shortcut."),
+        "script should explicitly forbid direct loopy.db reads as runtime shortcuts"
+    );
+    assert!(
         script.contains("fail rather than patching the DB"),
         "script should require the run to fail instead of repairing inconsistent runtime metadata"
+    );
+    assert!(
+        script.contains(
+            "If installed `run-leaf-review-gate` or `run-frontier-review-gate` fails to launch, times out, fails to write the expected runtime artifact, or fails to return parseable valid output, immediately retry the same gate call up to 5 times without changing files, ids, or arguments."
+        ) || script.contains(
+            "If installed \\`run-leaf-review-gate\\` or \\`run-frontier-review-gate\\` fails to launch, times out, fails to write the expected runtime artifact, or fails to return parseable valid output, immediately retry the same gate call up to 5 times without changing files, ids, or arguments."
+        ),
+        "script should encode the gate invocation retry contract"
+    );
+    assert!(
+        script.contains("If all 5 immediate retries fail for the same gate call, stop and surface the combined failure instead of bypassing the gate.")
+            || script.contains("If all 5 immediate retries fail for the same gate call, stop and surface the combined failure instead of bypassing the gate"),
+        "script should stop instead of bypassing a repeatedly failing gate"
+    );
+    assert!(
+        script.contains("If a gate call succeeds and returns review issues, revise the plan and then submit a new gate call; do not treat review issues as a retry case.")
+            || script.contains("If a gate call succeeds and returns review issues, revise the plan and then submit a new gate call; do not treat review issues as a retry case"),
+        "script should distinguish review issues from invocation-layer retry cases"
     );
     assert!(
         script.contains("LOOPY_SMOKE_STRICT_VALIDATION"),
@@ -193,12 +279,27 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should validate that real reviewer roles were persisted"
     );
     assert!(
+        script.contains("validate_runtime_api_transcript_usage"),
+        "script should validate actual runtime API usage from exec transcripts"
+    );
+    assert!(
+        script.contains("strict validation missing required runtime API")
+            && script.contains("strict validation saw runtime APIs out of order")
+            && script.contains("validate_runtime_api_transcript_usage"),
+        "script should enforce required runtime API calls and ordering from exec transcripts"
+    );
+    assert!(
         script.contains(".loopy/loopy.db")
             && script.contains("sqlite")
             && script.contains("update")
             && script.contains("insert")
             && script.contains("delete"),
         "script should reject direct sqlite write attempts against the runtime DB"
+    );
+    assert!(
+        script.contains("detected direct sqlite read attempt against .loopy/loopy.db")
+            || script.contains("detected indirect text inspection of .loopy/loopy.db"),
+        "script should reject direct sqlite read attempts against the runtime DB"
     );
     assert!(
         !script.contains("mock_leaf_reviewer") && !script.contains("mock_frontier_reviewer"),
@@ -410,6 +511,45 @@ fn smoke_script_strict_validation_passes_with_fake_strict_artifacts() -> Result<
 }
 
 #[test]
+fn smoke_script_strict_validation_accepts_direct_helper_paths() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_success_direct_path")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let run_root = temp.path().join("run-strict-success-direct-path");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "rust-cli-todo")
+        .env("PATH", path)
+        .output()
+        .context("failed to run smoke script with direct-path strict fake codex")?;
+
+    if !output.status.success() {
+        bail!(
+            "strict direct-path fake smoke failed\n{}",
+            combined_output(&output)
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn smoke_script_rejects_direct_db_write_attempts_from_exec_transcript() -> Result<()> {
     let repo_root = repo_root();
     let temp = support::workspace()?;
@@ -448,6 +588,51 @@ fn smoke_script_rejects_direct_db_write_attempts_from_exec_transcript() -> Resul
     assert!(
         combined.contains("detected direct sqlite write attempt against .loopy/loopy.db"),
         "expected direct DB write validation error in output:\n{combined}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn smoke_script_rejects_direct_db_read_attempts_from_exec_transcript() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_direct_db_read")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let run_root = temp.path().join("run-strict-db-read");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "rust-cli-todo")
+        .env("PATH", path)
+        .output()
+        .context("failed to run smoke script with fake direct-db-read transcript")?;
+
+    assert!(
+        !output.status.success(),
+        "strict validation should reject direct DB reads\n{}",
+        combined_output(&output)
+    );
+
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("detected direct sqlite read attempt against .loopy/loopy.db")
+            || combined.contains("detected indirect text inspection of .loopy/loopy.db"),
+        "expected direct DB read validation error in output:\n{combined}"
     );
 
     Ok(())
@@ -507,14 +692,14 @@ if [[ -z "$plan_name" ]]; then
   plan_name="$(printf '%s' "$prompt" | grep -oE -- '--plan-name [^` ]+' | head -n1 | awk '{{print $2}}')"
 fi
 
-    if [[ "$mode" == "success" || "$mode" == "strict_success" || "$mode" == "strict_direct_db_write" ]]; then
+    if [[ "$mode" == "success" || "$mode" == "strict_success" || "$mode" == "strict_success_direct_path" || "$mode" == "strict_direct_db_write" || "$mode" == "strict_direct_db_read" ]]; then
       mkdir -p "$workspace/.loopy/plans/$plan_name"
       cat >"$workspace/.loopy/plans/$plan_name/$plan_name.md" <<EOF
 # $plan_name
 
 - generated by fake codex
 EOF
-      if [[ "$mode" == "strict_success" || "$mode" == "strict_direct_db_write" ]]; then
+      if [[ "$mode" == "strict_success" || "$mode" == "strict_success_direct_path" || "$mode" == "strict_direct_db_write" || "$mode" == "strict_direct_db_read" ]]; then
         mkdir -p "$workspace/.loopy/gate-runs/leaf-1" "$workspace/.loopy/gate-runs/frontier-1"
         python3 - "$workspace" "$plan_name" <<'PY'
 import pathlib
@@ -630,6 +815,48 @@ EOF
         cat >"$workspace/.loopy/gate-runs/frontier-1/last-message.json" <<EOF
 {{"reviewer_role_id":"codex_default","summary":"ok"}}
 EOF
+        if [[ "$mode" == "strict_success_direct_path" ]]; then
+          cat <<'EOF'
+exec
+/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . ensure-plan --plan-name strict-plan --task-type coding-task --project-directory .'
+exec
+/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . open-plan --plan-name strict-plan'
+exec
+/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . ensure-node-id --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . run-leaf-review-gate --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+ succeeded in 0ms:
+exec
+/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . run-frontier-review-gate --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
+ succeeded in 0ms:
+ succeeded in 0ms:
+ succeeded in 0ms:
+EOF
+        else
+        cat <<'EOF'
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"$bin" ensure-plan --workspace . --plan-name strict-plan --task-type coding-task --project-directory .' 
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"$bin" open-plan --workspace . --plan-name strict-plan'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"$bin" ensure-node-id --workspace . --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"$bin" run-frontier-review-gate --workspace . --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
+ succeeded in 0ms:
+EOF
+        fi
       fi
       cat >"$output_file" <<EOF
 {{"plan_name":"$plan_name","status":"ok"}}
@@ -644,6 +871,15 @@ connection.execute(\"update GEN_PLAN__plans set plan_status = 'active'\")
 connection.commit()
 PY"
  succeeded in 0ms:
+EOF
+      fi
+      if [[ "$mode" == "strict_direct_db_read" ]]; then
+        cat <<'EOF'
+exec
+bash -lc "find .loopy -maxdepth 4 -type f | sort | xargs -I{{}} sh -c 'echo \"--- {{}} ---\"; sed -n \"1,40p\" \"{{}}\"'"
+ succeeded in 0ms:
+--- .loopy/loopy.db ---
+SQLite format 3
 EOF
       fi
       echo "fake-codex-direct-path"

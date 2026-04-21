@@ -192,6 +192,139 @@ for block in command_blocks:
 PY
 }
 
+validate_no_direct_db_read_attempts() {
+  local log_file="$1"
+  python3 - "$log_file" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+block_pattern = re.compile(
+    r"(?ms)^exec\s*\n(?P<command>.+?)\n (?P<status>succeeded|exited \d+|failed)\b.*?:\n(?P<output>.*?)(?=^exec\s*\n|\Z)"
+)
+
+command_read_pattern = re.compile(
+    r"(?is)\.loopy/loopy\.db.{0,200}\b(cat|sed|head|tail|strings|less|more|hexdump|xxd|file)\b"
+)
+command_pipe_pattern = re.compile(
+    r"(?is)\b(find|rg|fd)\b.{0,300}\.loopy.{0,300}\b(xargs|while|for)\b.{0,300}\b(cat|sed|head|tail|strings|less|more|hexdump|xxd)\b"
+)
+output_read_pattern = re.compile(
+    r"(?is)(---\s+\.loopy/loopy\.db\s+---|SQLite format 3)"
+)
+
+for match in block_pattern.finditer(text):
+    command = match.group("command")
+    output = match.group("output")
+    if command_read_pattern.search(command):
+        sys.stderr.write(
+            f"detected direct sqlite read attempt against .loopy/loopy.db in {log_path}:\n{command.strip()}\n"
+        )
+        sys.exit(1)
+    if command_pipe_pattern.search(command) and output_read_pattern.search(output):
+        sys.stderr.write(
+            f"detected indirect text inspection of .loopy/loopy.db in {log_path}:\n{command.strip()}\n"
+        )
+        sys.exit(1)
+PY
+}
+
+validate_runtime_api_transcript_usage() {
+  local log_file="$1"
+  python3 - "$log_file" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+
+helper_pattern = (
+    r'(?:'
+    r'"\$bin"'
+    r'|'
+    r'"[^"\n]*/loopy-gen-plan"'
+    r'|'
+    r"[^'\"\s\n]*/loopy-gen-plan"
+    r')'
+)
+
+subcommand_pattern = re.compile(
+    helper_pattern
+    + r"""(?:\s+--[A-Za-z0-9_-]+(?:\s+(?:"[^"\n]*"|'[^'\n]*'|[^\s"'\n]+))?)*"""
+    + r'\s+'
+    + r'(ensure-plan|open-plan|ensure-node-id|run-leaf-review-gate|run-frontier-review-gate|mock-leaf-reviewer|mock-frontier-reviewer)'
+    + r'\b(?!\s+--help)'
+)
+
+invocation_pattern = re.compile(
+    r'(?ms)^exec\s*\n(?P<command>.+?)(?=^exec\s*$|^\s*(?:succeeded|exited \d+|failed) in\b|\Z)'
+)
+
+runtime_records = []
+for match in invocation_pattern.finditer(text):
+    command = match.group("command")
+    subcommand_match = subcommand_pattern.search(command)
+    if not subcommand_match:
+        continue
+    runtime_records.append(
+        {
+            "api": subcommand_match.group(1),
+            "position": match.start(),
+            "command": command,
+        }
+    )
+
+if not runtime_records:
+    sys.stderr.write(
+        f"strict validation found no actual loopy-gen-plan runtime API calls in {log_path}\n"
+    )
+    sys.exit(1)
+
+positions = {}
+for record in runtime_records:
+    positions.setdefault(record["api"], []).append(record["position"])
+
+required = [
+    "ensure-plan",
+    "open-plan",
+    "ensure-node-id",
+    "run-leaf-review-gate",
+    "run-frontier-review-gate",
+]
+for api in required:
+    if api not in positions:
+        sys.stderr.write(
+            f"strict validation missing required runtime API `{api}` in {log_path}\n"
+        )
+        sys.exit(1)
+
+for forbidden in ("mock-leaf-reviewer", "mock-frontier-reviewer"):
+    if forbidden in positions:
+        sys.stderr.write(
+            f"strict validation saw forbidden mock runtime API `{forbidden}` in {log_path}\n"
+        )
+        sys.exit(1)
+
+ordering = [
+    "ensure-plan",
+    "open-plan",
+    "ensure-node-id",
+    "run-leaf-review-gate",
+    "run-frontier-review-gate",
+]
+for earlier, later in zip(ordering, ordering[1:]):
+    if positions[earlier][0] >= positions[later][0]:
+        sys.stderr.write(
+            "strict validation saw runtime APIs out of order in "
+            f"{log_path}: expected `{earlier}` before `{later}`\n"
+        )
+        sys.exit(1)
+PY
+}
+
 validate_strict_case() {
   local workspace="$1" plan_name="$2" log_file="$3" last_message="$4"
   local db_path="$workspace/.loopy/loopy.db"
@@ -203,6 +336,8 @@ validate_strict_case() {
 
   validate_no_mock_gate_artifacts "$workspace" "$last_message"
   validate_no_direct_db_mutation_attempts "$log_file"
+  validate_no_direct_db_read_attempts "$log_file"
+  validate_runtime_api_transcript_usage "$log_file"
 
   python3 - "$db_path" "$plan_name" <<'PY'
 import sqlite3
@@ -346,18 +481,35 @@ Use the \`loopy:gen-plan\` skill.
 - \`loopy:gen-plan\` is the skill name, not a shell command.
 - Do not try to execute \`loopy:gen-plan\` from the shell.
 - Treat the desired plan name, task type, and input path as semantic inputs rather than a shell command line.
+- Treat the installed runtime APIs as the only authoritative source of plan runtime state.
+- A plan is not established until installed \`ensure-plan\` or \`open-plan\` succeeds.
+- A node is not tracked until installed \`ensure-node-id\` succeeds.
+- A review gate has not happened unless installed \`run-leaf-review-gate\` or \`run-frontier-review-gate\` returns a valid gate result.
+- Always invoke installed runtime helpers against the project workspace root, not a nested \`.loopy/plans/\` directory.
+- Do not self-review, hand-wave, or write free-text reviewer verdicts in place of runtime gate output.
+- Do not fabricate plan ids, node ids, reviewer identities, gate summaries, or issue lists.
+- Do not inspect \`.loopy/loopy.db\` directly, including broad file-dump commands that would read it as text.
 - Desired plan name: \`$plan_name\`
 - Desired task type: \`$task_type\`
 - Desired input path: \`draft.md\`
+- For this smoke, if packaging or crate metadata needs a license decision, use \`MIT\` as an explicitly user-approved default.
 - Use the installed skill entrypoint.
 - If runtime helpers are needed, use the installed \`bin/loopy-gen-plan\` helper subcommands directly rather than hunting for a \`loopy:gen-plan\` executable.
+- Use installed \`ensure-plan\`, then installed \`open-plan\`, before continuing with tracked plan work.
+- If installed \`ensure-plan\`, \`open-plan\`, or \`ensure-node-id\` fails because of request construction or missing prerequisite runtime state, use the returned runtime error plus the current plan tree/runtime state to repair the runtime call sequence.
+- During runtime-call recovery for \`ensure-plan\`, \`open-plan\`, or \`ensure-node-id\`, do not change plan content.
+- Do not blindly guess parameters or keep replaying the same class of runtime error without new runtime evidence or relevant state changes.
 - When registering child node ids with \`ensure-node-id\`, always pass \`--parent-relative-path\` pointing at the parent node's self-description markdown path.
 - Do not omit \`--parent-relative-path\` for child nodes.
 - Do not run leaf review on non-leaf parent nodes.
 - Use frontier review for parent nodes that already have child nodes.
 - Never mutate \`.loopy/loopy.db\` directly.
+- Never read \`.loopy/loopy.db\` directly as a planning aid or recovery shortcut.
 - Do not use \`sqlite3\`, Python sqlite writes, or any \`update\`, \`insert\`, \`delete\`, \`alter\`, \`drop\`, or \`create\` statement to repair runtime state.
 - If runtime metadata is inconsistent, fail rather than patching the DB.
+- If installed \`run-leaf-review-gate\` or \`run-frontier-review-gate\` fails to launch, times out, fails to write the expected runtime artifact, or fails to return parseable valid output, immediately retry the same gate call up to 5 times without changing files, ids, or arguments.
+- If all 5 immediate retries fail for the same gate call, stop and surface the combined failure instead of bypassing the gate.
+- If a gate call succeeds and returns review issues, revise the plan and then submit a new gate call; do not treat review issues as a retry case.
 - Do not inline the installed skill files into the prompt.
 - Do not inspect or print the installed \`bin/loopy-gen-plan\` ELF binary as text.
 - Do not run \`cat\`, \`sed\`, \`head\`, \`tail\`, \`strings\`, \`less\`, \`more\`, \`hexdump\`, \`xxd\`, or similar text inspection commands against that ELF binary.

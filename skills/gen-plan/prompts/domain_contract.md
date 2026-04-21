@@ -16,6 +16,9 @@ A non-leaf node is not expected to be directly executable.
 A leaf node is the final execution unit in the plan tree.
 It is expected to be directly executable by a downstream executor.
 A valid leaf node must not still contain planner work, unresolved decomposition work, or unresolved design choices that materially block execution.
+A leaf node may depend on explicitly named prerequisite leaves whose outputs are expected to exist before this node begins.
+When that happens, judge leaf readiness against the explicit prerequisite contract plus the concrete post-prerequisite execution boundary.
+Do not reject a leaf solely because prerequisite-owned files are not yet present in the current repository if the prerequisite leaves and the expected post-prerequisite code area are clearly specified.
 
 ### Frontier Parent
 A frontier parent is a non-leaf node currently being expanded into its direct children.
@@ -28,6 +31,7 @@ It does not review the entire plan tree globally.
 ### What Makes A Node Stop At Leaf
 A node may stop at leaf only if further decomposition would no longer materially clarify execution authority, execution boundary, execution order, or acceptance criteria.
 If further decomposition is still needed to remove planner work or execution ambiguity, the node should not be accepted as a leaf.
+If a node depends on earlier leaves, those prerequisites must be explicit enough that a downstream executor would know exactly when this node becomes actionable and what code area it then owns.
 
 ### Review Non-Goals
 You are not rewriting the plan.
