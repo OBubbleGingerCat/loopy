@@ -803,6 +803,14 @@ mod tests {
                 executor.args
             );
             assert!(
+                executor
+                    .args
+                    .iter()
+                    .any(|arg| arg == "--skip-git-repo-check"),
+                "executor args should skip git repo trust checks for reviewer runs: {:?}",
+                executor.args
+            );
+            assert!(
                 !executor.args.iter().any(|arg| arg.contains("worktree")),
                 "executor args should not assume worktrees: {:?}",
                 executor.args
