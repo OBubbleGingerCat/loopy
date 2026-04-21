@@ -470,6 +470,12 @@ dependencies = [
 [[package]]
 name = "loopy-gen-plan"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "loopy-gen-plan-core",
+ "serde_json",
+]
 
 [[package]]
 name = "loopy-gen-plan-bundle"
@@ -477,6 +483,24 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "loopy-common-bundle",
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "loopy-gen-plan-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "loopy-common-bundle",
+ "loopy-common-invocation",
+ "loopy-common-sqlite",
+ "loopy-gen-plan-bundle",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

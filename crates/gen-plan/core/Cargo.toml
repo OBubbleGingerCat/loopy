@@ -1,0 +1,22 @@
+[package]
+name = "loopy-gen-plan-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "loopy_gen_plan"
+
+[dependencies]
+anyhow.workspace = true
+loopy-common-bundle = { path = "../../common/bundle" }
+loopy-gen-plan-bundle = { path = "../bundle" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+loopy-common-sqlite = { path = "../../common/sqlite" }
+loopy-common-invocation = { path = "../../common/invocation" }
+
+[dev-dependencies]
+anyhow.workspace = true
+serde_json.workspace = true

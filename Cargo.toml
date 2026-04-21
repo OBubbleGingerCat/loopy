@@ -10,6 +10,7 @@ members = [
     "crates/submit-loop/core",
     "crates/submit-loop/cli",
     "crates/gen-plan/bundle",
+    "crates/gen-plan/core",
     "crates/gen-plan/cli",
     "crates/execute-plan/bundle",
     "crates/execute-plan/cli",

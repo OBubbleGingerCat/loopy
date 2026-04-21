@@ -1,3 +1,41 @@
 [skill]
 name = "loopy:gen-plan"
 default_install_target = "codex"
+
+[skill.install_targets]
+codex = "${CODEX_HOME:-$HOME/.codex}/skills/loopy-gen-plan"
+claude = "$HOME/.claude/skills/loopy-gen-plan"
+
+[executors.mock_leaf_reviewer]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-leaf-reviewer", "--output-last-message", "{output_last_message_path}", "{invocation_payload_path}"]
+cwd = "project"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.mock_frontier_reviewer]
+kind = "local_command"
+command = "{bundle_bin}"
+args = ["mock-frontier-reviewer", "--output-last-message", "{output_last_message_path}", "{invocation_payload_path}"]
+cwd = "project"
+timeout_sec = 60
+transcript_capture = "stdio"
+
+[executors.codex_leaf_reviewer]
+kind = "local_command"
+command = "codex"
+args = ["exec", "--full-auto", "--skip-git-repo-check", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-o", "{output_last_message_path}", "-"]
+cwd = "project"
+timeout_sec = 1200
+transcript_capture = "stdio"
+env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]
+
+[executors.codex_frontier_reviewer]
+kind = "local_command"
+command = "codex"
+args = ["exec", "--full-auto", "--skip-git-repo-check", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{project_directory}", "-o", "{output_last_message_path}", "-"]
+cwd = "project"
+timeout_sec = 1200
+transcript_capture = "stdio"
+env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]

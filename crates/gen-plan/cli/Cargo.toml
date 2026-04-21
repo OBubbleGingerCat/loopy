@@ -6,3 +6,9 @@ edition.workspace = true
 [[bin]]
 name = "loopy-gen-plan"
 path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+loopy-gen-plan-core = { path = "../core" }
+serde_json.workspace = true
