@@ -311,8 +311,7 @@ fn open_loop_rejects_mixed_legacy_default_reviewer_lists_from_installed_bundle()
 #[test]
 fn coding_task_task_type_config_uses_split_worker_defaults() -> Result<()> {
     let skill_root = crate::support::submit_loop_source_root().as_path();
-    let task_type_text =
-        fs::read_to_string(skill_root.join("roles/coding-task/task-type.toml"))?;
+    let task_type_text = fs::read_to_string(skill_root.join("roles/coding-task/task-type.toml"))?;
     let task_type_config: TomlValue = toml::from_str(&task_type_text)?;
 
     assert_eq!(

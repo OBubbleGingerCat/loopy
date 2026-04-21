@@ -734,6 +734,7 @@ pub(crate) fn submit_candidate_commit(
     }
     let checkpoint_id = required_str(&auth.stored_invocation_context, "checkpoint_id")?;
     validate_candidate_commit(
+        runtime,
         &transaction,
         &auth.loop_id,
         checkpoint_id,
@@ -1405,6 +1406,7 @@ fn load_candidate_commit_state(
 }
 
 fn validate_candidate_commit(
+    runtime: &Runtime,
     transaction: &Transaction<'_>,
     loop_id: &str,
     checkpoint_id: &str,
@@ -1412,7 +1414,12 @@ fn validate_candidate_commit(
 ) -> Result<()> {
     let loop_state = query::load_loop_state(transaction, loop_id)?;
     let checkpoint = query::load_checkpoint_state(transaction, loop_id, checkpoint_id)?;
-    let worktree_root = Path::new(&loop_state.worktree_path);
+    let authoritative_git_dir = super::r#loop::authoritative_worktree_git_dir(
+        runtime,
+        &loop_state.worktree_path,
+        &loop_state.worktree_label,
+    )?;
+    let git_dir_arg = format!("--git-dir={}", authoritative_git_dir.display());
     if checkpoint.execution_state == "candidate_review" {
         bail!(
             "checkpoint {} is already in candidate_review and cannot accept a replacement candidate",
@@ -1453,8 +1460,9 @@ fn validate_candidate_commit(
     }
 
     system::git_verify(
-        worktree_root,
+        &runtime.workspace_root,
         &[
+            git_dir_arg.as_str(),
             "cat-file",
             "-e",
             &format!("{candidate_commit_sha}^{{commit}}"),
@@ -1462,8 +1470,9 @@ fn validate_candidate_commit(
     )
     .with_context(|| format!("candidate commit {} does not exist", candidate_commit_sha))?;
     system::git_verify(
-        worktree_root,
+        &runtime.workspace_root,
         &[
+            git_dir_arg.as_str(),
             "merge-base",
             "--is-ancestor",
             candidate_commit_sha,
@@ -1477,8 +1486,9 @@ fn validate_candidate_commit(
         )
     })?;
     system::git_verify(
-        worktree_root,
+        &runtime.workspace_root,
         &[
+            git_dir_arg.as_str(),
             "merge-base",
             "--is-ancestor",
             &expected_base,

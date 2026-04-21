@@ -1,5 +1,5 @@
-use std::fs;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -354,14 +354,13 @@ pub fn invocation_context_path(workspace_root: &Path, invocation_id: &str) -> Pa
 #[allow(dead_code)]
 pub fn repo_root() -> &'static PathBuf {
     static REPO_ROOT: OnceLock<PathBuf> = OnceLock::new();
-    REPO_ROOT
-        .get_or_init(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .ancestors()
-                .nth(3)
-                .expect("core crate should live under <repo>/crates/submit-loop/core")
-                .to_path_buf()
-        })
+    REPO_ROOT.get_or_init(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("core crate should live under <repo>/crates/submit-loop/core")
+            .to_path_buf()
+    })
 }
 
 #[allow(dead_code)]

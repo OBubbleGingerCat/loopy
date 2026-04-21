@@ -96,8 +96,7 @@ fn installer_builds_and_copies_the_submit_loop_skill_bundle() -> Result<()> {
         "installed SKILL.md should declare the loopy:submit-loop skill name"
     );
     assert!(
-        installed_skill.contains("bundle_bin")
-            && installed_skill.contains("bin/loopy-submit-loop"),
+        installed_skill.contains("bundle_bin") && installed_skill.contains("bin/loopy-submit-loop"),
         "installed SKILL.md should derive and pass an explicit bundle_bin path"
     );
     assert!(
@@ -137,6 +136,23 @@ fn installer_builds_and_copies_the_submit_loop_skill_bundle() -> Result<()> {
     assert!(
         installed_skill.contains("begin-caller-finalize"),
         "installed SKILL.md should instruct the caller to claim caller-owned finalize after coordinator handoff"
+    );
+    assert!(
+        installed_skill.contains("worktree_ref.path/.git")
+            && installed_skill.contains("format-patch -1 --stdout")
+            && installed_skill.contains("strategy = \"replay\"")
+            && installed_skill.contains(
+                "Do not replace this mirrored caller-git replay path with Python `shutil`"
+            ),
+        "installed SKILL.md should document replaying accepted commits from the authoritative worktree gitdir when caller cherry-pick cannot resolve the object"
+    );
+    assert!(
+        installed_skill.contains("caller_git_dir")
+            && installed_skill.contains("rev-parse --absolute-git-dir")
+            && installed_skill.contains(".loopy/caller-git")
+            && installed_skill.contains("GIT_DIR=\"$caller_git_dir\"")
+            && installed_skill.contains("GIT_WORK_TREE=\"<workspace_root>\""),
+        "installed SKILL.md should document the mirrored caller gitdir fallback for read-only caller .git sandboxes"
     );
     assert!(
         installed_skill.contains("block-caller-finalize"),
@@ -217,6 +233,24 @@ fn installer_builds_and_copies_the_submit_loop_skill_bundle() -> Result<()> {
         "installed coordinator should document the explicit gitdir-based worktree creation fallback"
     );
     assert!(
+        installed_coordinator.contains("mkdir -p")
+            && installed_coordinator.contains("cp -a")
+            && installed_coordinator.contains(".git/.")
+            && installed_coordinator.contains("show-ref --verify --quiet")
+            && installed_coordinator.contains("refs/heads/<branch>"),
+        "installed coordinator should spell out the mirrored-gitdir fallback setup and branch-existence probe"
+    );
+    assert!(
+        installed_coordinator.contains("worktree add -b \"<branch>\"")
+            && installed_coordinator.contains("worktree add \"<worktree_path>\" \"<branch>\""),
+        "installed coordinator should document both mirrored-gitdir worktree-add variants"
+    );
+    assert!(
+        installed_coordinator.contains("rerun `<bundle_bin> prepare-worktree --loop-id <loop_id> --workspace <workspace_root>`")
+            || installed_coordinator.contains("re-run `<bundle_bin> prepare-worktree --loop-id <loop_id> --workspace <workspace_root>`"),
+        "installed coordinator should require re-entering prepare-worktree after the mirrored-gitdir fallback"
+    );
+    assert!(
         installed_coordinator.contains(
             "If `prepare-worktree` returns a failure result, return it immediately instead of continuing to step 2."
         ),
@@ -292,6 +326,20 @@ fn installer_builds_and_copies_the_submit_loop_skill_bundle() -> Result<()> {
             && installed_coordinator.contains("latest_review.round_status")
             && installed_coordinator.contains("result.status"),
         "installed coordinator should document the authoritative show-loop JSON polling fields it may use"
+    );
+    assert!(
+        installed_coordinator.contains("SUBMIT_LOOP__submit_checkpoint_plan")
+            && installed_coordinator.contains("SUBMIT_LOOP__declare_worker_blocked")
+            && installed_coordinator.contains("SUBMIT_LOOP__submit_candidate_commit")
+            && installed_coordinator.contains("Do not shorten them"),
+        "installed coordinator should compare accepted_terminal_api against the exact runtime API names instead of shorthand labels"
+    );
+    assert!(
+        installed_coordinator.contains(".loopy/loopy.db")
+            && installed_coordinator.contains("SUBMIT_LOOP__checkpoint_current")
+            && installed_coordinator.contains("execution_state != 'accepted'")
+            && installed_coordinator.contains("do not infer checkpoint ids from checkpoint titles"),
+        "installed coordinator should document the read-only checkpoint-id lookup against the workspace-local projection database"
     );
     assert!(
         !installed_coordinator.contains("../SKILL.md"),
@@ -385,7 +433,8 @@ fn installed_bundle_skill_mentions_show_loop_status_query() -> Result<()> {
 
     let installed_skill = fs::read_to_string(install_root.join("SKILL.md"))?;
     assert!(
-        installed_skill.contains("<bundle_bin> show-loop --loop-id <loop_id> --workspace <workspace_root>"),
+        installed_skill
+            .contains("<bundle_bin> show-loop --loop-id <loop_id> --workspace <workspace_root>"),
         "installed SKILL.md should document the show-loop status query with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
@@ -504,6 +553,11 @@ fn installed_worker_roles_are_stage_specific() -> Result<()> {
         "installed planning worker role should stay focused on repository-grounded planning and checkpoint contract quality"
     );
     assert!(
+        planner_role.contains("Prefer checkpoint contracts that certify the submitted current repository/worktree state")
+            && planner_role.contains("Do not introduce committed-candidate refs by default"),
+        "installed planning worker role should default to direct current-state verification unless committed candidate refs are truly required"
+    );
+    assert!(
         !planner_role.contains("declare-worker-blocked") && !planner_role.contains("bundle_bin"),
         "installed planning worker role should not duplicate runtime-owned protocol CLI text"
     );
@@ -511,11 +565,146 @@ fn installed_worker_roles_are_stage_specific() -> Result<()> {
     let implementer_role = fs::read_to_string(
         install_root.join("roles/coding-task/artifact_worker/codex_implementer.md"),
     )?;
+    let planner_role = fs::read_to_string(
+        install_root.join("roles/coding-task/planning_worker/codex_planner.md"),
+    )?;
+    assert!(
+        planner_role.contains("tracked-file scope")
+            && planner_role.contains("pre-change tracked-file set")
+            && planner_role.contains("worktree-versus-index diff checks alone"),
+        "installed planning worker role should require stable-baseline verification for tracked-file scope claims"
+    );
+    assert!(
+        planner_role.contains("do not use `--diff-filter=AM`")
+            && planner_role.contains("hide deletions, renames, type changes")
+            && planner_role.contains("exactly match the allowed deliverable set"),
+        "installed planning worker role should forbid filtered diff listings that hide tracked changes when proving exclusive file scope"
+    );
+    assert!(
+        planner_role.contains("Do not use `git diff --name-only HEAD`")
+            && planner_role.contains("worktree-versus-current-`HEAD` checks")
+            && planner_role.contains("literal tracked-file baseline plus exact current contents"),
+        "installed planning worker role should forbid HEAD-relative worktree diff checks for committed candidate scope"
+    );
+    assert!(
+        planner_role.contains("certifying a committed candidate artifact")
+            && planner_role.contains("verify deliverable contents from that same committed candidate ref")
+            && planner_role.contains("Do not mix worktree file reads with `HEAD^..HEAD`"),
+        "installed planning worker role should require committed-artifact content checks to use the same committed ref as scope verification"
+    );
+    assert!(
+        planner_role.contains("If any verification step uses committed candidate refs such as `HEAD^..HEAD`")
+            && planner_role.contains("treat the entire checkpoint contract as certifying a committed candidate artifact")
+            && planner_role.contains("do not mix in current-worktree file reads"),
+        "installed planning worker role should force all verification onto the committed-ref basis once any committed candidate refs are introduced"
+    );
+    assert!(
+        planner_role.contains("bind tree and diff queries to an explicit candidate commit ref or SHA")
+            && planner_role.contains("floating current-branch names such as bare `HEAD` and `HEAD^` alone")
+            && planner_role.contains("derive it from that explicit candidate ref"),
+        "installed planning worker role should require committed-candidate verification to bind queries to an explicit candidate ref or SHA"
+    );
+    assert!(
+        planner_role.contains("execute a generated script or other executable deliverable")
+            && planner_role.contains("execute bytes materialized from that same explicit candidate ref")
+            && planner_role.contains("Do not run `./path` from the current worktree"),
+        "installed planning worker role should require executable checks to use the same committed candidate artifact state as the rest of verification"
+    );
+    assert!(
+        planner_role.contains("Before any candidate commit exists")
+            && planner_role.contains("use the current checked-out baseline such as `HEAD:<path>`")
+            && planner_role.contains("Do not switch that baseline to `HEAD^:<path>`"),
+        "installed planning worker role should keep worktree-state verification on the current HEAD baseline unless parent history is explicitly required"
+    );
+    assert!(
+        planner_role.contains("line.endswith(('.', '!', '?'))")
+            && planner_role.contains("reviewer-rejected verification snippet unchanged"),
+        "installed planning worker role should explicitly forbid malformed Python verification syntax and repeated rejected verification commands"
+    );
+    assert!(
+        planner_role.contains("Prefer a single-quoted shell wrapper with double-quoted Python string literals")
+            && planner_role.contains("do not emit nested unescaped quotes"),
+        "installed planning worker role should require shell-safe quoting for python -c verification steps"
+    );
+    assert!(
+        planner_role.contains("contains quote characters that would make a `python -c` shell wrapper fragile")
+            && planner_role.contains("use a non-piped `python3 - <<'PY'` here-doc")
+            && planner_role.contains("shell-malformed"),
+        "installed planning worker role should require a safer quoting strategy when python -c would become shell malformed"
+    );
+    assert!(
+        planner_role.contains("do not pipe into `python - <<'PY'`")
+            && planner_role.contains("replace stdin with the inline script body")
+            && planner_role.contains("use a form such as `python -c` that actually reads the pipeline stdin"),
+        "installed planning worker role should forbid here-doc Python pipeline verifiers that cannot read producer stdout"
+    );
+    assert!(
+        planner_role.contains("quote every path, ref, and argv token as a Python string literal")
+            && planner_role.contains("README.md")
+            && planner_role.contains("docs/proof.txt")
+            && planner_role.contains("git")
+            && planner_role.contains("HEAD"),
+        "installed planning worker role should forbid bare Python identifiers inside verification commands"
+    );
+    assert!(
+        planner_role.contains("only reference `HEAD^`, merge bases, or other parent commits")
+            && planner_role.contains("Do not assume the repository has more than one commit")
+            && planner_role.contains("nonexistent-history verification command"),
+        "installed planning worker role should forbid verification steps that assume nonexistent repository history"
+    );
+    assert!(
+        planner_role.contains("do not build the expected post-change bytes from `HEAD:<path>`")
+            && planner_role.contains("double-counting the required edit")
+            && planner_role.contains("same checkpoint contract must survive later artifact review")
+            && planner_role.contains("Anchor the pre-change bytes to `HEAD^:<path>`"),
+        "installed planning worker role should forbid append-only contracts that read the pre-change baseline from candidate HEAD"
+    );
+    assert!(
+        planner_role.contains("subjective size words such as `short`, `brief`, or `small`")
+            && planner_role.contains("concrete measurable bound")
+            && planner_role.contains("Do not leave text-length expectations implicit"),
+        "installed planning worker role should require concrete measurable bounds for subjective text-length requirements"
+    );
+    assert!(
+        planner_role.contains("do not compare current worktree files to `HEAD:<path>`")
+            && planner_role.contains("candidate is checked out as `HEAD`")
+            && planner_role.contains("certify the candidate tree against itself"),
+        "installed planning worker role should forbid HEAD-based tracked-file comparisons that would self-certify the candidate tree"
+    );
+    assert!(
+        planner_role.contains("iterating `git ls-files` and comparing each worktree path to `git show HEAD:{path}`")
+            && planner_role.contains("collapses into self-comparison")
+            && planner_role.contains("exact current tracked/untracked file sets"),
+        "installed planning worker role should forbid per-file HEAD self-comparisons when proving tracked-file scope"
+    );
+    assert!(
+        planner_role.contains("do not use `git ls-tree -r --name-only HEAD`")
+            && planner_role.contains("only prove the pre-change commit tree")
+            && planner_role.contains("working tree or index state"),
+        "installed planning worker role should forbid using the current HEAD tree to prove uncommitted tracked-file contents"
+    );
+    assert!(
+        planner_role.contains("certifying the current worktree submission state")
+            && planner_role.contains("commands such as `git ls-files`")
+            && planner_role.contains("Do not mix worktree content checks with pre-change commit-tree scope checks"),
+        "installed planning worker role should require current-state tracked-file queries for worktree submission scope"
+    );
     assert!(
         implementer_role.contains("smallest defensible change set")
             && implementer_role.contains("verification evidence")
             && implementer_role.contains("follow-up"),
         "installed artifact worker role should stay focused on minimal implementation and caller-facing follow-up ideas"
+    );
+    assert!(
+        implementer_role.contains("Once acceptance passes")
+            && implementer_role.contains("git rev-parse HEAD")
+            && implementer_role.contains("submit that candidate"),
+        "installed artifact worker role should describe the direct acceptance-to-commit submission sequence"
+    );
+    assert!(
+        implementer_role.contains("do not repoint `.git`")
+            || implementer_role.contains("alternate git metadata"),
+        "installed artifact worker role should forbid candidate commits that depend on private git metadata detours"
     );
     assert!(
         !implementer_role.contains("declare-worker-blocked")
@@ -981,6 +1170,24 @@ fn installed_bundle_contract_requires_minimal_context_coordinator_launch() -> Re
             && installed_checkpoint_scope.contains("reviewable unit"),
         "installed checkpoint scope reviewer should stay focused on checkpoint boundary quality"
     );
+    assert!(
+        installed_checkpoint_scope.contains("`git ls-tree -r --name-only HEAD`")
+            && installed_checkpoint_scope.contains("current commit tree")
+            && installed_checkpoint_scope.contains("does not prove an uncommitted submission state"),
+        "installed checkpoint scope reviewer should reject HEAD-tree checks that claim to prove post-change repository contents"
+    );
+    assert!(
+        installed_checkpoint_scope.contains("`--diff-filter=AM`")
+            && installed_checkpoint_scope.contains("hide deletions, renames, type changes")
+            && installed_checkpoint_scope.contains("full changed tracked-file set"),
+        "installed checkpoint scope reviewer should reject filtered diff listings that cannot prove no other tracked changes"
+    );
+    assert!(
+        installed_checkpoint_scope.contains("mixes worktree content reads with committed-ref scope checks")
+            && installed_checkpoint_scope.contains("`HEAD^..HEAD`")
+            && installed_checkpoint_scope.contains("same committed artifact state"),
+        "installed checkpoint scope reviewer should reject mixed worktree-versus-commit proofs for committed artifacts"
+    );
     let installed_checkpoint_contract = fs::read_to_string(
         install_root.join("roles/coding-task/checkpoint_reviewer/codex_contract.md"),
     )?;
@@ -989,6 +1196,29 @@ fn installed_bundle_contract_requires_minimal_context_coordinator_launch() -> Re
             && installed_checkpoint_contract.contains("deliverables")
             && installed_checkpoint_contract.contains("acceptance"),
         "installed checkpoint contract reviewer should stay focused on verification and contract closure"
+    );
+    assert!(
+        installed_checkpoint_contract.contains("expected post-change bytes from `HEAD:<path>`")
+            && installed_checkpoint_contract.contains("candidate commit checked out as `HEAD`")
+            && installed_checkpoint_contract.contains("explicit pre-change basis such as `HEAD^:<path>`"),
+        "installed checkpoint contract reviewer should reject append-only contracts that double-count edits from candidate HEAD"
+    );
+    assert!(
+        installed_checkpoint_contract.contains("pipe data into `python - <<'PY'`")
+            && installed_checkpoint_contract.contains("the here-doc consumes stdin")
+            && installed_checkpoint_contract.contains("does not execute as claimed"),
+        "installed checkpoint contract reviewer should reject Python here-doc pipeline verifiers that cannot consume the intended stdin"
+    );
+    assert!(
+        installed_checkpoint_contract.contains("shell quoting or Python quoting is malformed")
+            && installed_checkpoint_contract.contains("bare identifiers where string literals are required"),
+        "installed checkpoint contract reviewer should reject malformed quoting and bare Python identifiers in verification commands"
+    );
+    assert!(
+        installed_checkpoint_contract.contains("`git diff --name-only HEAD`")
+            && installed_checkpoint_contract.contains("worktree-versus-current-`HEAD` comparisons")
+            && installed_checkpoint_contract.contains("still proves scope with the candidate commit checked out as `HEAD`"),
+        "installed checkpoint contract reviewer should reject HEAD-relative scope checks for committed candidates"
     );
 
     Ok(())
@@ -1033,6 +1263,12 @@ fn installed_bundle_documents_exact_cli_forms_for_prompts() -> Result<()> {
         "installed SKILL.md should document the exact optional open-loop flags"
     );
     assert!(
+        installed_skill.contains("shell-sensitive characters")
+            && installed_skill.contains("Do not embed those values raw inside a double-quoted `bash -lc` string")
+            && installed_skill.contains("subprocess.run([...], check=True)"),
+        "installed SKILL.md should require argv-safe caller-side runtime invocation when summary, context, or JSON values contain shell metacharacters"
+    );
+    assert!(
         installed_skill.contains(
             "<bundle_bin> finalize-failure --loop-id <loop_id> --failure-cause-type coordinator_failure --summary <summary> --workspace <workspace_root>"
         ),
@@ -1041,8 +1277,9 @@ fn installed_bundle_documents_exact_cli_forms_for_prompts() -> Result<()> {
 
     let installed_coordinator = fs::read_to_string(install_root.join("coordinator.md"))?;
     assert!(
-        installed_coordinator
-            .contains("<bundle_bin> prepare-worktree --loop-id <loop_id> --workspace <workspace_root>"),
+        installed_coordinator.contains(
+            "<bundle_bin> prepare-worktree --loop-id <loop_id> --workspace <workspace_root>"
+        ),
         "installed coordinator should document the exact prepare-worktree CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
@@ -1076,9 +1313,47 @@ fn installed_bundle_documents_exact_cli_forms_for_prompts() -> Result<()> {
         "installed coordinator should document the exact reviewer invocation CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
+        installed_coordinator.contains("latest_invocation.status")
+            && installed_coordinator.contains(
+                "restart any still-pending reviewer slots from that same round by reusing their original `review_slot_id`s"
+            )
+            && installed_coordinator.contains(
+                "Treat provider transport errors, exhausted reconnects, or other no-terminal-API reviewer exits as retryable dispatch failures"
+            ),
+        "installed coordinator should teach retrying pending reviewer slots after transport-style reviewer failures instead of waiting forever on a pending round"
+    );
+    assert!(
+        installed_coordinator.contains(
+            "If the artifact worker outcome returns `accepted_terminal_api = null`, reopen artifact execution for the same checkpoint"
+        ),
+        "installed coordinator should teach retrying artifact workers that exit without an accepted terminal API"
+    );
+    assert!(
+        installed_coordinator.contains(
+            "first resolve `<checkpoint_id>` with the read-only `.loopy/loopy.db` query above"
+        )
+            && installed_coordinator.contains(
+                "re-evaluate the executable checkpoint state by rerunning the same read-only `.loopy/loopy.db` checkpoint query"
+            ),
+        "installed coordinator should require read-only checkpoint-id lookup before artifact dispatch and after artifact approval"
+    );
+    assert!(
         installed_coordinator.contains("blocking_issues")
             && installed_coordinator.contains("nonblocking_issues"),
         "installed coordinator should describe reviewer revision context in the redesigned structured issue terms"
+    );
+    assert!(
+        installed_coordinator
+            .contains("poll `show-loop --json` until the round stops being `pending`"),
+        "installed coordinator should require show-loop polling until a review round reaches a terminal state"
+    );
+    assert!(
+        installed_coordinator.contains("invocation_context.review_history.latest_result"),
+        "installed coordinator should explain that reopened workers receive review revision guidance through invocation_context.review_history.latest_result"
+    );
+    assert!(
+        installed_coordinator.contains("When artifact review rejects a submitted candidate commit"),
+        "installed coordinator should explicitly reopen artifact execution after artifact review rejection"
     );
     assert!(
         !installed_coordinator.contains("issues and notes"),
@@ -1090,8 +1365,9 @@ fn installed_bundle_documents_exact_cli_forms_for_prompts() -> Result<()> {
         "installed coordinator should document the exact handoff-to-caller-finalize CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(
-        installed_skill
-            .contains("<bundle_bin> begin-caller-finalize --loop-id <loop_id> --workspace <workspace_root>"),
+        installed_skill.contains(
+            "<bundle_bin> begin-caller-finalize --loop-id <loop_id> --workspace <workspace_root>"
+        ),
         "installed SKILL.md should document the exact begin-caller-finalize CLI form with explicit bundle_bin and workspace_root inputs"
     );
     assert!(

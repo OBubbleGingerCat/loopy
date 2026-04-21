@@ -641,11 +641,18 @@ fn build_runtime_prompt_markdown(invocation_context: &Value) -> Result<String> {
                     lines.push("This is a planning worker invocation. Plan the requested work; do not implement it in this invocation.".to_owned());
                     lines.push("Do not start broader brainstorming, spec-writing, or approval-gated workflows.".to_owned());
                     lines.push("Produce an ordered checkpoint plan that covers the requested work and its verification, or declare blocked if a valid plan cannot be produced.".to_owned());
+                    lines.push("If the request does not describe a concrete repository task or you cannot identify any legitimate repository deliverable from the request and current worktree, call `declare-worker-blocked` instead of inventing work or exiting without a terminal API.".to_owned());
                     lines.push("A checkpoint is a durable deliverable boundary or state transition that may require its own candidate commit and review cycle.".to_owned());
                     lines.push("Each checkpoint must describe one artifact boundary using `title`, `kind`, `deliverables`, and `acceptance`.".to_owned());
                     lines.push("Use `kind = artifact` for normal coding tasks.".to_owned());
                     lines.push("Put produced files in `deliverables`.".to_owned());
                     lines.push("Put verification commands in `acceptance.verification_steps` and behavioral goals in `acceptance.expected_outcomes`.".to_owned());
+                    lines.push("When acceptance must prove that only specific tracked files changed, write verification against `HEAD` or another stable baseline instead of relying only on worktree-versus-index diff checks.".to_owned());
+                    lines.push("When the checkpoint limits which tracked files may change, make the allowed changed-file set match the full deliverable set for that checkpoint and do not omit newly created deliverables from the allowed diff paths.".to_owned());
+                    lines.push("When the task requires append-only, exact-content, or exact line-count semantics for an existing file, make the verification prove the full post-change file equals the stable baseline plus the required edit instead of relying only on spot checks like `tail` or changed-file lists.".to_owned());
+                    lines.push("When the task requires exact content for a new or fully replaced file, make the verification compare the full required bytes or text literally, including the intended trailing newline behavior, instead of accepting placeholder content such as only `\\n`.".to_owned());
+                    lines.push("When artifact verification must compare the candidate against its pre-change basis, write the command so it still passes with the candidate commit checked out as `HEAD`; use `HEAD^` or another explicit stable pre-change reference instead of assuming `HEAD` is unchanged.".to_owned());
+                    lines.push("Every verification step must be copy-paste executable as written. If you need to compare multi-line output such as changed-file lists, use Python or properly quoted expected strings instead of malformed shell placeholders or bare `$...` pseudo-literals.".to_owned());
                     lines.push("Treat routine verification as part of the checkpoint that produces the artifact, not as a separate checkpoint.".to_owned());
                     lines.push("Do not create a standalone checkpoint whose only purpose is syntax checking, test execution, local validation, or confirming expected behavior.".to_owned());
                     lines.push("Create a standalone verification checkpoint only when verification itself produces a separate deliverable, changes external state, or the user explicitly asks for a separate verification phase.".to_owned());
@@ -656,6 +663,15 @@ fn build_runtime_prompt_markdown(invocation_context: &Value) -> Result<String> {
                     lines.push("This is an artifact worker invocation. Execute only the bound checkpoint and keep work scoped to that checkpoint.".to_owned());
                     lines.push("Treat `bound_checkpoint` in `invocation_context` as the authoritative artifact contract, including its deliverables and acceptance criteria.".to_owned());
                     lines.push("Make the minimal change needed, run the relevant `acceptance.verification_steps`, and satisfy the `acceptance.expected_outcomes` before submitting the candidate commit or declaring blocked.".to_owned());
+                    lines.push("`acceptance.expected_outcomes` are binding requirements, not optional prose.".to_owned());
+                    lines.push("When the checkpoint requires exact content, line-count, or formatting outcomes, inspect the full diff or file content against `HEAD` or another stable baseline instead of relying only on spot checks like `tail`.".to_owned());
+                    lines.push("If `acceptance.verification_steps` and `acceptance.expected_outcomes` conflict or the verification would certify the wrong artifact, declare blocked instead of submitting.".to_owned());
+                    lines.push("If direct file-edit helpers fail under the nested executor sandbox, fall back to shell-based repository edits in the bound worktree instead of retrying ad hoc private edit paths.".to_owned());
+                    lines.push("Once the checkpoint contract is satisfied, stop exploring and transition immediately into submission.".to_owned());
+                    lines.push("Use this exact finish sequence: run the checkpoint verification, stage the checkpoint deliverables, create the candidate commit in the current repository, resolve the candidate SHA with `git rev-parse HEAD`, then call `submit-candidate-commit`.".to_owned());
+                    lines.push("Ignore executor-created untracked runtime directories when judging checkpoint scope; rely on the checkpoint deliverables and tracked-file changes.".to_owned());
+                    lines.push("Create the candidate commit in the bound worktree's existing repository so reviewers can inspect the same commit SHA.".to_owned());
+                    lines.push("Do not repoint `.git`, set an alternate `GIT_DIR`, or copy git metadata into `/tmp` to manufacture a private candidate commit.".to_owned());
                     lines.push("An artifact worker invocation must finish by calling exactly one allowed terminal API.".to_owned());
                     append_artifact_worker_schema_contracts(&mut lines);
                 }
@@ -685,11 +701,17 @@ fn build_runtime_prompt_markdown(invocation_context: &Value) -> Result<String> {
                     lines.push("Reject plans that split routine verification into standalone checkpoints without a separate deliverable, external state change, or explicit user request.".to_owned());
                     lines.push("Prefer plans where verification is attached to the artifact-producing checkpoint rather than appended as a trailing verification-only checkpoint.".to_owned());
                     lines.push("Reject plans whose checkpoints omit deliverables or acceptance metadata, or that use acceptance metadata only to restate a standalone verification-only checkpoint.".to_owned());
+                    lines.push("Reject plans whose verification steps are malformed, not directly executable as written, or fail to check the contract they claim to prove.".to_owned());
+                    lines.push("Reject plans when `acceptance.verification_steps` would certify an artifact that does not actually satisfy `acceptance.expected_outcomes`.".to_owned());
+                    lines.push("Reject exact-content or newline-sensitive plans unless the verification literally checks the full required bytes or text, including the intended trailing newline behavior.".to_owned());
                     append_checkpoint_reviewer_schema_contracts(&mut lines);
                 }
                 "artifact" => {
                     lines.push("This is an artifact reviewer invocation. Review the bound checkpoint artifact and candidate commit only.".to_owned());
                     lines.push("Use the checkpoint deliverables and acceptance metadata in `review_target` as the authoritative review contract.".to_owned());
+                    lines.push("`acceptance.expected_outcomes` are binding review criteria, not optional prose.".to_owned());
+                    lines.push("Reject when the candidate's actual bytes, text, or formatting contradict exact-content or newline-sensitive expected outcomes.".to_owned());
+                    lines.push("Reject when `acceptance.verification_steps` and `acceptance.expected_outcomes` do not prove the same artifact.".to_owned());
                     append_artifact_reviewer_schema_contracts(&mut lines);
                 }
                 other => bail!("unsupported review_kind {other} in invocation context"),
@@ -990,8 +1012,8 @@ pub fn resolve_executor_command(
         workspace_root,
         worktree_path,
         invocation_context_path,
-    ));
-    command.extend(args.iter().map(|arg| {
+    )?);
+    for arg in args {
         resolve_template_value(
             arg,
             bundle_bin,
@@ -999,7 +1021,8 @@ pub fn resolve_executor_command(
             worktree_path,
             invocation_context_path,
         )
-    }));
+        .map(|resolved| command.push(resolved))?;
+    }
     Ok((command, args_variant))
 }
 
@@ -1028,8 +1051,18 @@ fn resolve_template_value(
     workspace_root: &Path,
     worktree_path: &str,
     invocation_context_path: &Path,
-) -> String {
-    value
+) -> Result<String> {
+    let codex_home = std::env::var("CODEX_HOME").ok().or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| Path::new(&home).join(".codex").display().to_string())
+    });
+    let worktree_git_dir = if value.contains("{worktree_git_dir}") {
+        Some(resolve_worktree_git_dir(worktree_path)?)
+    } else {
+        None
+    };
+    Ok(value
         .replace("{bundle_bin}", &bundle_bin.display().to_string())
         .replace("{workspace_root}", &workspace_root.display().to_string())
         .replace("{worktree_path}", worktree_path)
@@ -1037,11 +1070,49 @@ fn resolve_template_value(
             "{invocation_context_path}",
             &invocation_context_path.display().to_string(),
         )
+        .replace("{codex_home}", codex_home.as_deref().unwrap_or(""))
+        .replace(
+            "{worktree_git_dir}",
+            worktree_git_dir.as_deref().unwrap_or(""),
+        ))
+}
+
+fn resolve_worktree_git_dir(worktree_path: &str) -> Result<String> {
+    let git_metadata_path = Path::new(worktree_path).join(".git");
+    if git_metadata_path.is_dir() {
+        return Ok(git_metadata_path.display().to_string());
+    }
+    let git_pointer = fs::read_to_string(&git_metadata_path).with_context(|| {
+        format!(
+            "failed to read worktree git metadata pointer {}",
+            git_metadata_path.display()
+        )
+    })?;
+    let pointer = git_pointer
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .ok_or_else(|| {
+            anyhow!(
+                "expected gitdir pointer in {}",
+                git_metadata_path.display()
+            )
+        })?;
+    let resolved = Path::new(pointer);
+    let resolved = if resolved.is_absolute() {
+        resolved.to_path_buf()
+    } else {
+        Path::new(worktree_path).join(resolved)
+    };
+    Ok(resolved.display().to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use anyhow::Result;
 
@@ -1081,6 +1152,61 @@ mod tests {
         assert_eq!(command[1], "mock-executor");
         assert_eq!(command[2], "worker");
         assert_eq!(command[3], invocation_context_path.display().to_string());
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_executor_command_supports_worktree_git_dir_placeholder() -> Result<()> {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_nanos();
+        let workspace = env::temp_dir().join(format!(
+            "loopy-submit-loop-bundle-worktree-gitdir-{unique_suffix}"
+        ));
+        if workspace.exists() {
+            fs::remove_dir_all(&workspace)?;
+        }
+        fs::create_dir_all(&workspace)?;
+        let worktree = workspace.join(".loopy/worktrees/loop");
+        fs::create_dir_all(&worktree)?;
+        let gitdir = workspace.join(".loopy/git-common-loop/worktrees/loop");
+        fs::create_dir_all(&gitdir)?;
+        fs::write(worktree.join(".git"), format!("gitdir: {}\n", gitdir.display()))?;
+
+        let executor_profile = ExecutorProfile {
+            kind: "local_command".to_owned(),
+            command: "codex".to_owned(),
+            args: vec![
+                "exec".to_owned(),
+                "--add-dir".to_owned(),
+                "{worktree_git_dir}".to_owned(),
+                "-C".to_owned(),
+                "{worktree_path}".to_owned(),
+            ],
+            bypass_sandbox_args: None,
+            bypass_sandbox_inherit_env: false,
+            cwd: "worktree".to_owned(),
+            timeout_sec: 60,
+            transcript_capture: "stdio".to_owned(),
+            env_allow: None,
+        };
+        let invocation_context_path = workspace.join(".loopy/invocations/inv-1.json");
+
+        let (command, args_variant) = resolve_executor_command(
+            &executor_profile,
+            Path::new("/tmp/target/debug/loopy-submit-loop"),
+            &workspace,
+            worktree
+                .to_str()
+                .expect("temp worktree path should be valid utf-8"),
+            &invocation_context_path,
+            false,
+        )?;
+
+        assert_eq!(args_variant, "default");
+        assert_eq!(command[3], gitdir.display().to_string());
+        fs::remove_dir_all(&workspace)?;
 
         Ok(())
     }

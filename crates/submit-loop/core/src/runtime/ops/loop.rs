@@ -1,6 +1,8 @@
 // Loop ops own loop lifecycle and result-building workflows; query helpers stay in sibling modules.
 
 use super::super::{projection, query, roles, system, *};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 pub(crate) fn open_loop(runtime: &Runtime, request: OpenLoopRequest) -> Result<OpenLoopResponse> {
     let skill_root = runtime.installed_skill_root()?;
@@ -130,29 +132,7 @@ pub(crate) fn prepare_worktree(
             &loop_state.worktree_label,
         )?;
     }
-    let prepare_result = if worktree_branch_exists(runtime, &loop_state.worktree_branch)? {
-        system::git_verify(
-            &runtime.workspace_root,
-            &[
-                "worktree",
-                "add",
-                worktree_path_str,
-                &loop_state.worktree_branch,
-            ],
-        )
-    } else {
-        system::git_verify(
-            &runtime.workspace_root,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &loop_state.worktree_branch,
-                worktree_path_str,
-                &loop_state.base_commit_sha,
-            ],
-        )
-    };
+    let prepare_result = prepare_disposable_worktree(runtime, &loop_state, worktree_path_str);
     match prepare_result {
         Ok(()) => record_prepared_worktree(runtime, &request.loop_id, &loop_state),
         Err(error) => {
@@ -230,13 +210,22 @@ fn existing_worktree_matches_branch(
     loop_state: &LoopState,
     worktree_path_str: &str,
 ) -> Result<bool> {
-    if !registered_disposable_worktree(runtime, worktree_path_str, &loop_state.worktree_label)? {
-        return Ok(false);
-    }
     let worktree_path = Path::new(worktree_path_str);
     if !worktree_path.try_exists()? {
         return Ok(false);
     }
+    if registered_disposable_worktree(runtime, worktree_path_str, &loop_state.worktree_label)? {
+        return worktree_head_matches_branch(runtime, worktree_path, worktree_path_str, loop_state);
+    }
+    mirrored_worktree_metadata_matches_branch(runtime, worktree_path_str, loop_state)
+}
+
+fn worktree_head_matches_branch(
+    runtime: &Runtime,
+    worktree_path: &Path,
+    worktree_path_str: &str,
+    loop_state: &LoopState,
+) -> Result<bool> {
     let output = Command::new("git")
         .args(["-C", worktree_path_str, "rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&runtime.workspace_root)
@@ -253,6 +242,20 @@ fn existing_worktree_matches_branch(
     Ok(String::from_utf8_lossy(&output.stdout).trim() == loop_state.worktree_branch)
 }
 
+fn mirrored_worktree_metadata_matches_branch(
+    runtime: &Runtime,
+    worktree_path_str: &str,
+    loop_state: &LoopState,
+) -> Result<bool> {
+    let worktree_path = Path::new(worktree_path_str);
+    if mirrored_gitdir_path_from_worktree_metadata(runtime, worktree_path_str, &loop_state.worktree_label)?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    worktree_head_matches_branch(runtime, worktree_path, worktree_path_str, loop_state)
+}
+
 fn worktree_branch_exists(runtime: &Runtime, branch: &str) -> Result<bool> {
     let output = Command::new("git")
         .args([
@@ -265,6 +268,179 @@ fn worktree_branch_exists(runtime: &Runtime, branch: &str) -> Result<bool> {
         .output()
         .with_context(|| format!("failed to inspect worktree branch {branch}"))?;
     Ok(output.status.success())
+}
+
+fn prepare_disposable_worktree(
+    runtime: &Runtime,
+    loop_state: &LoopState,
+    worktree_path_str: &str,
+) -> Result<()> {
+    let primary_result = if worktree_branch_exists(runtime, &loop_state.worktree_branch)? {
+        system::git_verify(
+            &runtime.workspace_root,
+            &[
+                "worktree",
+                "add",
+                worktree_path_str,
+                &loop_state.worktree_branch,
+            ],
+        )
+    } else {
+        system::git_verify(
+            &runtime.workspace_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &loop_state.worktree_branch,
+                worktree_path_str,
+                &loop_state.base_commit_sha,
+            ],
+        )
+    };
+    match primary_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if !retryable_for_mirrored_gitdir_fallback(&error) {
+                return Err(error);
+            }
+            prepare_disposable_worktree_with_mirrored_gitdir_fallback(
+                runtime,
+                loop_state,
+                worktree_path_str,
+            )
+            .with_context(|| {
+                format!("primary gitdir prepare-worktree failed before mirrored fallback: {error:#}")
+            })
+        }
+    }
+}
+
+fn prepare_disposable_worktree_with_mirrored_gitdir_fallback(
+    runtime: &Runtime,
+    loop_state: &LoopState,
+    worktree_path_str: &str,
+) -> Result<()> {
+    if mirrored_worktree_metadata_matches_branch(runtime, worktree_path_str, loop_state)? {
+        return Ok(());
+    }
+
+    let mirror_path = mirrored_gitdir_path(runtime, &loop_state.worktree_label);
+    if !mirror_path.try_exists()? {
+        fs::create_dir_all(&mirror_path)
+            .with_context(|| format!("failed to create {}", mirror_path.display()))?;
+        let source_git_dir = workspace_gitdir_source_path(runtime)?;
+        copy_directory_contents(&source_git_dir, &mirror_path)?;
+    }
+    ensure_mirrored_gitdir_write_paths(&mirror_path)?;
+
+    let git_dir_arg = format!("--git-dir={}", mirror_path.display());
+    let work_tree_arg = format!("--work-tree={}", runtime.workspace_root.display());
+    let mut args = vec![
+        git_dir_arg,
+        work_tree_arg,
+        "worktree".to_owned(),
+        "add".to_owned(),
+    ];
+    if worktree_branch_exists(runtime, &loop_state.worktree_branch)? {
+        args.push(worktree_path_str.to_owned());
+        args.push(loop_state.worktree_branch.clone());
+    } else {
+        args.push("-b".to_owned());
+        args.push(loop_state.worktree_branch.clone());
+        args.push(worktree_path_str.to_owned());
+        args.push(loop_state.base_commit_sha.clone());
+    }
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    match system::git_verify(&runtime.workspace_root, &arg_refs) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if mirrored_worktree_metadata_matches_branch(runtime, worktree_path_str, loop_state)? {
+                return Ok(());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn workspace_gitdir_source_path(runtime: &Runtime) -> Result<PathBuf> {
+    let git_path = runtime.workspace_root.join(".git");
+    if git_path.is_dir() {
+        return Ok(git_path);
+    }
+    let metadata = fs::read_to_string(&git_path)
+        .with_context(|| format!("failed to read {}", git_path.display()))?;
+    let Some(gitdir_value) = metadata.strip_prefix("gitdir:") else {
+        bail!("workspace git metadata {} did not contain a gitdir pointer", git_path.display());
+    };
+    let gitdir_path = PathBuf::from(gitdir_value.trim());
+    if gitdir_path.is_absolute() {
+        Ok(gitdir_path)
+    } else {
+        Ok(runtime.workspace_root.join(gitdir_path))
+    }
+}
+
+fn copy_directory_contents(source_root: &Path, destination_root: &Path) -> Result<()> {
+    fs::create_dir_all(destination_root)
+        .with_context(|| format!("failed to create {}", destination_root.display()))?;
+    for entry in fs::read_dir(source_root)
+        .with_context(|| format!("failed to read {}", source_root.display()))?
+    {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination_root.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_directory_contents(&source_path, &destination_path)?;
+            let permissions = fs::metadata(&source_path)?.permissions();
+            fs::set_permissions(&destination_path, permissions).with_context(|| {
+                format!("failed to set permissions on {}", destination_path.display())
+            })?;
+        } else {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+            let permissions = fs::metadata(&source_path)?.permissions();
+            fs::set_permissions(&destination_path, permissions).with_context(|| {
+                format!("failed to set permissions on {}", destination_path.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_mirrored_gitdir_write_paths(mirror_path: &Path) -> Result<()> {
+    for directory in [
+        mirror_path.to_path_buf(),
+        mirror_path.join("refs"),
+        mirror_path.join("refs").join("heads"),
+        mirror_path.join("logs"),
+        mirror_path.join("logs").join("refs"),
+        mirror_path.join("logs").join("refs").join("heads"),
+        mirror_path.join("worktrees"),
+    ] {
+        if !directory.try_exists()? {
+            fs::create_dir_all(&directory)
+                .with_context(|| format!("failed to create {}", directory.display()))?;
+        }
+        let metadata = fs::metadata(&directory)?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o700);
+        fs::set_permissions(&directory, permissions)
+            .with_context(|| format!("failed to relax {}", directory.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_mirrored_gitdir_write_paths(_mirror_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn retryable_for_mirrored_gitdir_fallback(error: &anyhow::Error) -> bool {
@@ -627,14 +803,24 @@ pub(crate) fn cleanup_disposable_worktree(
         return Ok(());
     }
 
-    if attempt_disposable_worktree_cleanup(runtime, worktree_path, worktree_label).is_ok()
-        || !worktree_path.try_exists()?
-    {
+    let first_cleanup = attempt_disposable_worktree_cleanup(runtime, worktree_path, worktree_label);
+    if first_cleanup.is_ok() || !worktree_path.try_exists()? {
+        return Ok(());
+    }
+    if recover_prunable_disposable_worktree(runtime, worktree_path, worktree_label)? {
         return Ok(());
     }
 
     best_effort_abort_unfinished_git_operations(runtime, worktree_path)?;
-    attempt_disposable_worktree_cleanup(runtime, worktree_path, worktree_label)
+    let second_cleanup =
+        attempt_disposable_worktree_cleanup(runtime, worktree_path, worktree_label);
+    if second_cleanup.is_ok() || !worktree_path.try_exists()? {
+        return Ok(());
+    }
+    if recover_prunable_disposable_worktree(runtime, worktree_path, worktree_label)? {
+        return Ok(());
+    }
+    second_cleanup
 }
 
 fn attempt_disposable_worktree_cleanup(
@@ -649,11 +835,130 @@ fn attempt_disposable_worktree_cleanup(
         &runtime.workspace_root,
         &["-C", worktree_path_str, "reset", "--hard"],
     )?;
+    // Linked worktrees store their gitdir pointer as a top-level `.git` file.
+    // Preserve that file so `git worktree remove --force` can still validate
+    // and deregister the worktree after cleaning untracked contents.
     system::git_verify(
         &runtime.workspace_root,
-        &["-C", worktree_path_str, "clean", "-ffdx"],
+        &["-C", worktree_path_str, "clean", "-ffdx", "-e", "/.git"],
     )?;
     remove_disposable_worktree_registration(runtime, worktree_path_str, worktree_label)
+}
+
+fn recover_prunable_disposable_worktree(
+    runtime: &Runtime,
+    worktree_path: &Path,
+    worktree_label: &str,
+) -> Result<bool> {
+    let git_metadata_path = worktree_path.join(".git");
+    if git_metadata_path.try_exists()? {
+        return Ok(false);
+    }
+
+    let worktree_path_str = worktree_path
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 worktree path {}", worktree_path.display()))?;
+    let worktree_line = format!("worktree {worktree_path_str}");
+
+    match locate_disposable_worktree_registration(runtime, worktree_path_str, worktree_label)? {
+        Some(DisposableWorktreeRegistration::Mirror(mirrored_gitdir)) => {
+            // `git worktree remove --force` can leave a mirrored registration in a
+            // prunable state after it has already removed the linked worktree's `.git`
+            // pointer. Prune that stale registration, then delete the dedicated
+            // mirror and any leftover worktree directory.
+            prune_disposable_worktree_registration(runtime, Some(&mirrored_gitdir))?;
+            if let Some(listing) = disposable_worktree_listing(runtime, Some(&mirrored_gitdir))? {
+                if listing.lines().any(|line| line == worktree_line) {
+                    return Ok(false);
+                }
+            }
+            if worktree_path.try_exists()? {
+                remove_orphaned_disposable_worktree_directory(worktree_path)?;
+            }
+            if mirrored_gitdir.try_exists()? {
+                fs::remove_dir_all(&mirrored_gitdir).with_context(|| {
+                    format!(
+                        "failed to remove mirrored gitdir {} after pruning disposable worktree registration",
+                        mirrored_gitdir.display()
+                    )
+                })?;
+            }
+            Ok(true)
+        }
+        Some(DisposableWorktreeRegistration::Primary) => {
+            prune_disposable_worktree_registration(runtime, None)?;
+            let listing = disposable_worktree_listing(runtime, None)?
+                .ok_or_else(|| anyhow!("primary git worktree listing unexpectedly unavailable"))?;
+            if listing.lines().any(|line| line == worktree_line) {
+                return Ok(false);
+            }
+            if worktree_path.try_exists()? {
+                remove_orphaned_disposable_worktree_directory(worktree_path)?;
+            }
+            Ok(true)
+        }
+        None => {
+            if worktree_path.try_exists()? {
+                remove_orphaned_disposable_worktree_directory(worktree_path)?;
+            }
+            Ok(true)
+        }
+    }
+}
+
+fn prune_disposable_worktree_registration(
+    runtime: &Runtime,
+    mirrored_gitdir: Option<&Path>,
+) -> Result<()> {
+    let output = if let Some(mirrored_gitdir) = mirrored_gitdir {
+        if !mirrored_gitdir.try_exists()? {
+            return Ok(());
+        }
+        let git_dir_arg = format!("--git-dir={}", mirrored_gitdir.display());
+        let work_tree_arg = format!("--work-tree={}", runtime.workspace_root.display());
+        let output = Command::new("git")
+            .args([
+                git_dir_arg.as_str(),
+                work_tree_arg.as_str(),
+                "worktree",
+                "prune",
+                "--verbose",
+            ])
+            .current_dir(&runtime.workspace_root)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to run git {} {} worktree prune --verbose",
+                    git_dir_arg, work_tree_arg
+                )
+            })?;
+        if !output.status.success() {
+            bail!(
+                "git {} {} worktree prune --verbose failed\nstdout:\n{}\nstderr:\n{}",
+                git_dir_arg,
+                work_tree_arg,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        output
+    } else {
+        let output = Command::new("git")
+            .args(["worktree", "prune", "--verbose"])
+            .current_dir(&runtime.workspace_root)
+            .output()
+            .context("failed to run git worktree prune --verbose")?;
+        if !output.status.success() {
+            bail!(
+                "git worktree prune --verbose failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        output
+    };
+    let _ = output;
+    Ok(())
 }
 
 fn remove_disposable_worktree_registration(
@@ -741,6 +1046,19 @@ enum DisposableWorktreeRegistration {
     Primary,
 }
 
+pub(crate) fn authoritative_worktree_git_dir(
+    runtime: &Runtime,
+    worktree_path_str: &str,
+    worktree_label: &str,
+) -> Result<PathBuf> {
+    match locate_disposable_worktree_registration(runtime, worktree_path_str, worktree_label)? {
+        Some(DisposableWorktreeRegistration::Mirror(mirrored_gitdir)) => Ok(mirrored_gitdir),
+        Some(DisposableWorktreeRegistration::Primary) | None => {
+            Ok(runtime.workspace_root.join(".git"))
+        }
+    }
+}
+
 fn locate_disposable_worktree_registration(
     runtime: &Runtime,
     worktree_path_str: &str,
@@ -760,7 +1078,62 @@ fn locate_disposable_worktree_registration(
     if primary_listing.lines().any(|line| line == worktree_line) {
         return Ok(Some(DisposableWorktreeRegistration::Primary));
     }
+    if let Some(actual_mirrored_gitdir) =
+        mirrored_gitdir_path_from_worktree_metadata(runtime, worktree_path_str, worktree_label)?
+    {
+        if let Some(listing) = disposable_worktree_listing(runtime, Some(&actual_mirrored_gitdir))?
+        {
+            if listing.lines().any(|line| line == worktree_line) {
+                return Ok(Some(DisposableWorktreeRegistration::Mirror(
+                    actual_mirrored_gitdir,
+                )));
+            }
+        }
+    }
     Ok(None)
+}
+
+fn mirrored_gitdir_path_from_worktree_metadata(
+    runtime: &Runtime,
+    worktree_path_str: &str,
+    worktree_label: &str,
+) -> Result<Option<PathBuf>> {
+    let git_metadata_path = Path::new(worktree_path_str).join(".git");
+    if !git_metadata_path.try_exists()? {
+        return Ok(None);
+    }
+    if git_metadata_path.is_dir() {
+        return Ok(None);
+    }
+    let metadata = fs::read_to_string(&git_metadata_path)
+        .with_context(|| format!("failed to read {}", git_metadata_path.display()))?;
+    let Some(gitdir_value) = metadata.strip_prefix("gitdir:") else {
+        return Ok(None);
+    };
+    let gitdir_path = PathBuf::from(gitdir_value.trim());
+    let loopy_root = runtime.workspace_root.join(".loopy");
+    if !gitdir_path.starts_with(&loopy_root) {
+        return Ok(None);
+    }
+    if gitdir_path.file_name().and_then(|name| name.to_str()) != Some(worktree_label) {
+        return Ok(None);
+    }
+    let Some(worktrees_dir) = gitdir_path.parent() else {
+        return Ok(None);
+    };
+    if worktrees_dir.file_name().and_then(|name| name.to_str()) != Some("worktrees") {
+        return Ok(None);
+    }
+    let Some(mirrored_gitdir) = worktrees_dir.parent() else {
+        return Ok(None);
+    };
+    let Some(mirrored_name) = mirrored_gitdir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    if !mirrored_name.starts_with("git-common-") {
+        return Ok(None);
+    }
+    Ok(Some(mirrored_gitdir.to_path_buf()))
 }
 
 fn disposable_worktree_listing(

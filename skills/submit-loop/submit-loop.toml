@@ -41,8 +41,8 @@ transcript_capture = "stdio"
 [executors.codex_worker]
 kind = "local_command"
 command = "codex"
-args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
-bypass_sandbox_args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=high", "-c", "shell_environment_policy.inherit=all", "-C", "{worktree_path}", "-"]
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "--add-dir", "{worktree_git_dir}", "--add-dir", "{codex_home}", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=medium", "-C", "{worktree_path}", "-"]
+bypass_sandbox_args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=medium", "-c", "shell_environment_policy.inherit=all", "-C", "{worktree_path}", "-"]
 bypass_sandbox_inherit_env = true
 cwd = "worktree"
 timeout_sec = 1200
@@ -52,7 +52,7 @@ env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]
 [executors.codex_checkpoint_reviewer]
 kind = "local_command"
 command = "codex"
-args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "--add-dir", "{worktree_git_dir}", "--add-dir", "{codex_home}", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
 bypass_sandbox_args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=high", "-c", "shell_environment_policy.inherit=all", "-C", "{worktree_path}", "-"]
 bypass_sandbox_inherit_env = true
 cwd = "worktree"
@@ -63,7 +63,7 @@ env_allow = ["OPENAI_API_KEY", "CODEX_HOME"]
 [executors.codex_artifact_reviewer]
 kind = "local_command"
 command = "codex"
-args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
+args = ["exec", "--full-auto", "--add-dir", "{workspace_root}/.loopy", "--add-dir", "{worktree_git_dir}", "--add-dir", "{codex_home}", "-m", "gpt-5.4", "-c", "sandbox_workspace_write.network_access=true", "-c", "model_reasoning_effort=high", "-C", "{worktree_path}", "-"]
 bypass_sandbox_args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=high", "-c", "shell_environment_policy.inherit=all", "-C", "{worktree_path}", "-"]
 bypass_sandbox_inherit_env = true
 cwd = "worktree"

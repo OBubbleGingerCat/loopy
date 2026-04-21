@@ -2,7 +2,8 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use loopy::{
@@ -1415,6 +1416,168 @@ fn show_loop_json_reports_blocked_caller_finalize_context() -> Result<()> {
     assert_eq!(
         payload["caller_finalize"]["human_question"],
         Value::String("Should the loop version replace the seed line?".to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn bundled_cli_finalize_success_accepts_mirrored_caller_gitdir_env_override() -> Result<()> {
+    let install_root = install_bundle()?;
+    let workspace = git_workspace()?;
+    let bundled_loopy = install_root.join("bin/loopy-submit-loop");
+
+    switch_worker_executor_to_mock(&install_root)?;
+    let runtime = Runtime::with_installed_skill_root(workspace.path(), &install_root)?;
+    let accepted = accept_single_checkpoint_loop(
+        &runtime,
+        workspace.path(),
+        "mirrored caller gitdir finalize cli",
+        "artifacts/feature.txt",
+        "implemented\n",
+    )?;
+
+    let handoff = runtime.handoff_to_caller_finalize(HandoffToCallerFinalizeRequest {
+        loop_id: accepted.loop_id.clone(),
+    })?;
+    runtime.begin_caller_finalize(BeginCallerFinalizeRequest {
+        loop_id: accepted.loop_id.clone(),
+    })?;
+
+    let caller_source_git_dir = git_output(workspace.path(), &["rev-parse", "--absolute-git-dir"])?;
+    let caller_git_dir = workspace.path().join(".loopy/caller-git");
+    fs::create_dir_all(&caller_git_dir)
+        .with_context(|| format!("failed to create {}", caller_git_dir.display()))?;
+    let caller_git_dir_str = caller_git_dir
+        .to_str()
+        .context("caller gitdir path was not valid utf-8")?;
+    let copy_output = Command::new("cp")
+        .args(["-a", &format!("{caller_source_git_dir}/."), caller_git_dir_str])
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to mirror the caller gitdir into .loopy/caller-git")?;
+    if !copy_output.status.success() {
+        bail!(
+            "mirrored caller gitdir copy failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&copy_output.stdout),
+            String::from_utf8_lossy(&copy_output.stderr)
+        );
+    }
+
+    let worktree_git_file = Path::new(&handoff.worktree_ref.path).join(".git");
+    let worktree_git_dir = fs::read_to_string(&worktree_git_file)
+        .with_context(|| format!("failed to read {}", worktree_git_file.display()))?;
+    let worktree_git_dir = worktree_git_dir
+        .strip_prefix("gitdir: ")
+        .context("linked worktree .git file did not expose a gitdir path")?
+        .trim()
+        .to_owned();
+
+    let patch_output = Command::new("git")
+        .arg(format!("--git-dir={worktree_git_dir}"))
+        .args(["format-patch", "-1", "--stdout", &accepted.accepted_commit_sha])
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to export the accepted commit as a patch from the worktree gitdir")?;
+    if !patch_output.status.success() {
+        bail!(
+            "format-patch failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&patch_output.stdout),
+            String::from_utf8_lossy(&patch_output.stderr)
+        );
+    }
+
+    let mut am_child = Command::new("git")
+        .args(["am", "-3"])
+        .env("GIT_DIR", &caller_git_dir)
+        .env("GIT_WORK_TREE", workspace.path())
+        .current_dir(workspace.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn git am for mirrored caller gitdir replay")?;
+    am_child
+        .stdin
+        .as_mut()
+        .context("missing stdin for mirrored caller git am")?
+        .write_all(&patch_output.stdout)
+        .context("failed to feed patch into mirrored caller git am")?;
+    let am_output = am_child
+        .wait_with_output()
+        .context("failed to wait for mirrored caller git am")?;
+    if !am_output.status.success() {
+        bail!(
+            "mirrored caller git am failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&am_output.stdout),
+            String::from_utf8_lossy(&am_output.stderr)
+        );
+    }
+
+    let landed_head_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .env("GIT_DIR", &caller_git_dir)
+        .env("GIT_WORK_TREE", workspace.path())
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to resolve mirrored caller gitdir HEAD")?;
+    if !landed_head_output.status.success() {
+        bail!(
+            "failed to resolve mirrored caller gitdir HEAD\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&landed_head_output.stdout),
+            String::from_utf8_lossy(&landed_head_output.stderr)
+        );
+    }
+    let landed_head = String::from_utf8(landed_head_output.stdout)?.trim().to_owned();
+
+    let integration_summary_json = json!({
+        "strategy": "replay",
+        "landed_commit_shas": [landed_head.clone()],
+        "resolution_notes": "Mirrored caller gitdir replay for read-only caller .git sandbox",
+    })
+    .to_string();
+    let success_output = Command::new(&bundled_loopy)
+        .args([
+            "finalize-success",
+            "--loop-id",
+            &accepted.loop_id,
+            "--integration-summary-json",
+            &integration_summary_json,
+        ])
+        .env("GIT_DIR", &caller_git_dir)
+        .env("GIT_WORK_TREE", workspace.path())
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to finalize success from the mirrored caller gitdir")?;
+    if !success_output.status.success() {
+        bail!(
+            "finalize-success with mirrored caller gitdir failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&success_output.stdout),
+            String::from_utf8_lossy(&success_output.stderr)
+        );
+    }
+
+    let success_result: Value = serde_json::from_slice(&success_output.stdout)?;
+    assert_eq!(success_result["status"], Value::String("success".to_owned()));
+    assert_eq!(
+        success_result["integration_summary"]["strategy"],
+        Value::String("replay".to_owned())
+    );
+    assert_eq!(
+        success_result["integration_summary"]["caller_branch"],
+        Value::String("main".to_owned())
+    );
+    assert_eq!(
+        success_result["integration_summary"]["final_head_sha"],
+        Value::String(landed_head.clone())
+    );
+    assert_eq!(
+        success_result["integration_summary"]["landed_commit_shas"],
+        json!([landed_head])
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("artifacts/feature.txt"))?,
+        "implemented\n"
     );
 
     Ok(())

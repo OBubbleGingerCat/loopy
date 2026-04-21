@@ -61,6 +61,10 @@ fn smoke_script_uses_the_installed_skill_entrypoint_instead_of_inlining_bundle_p
         "smoke script should bootstrap the isolated CODEX_HOME with the caller Codex auth"
     );
     assert!(
+        script.contains("--add-dir \"$CODEX_HOME_DIR\""),
+        "smoke script should allow the isolated CODEX_HOME root to stay writable during the outer codex exec"
+    );
+    assert!(
         script.contains("install-submit-loop-skill.sh\" --target codex")
             || script.contains("install-submit-loop-skill.sh --target codex"),
         "smoke script should install the bundle into the isolated CODEX_HOME via --target codex"
@@ -74,6 +78,10 @@ fn smoke_script_uses_the_installed_skill_entrypoint_instead_of_inlining_bundle_p
         "smoke script should require explicit opt-in before using the transport fallback"
     );
     assert!(
+        script.contains("payload[\"failure_cause_type\"] == \"worker_blocked\""),
+        "smoke script should validate the stable real-Codex blocked-case failure cause as worker_blocked"
+    );
+    assert!(
         script.contains("RESULT_SOURCE=direct"),
         "smoke script should emit direct-path evidence for acceptance runs"
     );
@@ -84,6 +92,44 @@ fn smoke_script_uses_the_installed_skill_entrypoint_instead_of_inlining_bundle_p
     assert!(
         !script.contains("CORE__events"),
         "smoke script transport handling must not query runtime event tables directly"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn real_codex_suite_script_runs_multiple_cases_without_mock_roles() -> Result<()> {
+    let repo_root = crate::support::repo_root().as_path();
+    let script = fs::read_to_string(repo_root.join("scripts/real-submit-loop-suite-codex.sh"))?;
+
+    assert!(
+        script.contains("$loopy:submit-loop")
+            || script.contains("\\$loopy:submit-loop")
+            || script.contains("Use the `loopy:submit-loop` skill"),
+        "suite script should invoke the installed loopy:submit-loop skill entrypoint"
+    );
+    assert!(
+        script.contains("case-blocked-smoke")
+            && script.contains("case-readme-append")
+            && script.contains("case-proof-file"),
+        "suite script should cover multiple distinct real-Codex propositions"
+    );
+    assert!(
+        !script.contains("mock_planner")
+            && !script.contains("mock_implementer")
+            && !script.contains("\"mock\"")
+            && !script.contains("executor = \"mock"),
+        "suite script must not depend on mock roles or mock executors"
+    );
+    assert!(
+        script.contains("codex exec")
+            && script.contains("install-submit-loop-skill.sh")
+            && script.contains("RESULT_SOURCE=direct"),
+        "suite script should install the bundle and drive it through real codex exec runs with auditable output"
+    );
+    assert!(
+        script.contains("--add-dir \"$CODEX_HOME_DIR\""),
+        "suite script should keep the isolated CODEX_HOME writable during the outer codex exec"
     );
 
     Ok(())
@@ -144,7 +190,7 @@ cat >/dev/null || true
 
 if [[ "$mode" == "success" ]]; then
   cat >"$output_file" <<'EOF'
-{{"failure_cause_type":"worker_blocked","last_stable_context":{{"base_commit_sha":"seed","worktree_branch":"loopy-loop-test","worktree_label":"submit-test"}},"loop_id":"loop-test","phase_at_failure":"planning","result_generated_at":"2026-04-09T00:00:00Z","source_event_id":8,"status":"failure","summary":"worker reported a blocked outcome","worktree_ref":{{"branch":"loopy-loop-test","label":"submit-test","path":".loopy/worktrees/submit-test"}}}}
+{{"failure_cause_type":"worker_blocked","last_stable_context":{{"base_commit_sha":"seed","worktree_branch":"loopy-loop-test","worktree_label":"submit-test"}},"loop_id":"loop-test","phase_at_failure":"planning","result_generated_at":"2026-04-09T00:00:00Z","source_event_id":8,"status":"failure","summary":"No plannable repository work is present","worktree_ref":{{"branch":"loopy-loop-test","label":"submit-test","path":".loopy/worktrees/submit-test"}}}}
 EOF
   echo "fake-codex-direct-path"
   exit 0

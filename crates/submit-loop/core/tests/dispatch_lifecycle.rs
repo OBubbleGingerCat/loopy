@@ -94,10 +94,31 @@ fn start_worker_invocation_materializes_requests_records_lifecycle_events_and_tr
         "Put verification commands in `acceptance.verification_steps` and behavioral goals in `acceptance.expected_outcomes`"
     ));
     assert!(stdin_payload.contains(
+        "write verification against `HEAD` or another stable baseline"
+    ));
+    assert!(stdin_payload.contains(
+        "make the allowed changed-file set match the full deliverable set for that checkpoint"
+    ));
+    assert!(stdin_payload.contains(
+        "make the verification prove the full post-change file equals the stable baseline plus the required edit"
+    ));
+    assert!(stdin_payload.contains(
+        "make the verification compare the full required bytes or text literally, including the intended trailing newline behavior"
+    ));
+    assert!(stdin_payload.contains(
+        "use `HEAD^` or another explicit stable pre-change reference instead of assuming `HEAD` is unchanged"
+    ));
+    assert!(stdin_payload.contains(
+        "use Python or properly quoted expected strings instead of malformed shell placeholders or bare `$...` pseudo-literals"
+    ));
+    assert!(stdin_payload.contains(
         "Treat routine verification as part of the checkpoint that produces the artifact"
     ));
     assert!(stdin_payload.contains(
         "Do not create a standalone checkpoint whose only purpose is syntax checking, test execution, local validation, or confirming expected behavior"
+    ));
+    assert!(stdin_payload.contains(
+        "If the request does not describe a concrete repository task or you cannot identify any legitimate repository deliverable"
     ));
     assert!(
         stdin_payload.contains("deliverables[].type")
@@ -222,6 +243,15 @@ fn start_reviewer_invocation_includes_runtime_prompt_contract_for_reviewer_invoc
         stdin_payload
             .contains("Reject plans whose checkpoints omit deliverables or acceptance metadata")
     );
+    assert!(stdin_payload.contains(
+        "Reject plans whose verification steps are malformed, not directly executable as written, or fail to check the contract they claim to prove"
+    ));
+    assert!(stdin_payload.contains(
+        "Reject plans when `acceptance.verification_steps` would certify an artifact that does not actually satisfy `acceptance.expected_outcomes`"
+    ));
+    assert!(stdin_payload.contains(
+        "Reject exact-content or newline-sensitive plans unless the verification literally checks the full required bytes or text"
+    ));
     assert!(
         has_nearby_schema_fields(
             &stdin_payload,
@@ -324,6 +354,27 @@ fn start_artifact_worker_invocation_includes_exact_terminal_api_cli_forms() -> R
             && stdin_payload.contains("\"headline\"")
             && stdin_payload.contains("\"files\""),
         "artifact worker prompt should document the canonical change_summary_json object shape"
+    );
+    assert!(
+        stdin_payload.contains("stop exploring and transition immediately into submission")
+            && stdin_payload.contains("stage the checkpoint deliverables")
+            && stdin_payload.contains("git rev-parse HEAD"),
+        "artifact worker prompt should force a direct verification-to-commit-to-terminal-API finish sequence"
+    );
+    assert!(stdin_payload.contains(
+        "If direct file-edit helpers fail under the nested executor sandbox, fall back to shell-based repository edits"
+    ));
+    assert!(stdin_payload.contains(
+        "`acceptance.expected_outcomes` are binding requirements, not optional prose"
+    ));
+    assert!(stdin_payload.contains(
+        "If `acceptance.verification_steps` and `acceptance.expected_outcomes` conflict or the verification would certify the wrong artifact, declare blocked instead of submitting"
+    ));
+    assert!(
+        stdin_payload.contains(
+            "Do not repoint `.git`, set an alternate `GIT_DIR`, or copy git metadata into `/tmp`"
+        ),
+        "artifact worker prompt should forbid private git metadata detours that reviewers cannot inspect"
     );
     assert!(stdin_payload.contains(
         "declare-worker-blocked --invocation-context-path invocation_context.invocation_context_path --submission-id <submission_id> --summary <summary> --rationale <rationale> --why-unrecoverable <why_unrecoverable>"
@@ -638,6 +689,15 @@ fn start_artifact_reviewer_invocation_includes_exact_terminal_api_cli_forms() ->
             || stdin_payload.contains("`approve` must not include any `blocking_issues`"),
         "artifact reviewer prompt should document the approve versus blocking_issues rule"
     );
+    assert!(stdin_payload.contains(
+        "`acceptance.expected_outcomes` are binding review criteria, not optional prose"
+    ));
+    assert!(stdin_payload.contains(
+        "Reject when the candidate's actual bytes, text, or formatting contradict exact-content or newline-sensitive expected outcomes"
+    ));
+    assert!(stdin_payload.contains(
+        "Reject when `acceptance.verification_steps` and `acceptance.expected_outcomes` do not prove the same artifact"
+    ));
     assert!(stdin_payload.contains(
         "submit-artifact-review --invocation-context-path invocation_context.invocation_context_path --submission-id <submission_id> --decision <approve|reject> --summary <summary> --blocking-issues-json <json_array> --nonblocking-issues-json <json_array> --improvement-opportunities-json <json_array>"
     ));
@@ -1805,7 +1865,10 @@ sleep 3
         &script_path,
         &[
             "{invocation_context_path}".to_owned(),
-            install_root.join("bin/loopy-submit-loop").display().to_string(),
+            install_root
+                .join("bin/loopy-submit-loop")
+                .display()
+                .to_string(),
         ],
         1,
         None,
@@ -1894,7 +1957,10 @@ sleep $((requested_timeout_sec + 1))
         &script_path,
         &[
             "{invocation_context_path}".to_owned(),
-            install_root.join("bin/loopy-submit-loop").display().to_string(),
+            install_root
+                .join("bin/loopy-submit-loop")
+                .display()
+                .to_string(),
         ],
         1,
         None,
@@ -2005,7 +2071,10 @@ sleep 3
         &script_path,
         &[
             "{invocation_context_path}".to_owned(),
-            install_root.join("bin/loopy-submit-loop").display().to_string(),
+            install_root
+                .join("bin/loopy-submit-loop")
+                .display()
+                .to_string(),
         ],
         1,
         None,
@@ -2078,7 +2147,10 @@ sleep 3
         &script_path,
         &[
             "{invocation_context_path}".to_owned(),
-            install_root.join("bin/loopy-submit-loop").display().to_string(),
+            install_root
+                .join("bin/loopy-submit-loop")
+                .display()
+                .to_string(),
         ],
         1,
         None,
@@ -2144,7 +2216,10 @@ sleep 3
         &script_path,
         &[
             "{invocation_context_path}".to_owned(),
-            install_root.join("bin/loopy-submit-loop").display().to_string(),
+            install_root
+                .join("bin/loopy-submit-loop")
+                .display()
+                .to_string(),
         ],
         1,
         None,
@@ -2362,9 +2437,7 @@ fn has_nearby_schema_fields(
         let start = offset.saturating_sub(radius);
         let end = (offset + anchor.len() + radius).min(haystack.len());
         let window = &haystack[start..end];
-        required_fields
-            .iter()
-            .all(|field| window.contains(field))
+        required_fields.iter().all(|field| window.contains(field))
     })
 }
 

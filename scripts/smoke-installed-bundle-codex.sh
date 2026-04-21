@@ -11,6 +11,7 @@ WORKSPACE="$RUN_ROOT/workspace"
 LOG_DIR="$RUN_ROOT/logs"
 SOURCE_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 ALLOW_TRANSPORT_FALLBACK="${LOOPY_SMOKE_ALLOW_TRANSPORT_FALLBACK:-0}"
+ATTEMPT_TIMEOUT_SEC="${LOOPY_SMOKE_ATTEMPT_TIMEOUT_SEC:-900}"
 CODEX_ENV_ROOT="$(mktemp -d "$REPO_ROOT/.codex-smoke-home.XXXXXX")"
 CODEX_HOME_DIR="$CODEX_ENV_ROOT/.codex"
 CODEX_SKILL_ROOT="$CODEX_HOME_DIR/skills/loopy-submit-loop"
@@ -87,10 +88,7 @@ Use the \`loopy:submit-loop\` skill for the caller request object below.
 {
   "summary": "smoke-blocked",
   "task_type": "coding-task",
-  "context": "Real codex smoke path. The planning worker should immediately declare a blocked outcome through the bundled runtime and the coordinator should return the final failure result.",
-  "constraints": {
-    "smoke_mode": "worker_blocked"
-  }
+  "context": "Real Codex blocked smoke path. There is intentionally no repository task to plan or implement here. Return a blocked terminal outcome rather than inventing work."
 }
 \`\`\`
 EOF
@@ -122,8 +120,9 @@ run_transport_fallback() {
 run_direct_smoke_attempt() {
   local attempt="$1" attempt_log="$LOG_DIR/attempt-$attempt.combined.log" status=0
   set +e
-  CODEX_HOME="$CODEX_HOME_DIR" codex exec \
+  CODEX_HOME="$CODEX_HOME_DIR" timeout --kill-after=30s "${ATTEMPT_TIMEOUT_SEC}s" codex exec \
     --full-auto \
+    --add-dir "$CODEX_HOME_DIR" \
     -c sandbox_workspace_write.network_access=true \
     -c model_reasoning_effort=high \
     -C "$WORKSPACE" \
@@ -137,11 +136,17 @@ run_direct_smoke_attempt() {
 
 for attempt in 1 2 3; do
   rm -f "$LAST_MESSAGE_FILE"
+  attempt_status=0
   if run_direct_smoke_attempt "$attempt"; then
     if validate_final_json "$LAST_MESSAGE_FILE"; then
       printf '%s\n' direct >"$RUN_ROOT/result-source.txt"
       echo "RESULT_SOURCE=direct" >&2
       exit 0
+    fi
+  else
+    attempt_status=$?
+    if [[ "$attempt_status" == "124" ]]; then
+      echo "real-codex smoke attempt $attempt timed out after ${ATTEMPT_TIMEOUT_SEC}s" >&2
     fi
   fi
   if [[ "$ALLOW_TRANSPORT_FALLBACK" == "1" ]] && run_transport_fallback; then

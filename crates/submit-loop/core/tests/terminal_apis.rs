@@ -2524,6 +2524,151 @@ fn submit_candidate_commit_accepts_commits_from_mirrored_gitdir_fallback_worktre
     Ok(())
 }
 
+#[test]
+fn submit_candidate_commit_rejects_commit_from_temporarily_rebound_gitdir() -> Result<()> {
+    let workspace = git_workspace()?;
+    install_bundle_into_workspace(workspace.path())?;
+    let runtime = Runtime::new(workspace.path())?;
+    let loop_response = runtime.open_loop(open_loop_request(
+        "rebound gitdir candidate",
+        "candidate validation must ignore temporary .git rebinding",
+    ))?;
+    let worktree_path = materialize_loop_worktree_with_mirrored_gitdir(
+        workspace.path(),
+        &loop_response.branch,
+        &loop_response.label,
+    )?;
+    runtime.prepare_worktree(PrepareWorktreeRequest {
+        loop_id: loop_response.loop_id.clone(),
+    })?;
+
+    let planning_worker = runtime.start_worker_invocation(StartWorkerInvocationRequest {
+        loop_id: loop_response.loop_id.clone(),
+        stage: WorkerStage::Planning,
+        checkpoint_id: None,
+    })?;
+    runtime.submit_checkpoint_plan(SubmitCheckpointPlanRequest {
+        invocation_context_path: invocation_context_path(
+            workspace.path(),
+            &planning_worker.invocation_id,
+        ),
+        submission_id: "plan-submit".to_owned(),
+        checkpoints: vec![checkpoint("Checkpoint A")],
+        improvement_opportunities: None,
+        notes: None,
+    })?;
+    let checkpoint_review_round = runtime.open_review_round(OpenReviewRoundRequest {
+        loop_id: loop_response.loop_id.clone(),
+        review_kind: ReviewKind::Checkpoint,
+        target_type: "plan_revision".to_owned(),
+        target_ref: "plan-1".to_owned(),
+    })?;
+    let checkpoint_reviewer =
+        runtime.start_reviewer_invocation(StartReviewerInvocationRequest {
+            loop_id: loop_response.loop_id.clone(),
+            review_round_id: checkpoint_review_round.review_round_id,
+            review_slot_id: checkpoint_review_round.review_slot_ids[0].clone(),
+        })?;
+    runtime.submit_checkpoint_review(SubmitCheckpointReviewRequest {
+        invocation_context_path: invocation_context_path(
+            workspace.path(),
+            &checkpoint_reviewer.invocation_id,
+        ),
+        submission_id: "checkpoint-approve".to_owned(),
+        decision: "approve".to_owned(),
+        blocking_issues: vec![],
+        nonblocking_issues: None,
+        improvement_opportunities: None,
+        summary: "Proceed".to_owned(),
+        notes: None,
+    })?;
+
+    let conn = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    let checkpoint_id: String = conn.query_row(
+        "SELECT checkpoint_id FROM SUBMIT_LOOP__checkpoint_current WHERE loop_id = ?1 LIMIT 1",
+        params![loop_response.loop_id.clone()],
+        |row| row.get(0),
+    )?;
+    let artifact_worker = runtime.start_worker_invocation(StartWorkerInvocationRequest {
+        loop_id: loop_response.loop_id.clone(),
+        stage: WorkerStage::Artifact,
+        checkpoint_id: Some(checkpoint_id),
+    })?;
+
+    let gitfile_path = worktree_path.join(".git");
+    let original_gitfile = fs::read_to_string(&gitfile_path)?;
+    let authoritative_git_common = workspace
+        .path()
+        .join(".loopy")
+        .join(format!("git-common-{}", loop_response.label));
+    let rebound_git_common = workspace.path().join("tmp-rebound-gitdir");
+    fs::create_dir_all(&rebound_git_common)?;
+    let rebound_source = authoritative_git_common.join(".");
+    let copy_output = Command::new("cp")
+        .args([
+            "-a",
+            rebound_source.to_str().unwrap(),
+            rebound_git_common.to_str().unwrap(),
+        ])
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to copy authoritative gitdir into rebound temp gitdir")?;
+    if !copy_output.status.success() {
+        bail!(
+            "cp -a {} {} failed\nstdout:\n{}\nstderr:\n{}",
+            authoritative_git_common.display(),
+            rebound_git_common.display(),
+            String::from_utf8_lossy(&copy_output.stdout),
+            String::from_utf8_lossy(&copy_output.stderr)
+        );
+    }
+
+    let rebound_worktree_gitdir = rebound_git_common
+        .join("worktrees")
+        .join(loop_response.label.as_str());
+    fs::write(
+        &gitfile_path,
+        format!("gitdir: {}\n", rebound_worktree_gitdir.display()),
+    )?;
+    fs::write(
+        worktree_path.join("feature.txt"),
+        "private rebound gitdir commit\n",
+    )?;
+    git(&worktree_path, &["add", "feature.txt"])?;
+    git(
+        &worktree_path,
+        &["commit", "-m", "candidate from rebound gitdir"],
+    )?;
+    let candidate_commit_sha = git_output(&worktree_path, &["rev-parse", "HEAD"])?;
+
+    let error = runtime
+        .submit_candidate_commit(SubmitCandidateCommitRequest {
+            invocation_context_path: invocation_context_path(
+                workspace.path(),
+                &artifact_worker.invocation_id,
+            ),
+            submission_id: "candidate-1".to_owned(),
+            candidate_commit_sha,
+            change_summary: json!({
+                "headline": "Candidate from rebound gitdir",
+                "files": ["feature.txt"],
+            }),
+            improvement_opportunities: None,
+            notes: None,
+        })
+        .expect_err(
+            "expected candidate validation to reject commits outside the authoritative worktree repository",
+        );
+    fs::write(&gitfile_path, original_gitfile)?;
+    let error_text = error.to_string();
+    assert!(
+        error_text.contains("does not exist") || error_text.contains("not reachable"),
+        "unexpected candidate validation error: {error_text}"
+    );
+
+    Ok(())
+}
+
 fn invocation_context_path(workspace_root: &Path, invocation_id: &str) -> PathBuf {
     workspace_root
         .join(".loopy")

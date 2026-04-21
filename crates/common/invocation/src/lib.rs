@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail, Context};
+use anyhow::{Context, Result, anyhow, bail};
 
 #[cfg(unix)]
 const SIGKILL: i32 = 9;

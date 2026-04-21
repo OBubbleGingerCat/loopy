@@ -139,7 +139,8 @@ fn dev_registry_and_loader_dispatch_cover_all_workspace_skills() -> Result<()> {
         assert_eq!(resolved.bundle_root, expected_root);
         assert_eq!(resolved.registration.binary_package, expected_package);
         assert_eq!(resolved.registration.binary_name, expected_binary_name);
-        let validate_bundle = dispatch_loader(&resolved.descriptor.loader_id, &loader_registrations)?;
+        let validate_bundle =
+            dispatch_loader(&resolved.descriptor.loader_id, &loader_registrations)?;
         validate_bundle(&resolved.bundle_root)?;
     }
 

@@ -16,9 +16,7 @@ use loopy::{
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use serde_json::json;
-use support::{
-    accept_single_checkpoint_loop, checkpoint, git, materialize_loop_worktree_with_mirrored_gitdir,
-};
+use support::{accept_single_checkpoint_loop, checkpoint, git};
 use tempfile::TempDir;
 
 #[test]
@@ -310,15 +308,94 @@ fn second_ready_loop_can_finalize_after_first_loop_advances_head() -> Result<()>
 
 #[cfg(unix)]
 #[test]
-fn prepare_worktree_permission_denied_keeps_loop_open_for_mirrored_gitdir_retry() -> Result<()> {
+fn prepare_worktree_branch_ref_permission_failure_self_recovers_via_mirrored_gitdir()
+-> Result<()> {
     let workspace = git_workspace()?;
     install_bundle_into_workspace(workspace.path())?;
     let runtime = Runtime::new(workspace.path())?;
     let loop_response = runtime.open_loop(OpenLoopRequest {
-        summary: "retry mirrored fallback".to_owned(),
+        summary: "self-heal mirrored fallback from branch ref permission failure".to_owned(),
         task_type: "coding-task".to_owned(),
         context: Some(
-            "prepare-worktree permission failures should stay retryable for mirrored gitdir fallback"
+            "prepare-worktree should self-heal branch ref permission failures by materializing a mirrored fallback worktree"
+                .to_owned(),
+        ),
+        planning_worker: None,
+        artifact_worker: None,
+        checkpoint_reviewers: None,
+        artifact_reviewers: None,
+        constraints: Some(json!({})),
+        bypass_sandbox: Some(false),
+        coordinator_prompt: "You are the coordinator.".to_owned(),
+    })?;
+
+    let git_refs_heads_dir = workspace.path().join(".git").join("refs").join("heads");
+    let original_permissions = fs::metadata(&git_refs_heads_dir)?.permissions();
+    let mut readonly_permissions = original_permissions.clone();
+    readonly_permissions.set_mode(0o555);
+    fs::set_permissions(&git_refs_heads_dir, readonly_permissions)?;
+
+    let prepare_result = runtime.prepare_worktree(PrepareWorktreeRequest {
+        loop_id: loop_response.loop_id.clone(),
+    });
+    fs::set_permissions(&git_refs_heads_dir, original_permissions)?;
+
+    let prepared = prepare_result?;
+    let expected_worktree_path = workspace
+        .path()
+        .join(".loopy")
+        .join("worktrees")
+        .join(&loop_response.label);
+    let expected_mirror_path = workspace
+        .path()
+        .join(".loopy")
+        .join(format!("git-common-{}", loop_response.label));
+
+    assert_eq!(prepared["lifecycle"].as_str(), Some("prepared"));
+    assert_eq!(
+        prepared["path"].as_str(),
+        Some(expected_worktree_path.to_str().unwrap())
+    );
+    assert!(expected_worktree_path.try_exists()?);
+    assert!(expected_mirror_path.try_exists()?);
+
+    let conn = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    let (loop_status, loop_phase, worktree_lifecycle): (String, String, String) = conn.query_row(
+        r#"
+        SELECT loop.status, loop.phase, worktree.lifecycle
+        FROM SUBMIT_LOOP__loop_current loop
+        JOIN SUBMIT_LOOP__worktree_current worktree ON worktree.loop_id = loop.loop_id
+        WHERE loop.loop_id = ?1
+        "#,
+        params![loop_response.loop_id.clone()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(loop_status, "open");
+    assert_eq!(loop_phase, "planning");
+    assert_eq!(worktree_lifecycle, "prepared");
+
+    let failure_event_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM CORE__events WHERE loop_id = ?1 AND (event_name = 'SUBMIT_LOOP__worktree_prepare_failed' OR event_name = 'SUBMIT_LOOP__loop_failed')",
+        params![loop_response.loop_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(failure_event_count, 0);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_worktree_worktrees_permission_failure_self_recovers_via_mirrored_gitdir()
+-> Result<()> {
+    let workspace = git_workspace()?;
+    install_bundle_into_workspace(workspace.path())?;
+    let runtime = Runtime::new(workspace.path())?;
+    let loop_response = runtime.open_loop(OpenLoopRequest {
+        summary: "self-heal mirrored fallback from worktrees permission failure".to_owned(),
+        task_type: "coding-task".to_owned(),
+        context: Some(
+            "prepare-worktree should self-heal worktrees permission failures by materializing a mirrored fallback worktree"
                 .to_owned(),
         ),
         planning_worker: None,
@@ -337,18 +414,29 @@ fn prepare_worktree_permission_denied_keeps_loop_open_for_mirrored_gitdir_retry(
     readonly_permissions.set_mode(0o555);
     fs::set_permissions(&git_worktrees_dir, readonly_permissions)?;
 
-    let prepare_error = runtime
-        .prepare_worktree(PrepareWorktreeRequest {
-            loop_id: loop_response.loop_id.clone(),
-        })
-        .expect_err("expected primary gitdir permission failure to stay retryable");
+    let prepare_result = runtime.prepare_worktree(PrepareWorktreeRequest {
+        loop_id: loop_response.loop_id.clone(),
+    });
     fs::set_permissions(&git_worktrees_dir, original_permissions)?;
 
-    let error_text = format!("{prepare_error:#}");
-    assert!(
-        error_text.contains(".git/worktrees") && error_text.contains("Permission denied"),
-        "unexpected error: {error_text}"
+    let prepared = prepare_result?;
+    let expected_worktree_path = workspace
+        .path()
+        .join(".loopy")
+        .join("worktrees")
+        .join(&loop_response.label);
+    let expected_mirror_path = workspace
+        .path()
+        .join(".loopy")
+        .join(format!("git-common-{}", loop_response.label));
+
+    assert_eq!(prepared["lifecycle"].as_str(), Some("prepared"));
+    assert_eq!(
+        prepared["path"].as_str(),
+        Some(expected_worktree_path.to_str().unwrap())
     );
+    assert!(expected_worktree_path.try_exists()?);
+    assert!(expected_mirror_path.try_exists()?);
 
     let conn = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
     let (loop_status, loop_phase, worktree_lifecycle): (String, String, String) = conn.query_row(
@@ -362,55 +450,30 @@ fn prepare_worktree_permission_denied_keeps_loop_open_for_mirrored_gitdir_retry(
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     assert_eq!(loop_status, "open");
-    assert_eq!(loop_phase, "awaiting_worktree");
-    assert_eq!(worktree_lifecycle, "reserved");
+    assert_eq!(loop_phase, "planning");
+    assert_eq!(worktree_lifecycle, "prepared");
 
     let failure_event_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM CORE__events WHERE loop_id = ?1 AND (event_name = 'SUBMIT_LOOP__worktree_prepare_failed' OR event_name = 'SUBMIT_LOOP__loop_failed')",
         params![loop_response.loop_id.clone()],
         |row| row.get(0),
     )?;
-    let result_rows: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM CORE__result_current WHERE loop_id = ?1",
-        params![loop_response.loop_id.clone()],
-        |row| row.get(0),
-    )?;
     assert_eq!(failure_event_count, 0);
-    assert_eq!(result_rows, 0);
-
-    let worktree_path = materialize_loop_worktree_with_mirrored_gitdir(
-        workspace.path(),
-        &loop_response.branch,
-        &loop_response.label,
-    )?;
-    let prepared = runtime.prepare_worktree(PrepareWorktreeRequest {
-        loop_id: loop_response.loop_id.clone(),
-    })?;
-    assert_eq!(prepared["lifecycle"].as_str(), Some("prepared"));
-    assert_eq!(
-        prepared["path"].as_str(),
-        Some(
-            worktree_path
-                .to_str()
-                .context("non-utf8 mirrored worktree path")?
-        )
-    );
 
     Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn prepare_worktree_reflog_permission_failure_keeps_loop_open_for_mirrored_gitdir_retry()
--> Result<()> {
+fn prepare_worktree_reflog_permission_failure_self_recovers_via_mirrored_gitdir() -> Result<()> {
     let workspace = git_workspace()?;
     install_bundle_into_workspace(workspace.path())?;
     let runtime = Runtime::new(workspace.path())?;
     let loop_response = runtime.open_loop(OpenLoopRequest {
-        summary: "retry mirrored fallback from reflog permission failure".to_owned(),
+        summary: "self-heal mirrored fallback from reflog permission failure".to_owned(),
         task_type: "coding-task".to_owned(),
         context: Some(
-            "prepare-worktree reflog permission failures should stay retryable for mirrored gitdir fallback"
+            "prepare-worktree should self-heal reflog permission failures by materializing a mirrored fallback worktree"
                 .to_owned(),
         ),
         planning_worker: None,
@@ -433,18 +496,29 @@ fn prepare_worktree_reflog_permission_failure_keeps_loop_open_for_mirrored_gitdi
     readonly_permissions.set_mode(0o555);
     fs::set_permissions(&git_logs_heads_dir, readonly_permissions)?;
 
-    let prepare_error = runtime
-        .prepare_worktree(PrepareWorktreeRequest {
-            loop_id: loop_response.loop_id.clone(),
-        })
-        .expect_err("expected reflog permission failure to stay retryable");
+    let prepare_result = runtime.prepare_worktree(PrepareWorktreeRequest {
+        loop_id: loop_response.loop_id.clone(),
+    });
     fs::set_permissions(&git_logs_heads_dir, original_permissions)?;
 
-    let error_text = format!("{prepare_error:#}");
-    assert!(
-        error_text.contains(".git/logs/refs/heads") && error_text.contains("Permission denied"),
-        "unexpected error: {error_text}"
+    let prepared = prepare_result?;
+    let expected_worktree_path = workspace
+        .path()
+        .join(".loopy")
+        .join("worktrees")
+        .join(&loop_response.label);
+    let expected_mirror_path = workspace
+        .path()
+        .join(".loopy")
+        .join(format!("git-common-{}", loop_response.label));
+
+    assert_eq!(prepared["lifecycle"].as_str(), Some("prepared"));
+    assert_eq!(
+        prepared["path"].as_str(),
+        Some(expected_worktree_path.to_str().unwrap())
     );
+    assert!(expected_worktree_path.try_exists()?);
+    assert!(expected_mirror_path.try_exists()?);
 
     let conn = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
     let (loop_status, loop_phase, worktree_lifecycle): (String, String, String) = conn.query_row(
@@ -458,8 +532,8 @@ fn prepare_worktree_reflog_permission_failure_keeps_loop_open_for_mirrored_gitdi
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     assert_eq!(loop_status, "open");
-    assert_eq!(loop_phase, "awaiting_worktree");
-    assert_eq!(worktree_lifecycle, "reserved");
+    assert_eq!(loop_phase, "planning");
+    assert_eq!(worktree_lifecycle, "prepared");
 
     let failure_event_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM CORE__events WHERE loop_id = ?1 AND (event_name = 'SUBMIT_LOOP__worktree_prepare_failed' OR event_name = 'SUBMIT_LOOP__loop_failed')",
@@ -467,6 +541,99 @@ fn prepare_worktree_reflog_permission_failure_keeps_loop_open_for_mirrored_gitdi
         |row| row.get(0),
     )?;
     assert_eq!(failure_event_count, 0);
+
+    Ok(())
+}
+
+#[test]
+fn prepare_worktree_adopts_existing_mirrored_worktree_even_if_mirror_root_name_differs()
+-> Result<()> {
+    let workspace = git_workspace()?;
+    install_bundle_into_workspace(workspace.path())?;
+    let runtime = Runtime::new(workspace.path())?;
+    let loop_response = runtime.open_loop(OpenLoopRequest {
+        summary: "adopt mirrored worktree with mismatched mirror root".to_owned(),
+        task_type: "coding-task".to_owned(),
+        context: Some(
+            "prepare-worktree should adopt an existing mirrored worktree even if the mirror gitdir root name differs from the canonical label-derived path"
+                .to_owned(),
+        ),
+        planning_worker: None,
+        artifact_worker: None,
+        checkpoint_reviewers: None,
+        artifact_reviewers: None,
+        constraints: Some(json!({})),
+        bypass_sandbox: Some(false),
+        coordinator_prompt: "You are the coordinator.".to_owned(),
+    })?;
+
+    let worktree_path = workspace
+        .path()
+        .join(".loopy")
+        .join("worktrees")
+        .join(&loop_response.label);
+    if let Some(parent) = worktree_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut label_parts = loop_response.label.split('-').collect::<Vec<_>>();
+    assert!(
+        label_parts.len() >= 5,
+        "unexpected loop label shape: {}",
+        loop_response.label
+    );
+    label_parts.remove(label_parts.len() - 2);
+    let mismatched_mirror_path = workspace
+        .path()
+        .join(".loopy")
+        .join(format!("git-common-{}", label_parts.join("-")));
+    fs::create_dir_all(&mismatched_mirror_path)?;
+
+    let copy_output = Command::new("cp")
+        .args(["-a", ".git/.", mismatched_mirror_path.to_str().unwrap()])
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to copy primary gitdir into mismatched mirror root")?;
+    if !copy_output.status.success() {
+        bail!(
+            "cp -a .git/. {} failed\nstdout:\n{}\nstderr:\n{}",
+            mismatched_mirror_path.display(),
+            String::from_utf8_lossy(&copy_output.stdout),
+            String::from_utf8_lossy(&copy_output.stderr)
+        );
+    }
+
+    let add_output = Command::new("git")
+        .args([
+            format!("--git-dir={}", mismatched_mirror_path.display()).as_str(),
+            format!("--work-tree={}", workspace.path().display()).as_str(),
+            "worktree",
+            "add",
+            "-b",
+            &loop_response.branch,
+            worktree_path.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(workspace.path())
+        .output()
+        .context("failed to add mirrored worktree with mismatched mirror root")?;
+    if !add_output.status.success() {
+        bail!(
+            "git worktree add with mismatched mirror root failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&add_output.stdout),
+            String::from_utf8_lossy(&add_output.stderr)
+        );
+    }
+
+    let prepared = runtime.prepare_worktree(PrepareWorktreeRequest {
+        loop_id: loop_response.loop_id.clone(),
+    })?;
+
+    assert_eq!(prepared["lifecycle"].as_str(), Some("prepared"));
+    assert_eq!(
+        prepared["path"].as_str(),
+        Some(worktree_path.to_str().unwrap())
+    );
 
     Ok(())
 }

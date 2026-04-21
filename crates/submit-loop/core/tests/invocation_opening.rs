@@ -168,16 +168,41 @@ fn open_worker_invocation_allowlists_shared_loopy_dir_for_codex_executor() -> Re
         .as_array()
         .context("missing executor command array")?;
     let expected_loopy_dir = workspace.path().join(".loopy").display().to_string();
+    let expected_worktree_git_dir = fs::read_to_string(
+        workspace
+            .path()
+            .join(".loopy/worktrees")
+            .join(loop_response.label)
+            .join(".git"),
+    )?
+    .trim()
+    .strip_prefix("gitdir:")
+    .map(str::trim)
+    .context("expected worktree .git to contain a gitdir pointer")?
+    .to_owned();
 
-    let add_dir_index = command
-        .iter()
-        .position(|entry| entry == "--add-dir")
-        .context("expected codex executor command to include --add-dir")?;
-    let add_dir_value = command
-        .get(add_dir_index + 1)
-        .and_then(Value::as_str)
-        .context("expected --add-dir argument value")?;
-    assert_eq!(add_dir_value, expected_loopy_dir);
+    let add_dir_values = command
+        .windows(2)
+        .filter_map(|window| {
+            if window[0] == "--add-dir" {
+                window[1].as_str()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        add_dir_values.iter().any(|value| *value == expected_loopy_dir),
+        "expected loopy add-dir in command: {:?}",
+        command
+    );
+    assert!(
+        add_dir_values
+            .iter()
+            .any(|value| *value == expected_worktree_git_dir),
+        "expected worktree gitdir add-dir in command: {:?}",
+        command
+    );
 
     Ok(())
 }
@@ -333,6 +358,74 @@ fn start_reviewer_invocation_waits_for_a_transient_write_lock() -> Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(invocation_count, 1);
+
+    Ok(())
+}
+
+#[test]
+fn pending_reviewer_slot_can_be_restarted_after_protocol_failure() -> Result<()> {
+    let workspace = git_workspace()?;
+    install_bundle_into_workspace(workspace.path())?;
+    let runtime = Runtime::new(workspace.path())?;
+    let loop_response = runtime.open_loop(OpenLoopRequest {
+        summary: "retry failed reviewer slot".to_owned(),
+        task_type: "coding-task".to_owned(),
+        context: Some("pending reviewer slots should be restartable after protocol failure".to_owned()),
+        planning_worker: Some("mock_planner".to_owned()),
+        artifact_worker: Some("mock_implementer".to_owned()),
+        checkpoint_reviewers: Some(vec!["mock".to_owned()]),
+        artifact_reviewers: Some(vec!["mock".to_owned()]),
+        constraints: Some(json!({})),
+        bypass_sandbox: Some(false),
+        coordinator_prompt: "You are the coordinator.".to_owned(),
+    })?;
+    prepare_loop_worktree(&runtime, &loop_response.loop_id)?;
+
+    let planning_worker = runtime.start_worker_invocation(StartWorkerInvocationRequest {
+        loop_id: loop_response.loop_id.clone(),
+        stage: WorkerStage::Planning,
+        checkpoint_id: None,
+    })?;
+    runtime.submit_checkpoint_plan(SubmitCheckpointPlanRequest {
+        invocation_context_path: invocation_context_path(
+            workspace.path(),
+            &planning_worker.invocation_id,
+        ),
+        submission_id: "plan-submit".to_owned(),
+        checkpoints: vec![checkpoint("Checkpoint A")],
+        improvement_opportunities: None,
+        notes: Some("exercise reviewer restart after protocol failure".to_owned()),
+    })?;
+    let review_round = runtime.open_review_round(OpenReviewRoundRequest {
+        loop_id: loop_response.loop_id.clone(),
+        review_kind: ReviewKind::Checkpoint,
+        target_type: "plan_revision".to_owned(),
+        target_ref: "plan-1".to_owned(),
+    })?;
+    let review_slot_id = review_round.review_slot_ids[0].clone();
+
+    let first = runtime.start_reviewer_invocation(StartReviewerInvocationRequest {
+        loop_id: loop_response.loop_id.clone(),
+        review_round_id: review_round.review_round_id.clone(),
+        review_slot_id: review_slot_id.clone(),
+    })?;
+    assert_eq!(first.accepted_terminal_api, None);
+
+    let second = runtime.start_reviewer_invocation(StartReviewerInvocationRequest {
+        loop_id: loop_response.loop_id,
+        review_round_id: review_round.review_round_id,
+        review_slot_id: review_slot_id.clone(),
+    })?;
+    assert_eq!(second.accepted_terminal_api, None);
+    assert_ne!(first.invocation_id, second.invocation_id);
+
+    let conn = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    let failed_invocations_for_slot: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM CORE__invocation_current WHERE review_slot_id = ?1 AND status = 'failed'",
+        [review_slot_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(failed_invocations_for_slot, 2);
 
     Ok(())
 }
@@ -1726,6 +1819,35 @@ fn open_worker_invocation_uses_host_default_codex_home_bundle_discovery() -> Res
                 checkpoint_id: None,
             })?;
             assert!(invocation.invocation_id.starts_with("inv-"));
+
+            let conn = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+            let executor_config = read_content(&conn, &invocation.executor_config_ref)?;
+            let command = executor_config["command"]
+                .as_array()
+                .context("missing executor command array")?;
+            let add_dir_values = command
+                .windows(2)
+                .filter_map(|window| {
+                    (window.first()? == "--add-dir").then(|| window.get(1)?.as_str())
+                })
+                .collect::<Option<Vec<_>>>()
+                .context("expected --add-dir values in codex executor command")?;
+            let expected_loopy_dir = workspace.path().join(".loopy").display().to_string();
+            let expected_codex_home = codex_home.path().display().to_string();
+            assert!(
+                add_dir_values
+                    .iter()
+                    .any(|value| *value == expected_loopy_dir),
+                "expected shared .loopy add-dir in command: {:?}",
+                add_dir_values
+            );
+            assert!(
+                add_dir_values
+                    .iter()
+                    .any(|value| *value == expected_codex_home),
+                "expected CODEX_HOME add-dir in command: {:?}",
+                add_dir_values
+            );
 
             Ok(())
         },
