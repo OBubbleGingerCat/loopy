@@ -47,7 +47,9 @@ pub(crate) fn run_leaf_review_gate(
     } = request;
     let plan = query::load_gate_plan_context(connection, &plan_id)?;
     let node = query::load_node_record(connection, &plan_id, &node_id)?;
+    query::require_leaf_node_record(&node)?;
     require_leaf_review_eligible_node(connection, &plan_id, &node_id)?;
+    query::ensure_plan_markdown_file_exists(&plan.plan_root, &node.relative_path)?;
 
     let gate_run_id = Uuid::new_v4().to_string();
     let bundle = runtime.resolved_skill_bundle()?;
@@ -161,6 +163,9 @@ pub(crate) fn run_frontier_review_gate(
     } = request;
     let plan = query::load_gate_plan_context(connection, &plan_id)?;
     let parent_node = query::load_node_record(connection, &plan_id, &parent_node_id)?;
+    query::require_parent_node_record(&parent_node)?;
+    query::ensure_plan_markdown_file_exists(&plan.plan_root, &parent_node.relative_path)?;
+    query::ensure_parent_child_runtime_coherence(connection, &plan_id, &parent_node)?;
     let gate_run_id = Uuid::new_v4().to_string();
 
     let bundle = runtime.resolved_skill_bundle()?;

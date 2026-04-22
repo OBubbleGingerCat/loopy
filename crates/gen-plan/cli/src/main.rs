@@ -4,7 +4,8 @@ use std::{fs, path::Path};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use loopy_gen_plan::{
-    EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, PlannerMode,
+    EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest,
+    OpenPlanRequest, PlannerMode,
     RunFrontierReviewGateRequest, RunLeafReviewGateRequest, Runtime,
 };
 
@@ -37,6 +38,22 @@ enum Commands {
         plan_id: String,
         #[arg(long)]
         relative_path: String,
+        #[arg(long)]
+        parent_relative_path: Option<String>,
+    },
+    InspectNode {
+        #[arg(long)]
+        plan_id: String,
+        #[arg(long)]
+        node_id: Option<String>,
+        #[arg(long)]
+        relative_path: Option<String>,
+    },
+    ListChildren {
+        #[arg(long)]
+        plan_id: String,
+        #[arg(long)]
+        parent_node_id: Option<String>,
         #[arg(long)]
         parent_relative_path: Option<String>,
     },
@@ -102,6 +119,34 @@ fn main() -> Result<()> {
             let response = runtime.ensure_node_id(EnsureNodeIdRequest {
                 plan_id,
                 relative_path,
+                parent_relative_path,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::InspectNode {
+            plan_id,
+            node_id,
+            relative_path,
+        } => {
+            let workspace = cli.workspace.clone().unwrap_or(std::env::current_dir()?);
+            let runtime = Runtime::new(workspace)?;
+            let response = runtime.inspect_node(InspectNodeRequest {
+                plan_id,
+                node_id,
+                relative_path,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::ListChildren {
+            plan_id,
+            parent_node_id,
+            parent_relative_path,
+        } => {
+            let workspace = cli.workspace.clone().unwrap_or(std::env::current_dir()?);
+            let runtime = Runtime::new(workspace)?;
+            let response = runtime.list_children(ListChildrenRequest {
+                plan_id,
+                parent_node_id,
                 parent_relative_path,
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);

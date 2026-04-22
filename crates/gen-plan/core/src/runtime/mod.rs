@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
     EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse,
+    InspectNodeRequest, InspectNodeResponse, ListChildrenRequest, ListChildrenResponse,
     OpenPlanRequest, OpenPlanResponse, RunFrontierReviewGateRequest, RunFrontierReviewGateResponse,
     RunLeafReviewGateRequest, RunLeafReviewGateResponse,
 };
@@ -65,6 +66,16 @@ impl Runtime {
     pub fn ensure_node_id(&self, request: EnsureNodeIdRequest) -> Result<EnsureNodeIdResponse> {
         let connection = self.open_connection()?;
         query::ensure_node_id(&connection, request)
+    }
+
+    pub fn inspect_node(&self, request: InspectNodeRequest) -> Result<InspectNodeResponse> {
+        let connection = self.open_connection()?;
+        query::inspect_node(&connection, request)
+    }
+
+    pub fn list_children(&self, request: ListChildrenRequest) -> Result<ListChildrenResponse> {
+        let connection = self.open_connection()?;
+        query::list_children(&connection, request)
     }
 
     pub fn resolve_gate_roles(&self, plan_id: &str) -> Result<ResolvedGateRoleSelection> {

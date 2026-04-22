@@ -8,8 +8,9 @@ use uuid::Uuid;
 
 use super::db::{PROJECT_DIRECTORY_SOURCE_BACKFILLED_LEGACY, PROJECT_DIRECTORY_SOURCE_EXPLICIT};
 use crate::{
-    EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse,
-    OpenPlanRequest, OpenPlanResponse,
+    EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse, GateSummary,
+    InspectNodeRequest, InspectNodeResponse, ListChildrenRequest, ListChildrenResponse, NodeKind,
+    NodeSummary, OpenPlanRequest, OpenPlanResponse,
 };
 
 const ACTIVE_PLAN_STATUS: &str = "active";
@@ -26,7 +27,16 @@ pub(crate) struct GatePlanContext {
 pub(crate) struct NodeRecord {
     pub node_id: String,
     pub relative_path: String,
+    pub node_kind: NodeKind,
     pub parent_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct NodeRow {
+    node_id: String,
+    relative_path: String,
+    node_kind: NodeKind,
+    parent_node_id: Option<String>,
 }
 
 pub(crate) fn ensure_plan(
@@ -153,6 +163,113 @@ pub(crate) fn ensure_node_id(
     Ok(EnsureNodeIdResponse { node_id })
 }
 
+pub(crate) fn inspect_node(
+    connection: &Connection,
+    request: InspectNodeRequest,
+) -> Result<InspectNodeResponse> {
+    let InspectNodeRequest {
+        plan_id,
+        node_id,
+        relative_path,
+    } = request;
+    let node = match (node_id, relative_path) {
+        (Some(node_id), None) => load_node_record(connection, &plan_id, &node_id)?,
+        (None, Some(relative_path)) => {
+            let relative_path = validate_plan_local_path("relative_path", &relative_path)?;
+            validate_registered_node_path("relative_path", &relative_path)?;
+            load_node_record_by_relative_path(connection, &plan_id, &relative_path)?
+                .ok_or_else(|| anyhow!("relative_path `{relative_path}` does not exist for plan `{plan_id}`"))?
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "inspect-node requires exactly one selector: either node_id or relative_path"
+            ));
+        }
+        (None, None) => {
+            return Err(anyhow!(
+                "inspect-node requires exactly one selector: either node_id or relative_path"
+            ));
+        }
+    };
+
+    let children = load_child_nodes(connection, &plan_id, Some(&node.node_id))?
+        .into_iter()
+        .map(node_record_to_summary)
+        .collect();
+    let parent_relative_path = match node.parent_node_id.as_deref() {
+        Some(parent_node_id) => Some(load_node_record(connection, &plan_id, parent_node_id)?.relative_path),
+        None => None,
+    };
+
+    Ok(InspectNodeResponse {
+        node_id: node.node_id.clone(),
+        relative_path: node.relative_path.clone(),
+        node_kind: node.node_kind,
+        parent_node_id: node.parent_node_id.clone(),
+        parent_relative_path,
+        children,
+        latest_passed_leaf_gate_summary: load_latest_passed_leaf_gate_summary(
+            connection,
+            &plan_id,
+            &node.node_id,
+        )?
+        .map(leaf_gate_summary_to_api),
+        latest_frontier_gate_summary: load_latest_frontier_gate_summary(
+            connection,
+            &plan_id,
+            &node.node_id,
+        )?
+        .map(frontier_gate_summary_to_api),
+    })
+}
+
+pub(crate) fn list_children(
+    connection: &Connection,
+    request: ListChildrenRequest,
+) -> Result<ListChildrenResponse> {
+    let ListChildrenRequest {
+        plan_id,
+        parent_node_id,
+        parent_relative_path,
+    } = request;
+    let parent = match (parent_node_id, parent_relative_path) {
+        (Some(parent_node_id), None) => load_node_record(connection, &plan_id, &parent_node_id)?,
+        (None, Some(parent_relative_path)) => {
+            let parent_relative_path =
+                validate_plan_local_path("parent_relative_path", &parent_relative_path)?;
+            require_parent_node_path("parent_relative_path", &parent_relative_path)?;
+            load_node_record_by_relative_path(connection, &plan_id, &parent_relative_path)?
+                .ok_or_else(|| anyhow!("parent_relative_path `{parent_relative_path}` does not exist for plan `{plan_id}`"))?
+        }
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "list-children requires exactly one selector: either parent_node_id or parent_relative_path"
+            ));
+        }
+        (None, None) => {
+            return Err(anyhow!(
+                "list-children requires exactly one selector: either parent_node_id or parent_relative_path"
+            ));
+        }
+    };
+    if parent.node_kind != NodeKind::Parent {
+        return Err(anyhow!(
+            "list-children requires a parent node target, but `{}` is `{}`",
+            parent.relative_path,
+            parent.node_kind.as_str()
+        ));
+    }
+
+    Ok(ListChildrenResponse {
+        parent_node_id: parent.node_id.clone(),
+        parent_relative_path: parent.relative_path.clone(),
+        children: load_child_nodes(connection, &plan_id, Some(&parent.node_id))?
+            .into_iter()
+            .map(node_record_to_summary)
+            .collect(),
+    })
+}
+
 pub(crate) fn load_gate_plan_context(
     connection: &Connection,
     plan_id: &str,
@@ -182,23 +299,30 @@ pub(crate) fn load_node_record(
     plan_id: &str,
     node_id: &str,
 ) -> Result<NodeRecord> {
-    connection
+    let row = connection
         .query_row(
-            "SELECT node_id, relative_path, parent_node_id
+            "SELECT node_id, relative_path, node_kind, parent_node_id
              FROM GEN_PLAN__nodes
              WHERE plan_id = ?1 AND node_id = ?2",
             params![plan_id, node_id],
             |row| {
-                Ok(NodeRecord {
-                    node_id: row.get(0)?,
-                    relative_path: row.get(1)?,
-                    parent_node_id: row.get(2)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
             },
         )
         .optional()
         .context("failed to load persisted node metadata")?
-        .ok_or_else(|| anyhow!("node_id `{node_id}` does not exist for plan `{plan_id}`"))
+        .ok_or_else(|| anyhow!("node_id `{node_id}` does not exist for plan `{plan_id}`"))?;
+    Ok(NodeRecord {
+        node_id: row.0,
+        relative_path: row.1,
+        node_kind: parse_node_kind(row.2)?,
+        parent_node_id: row.3,
+    })
 }
 
 pub(crate) fn load_child_nodes(
@@ -208,13 +332,13 @@ pub(crate) fn load_child_nodes(
 ) -> Result<Vec<NodeRecord>> {
     let sql = match parent_node_id {
         Some(_) => {
-            "SELECT node_id, relative_path, parent_node_id
+            "SELECT node_id, relative_path, node_kind, parent_node_id
              FROM GEN_PLAN__nodes
              WHERE plan_id = ?1 AND parent_node_id = ?2
              ORDER BY relative_path, node_id"
         }
         None => {
-            "SELECT node_id, relative_path, parent_node_id
+            "SELECT node_id, relative_path, node_kind, parent_node_id
              FROM GEN_PLAN__nodes
              WHERE plan_id = ?1 AND parent_node_id IS NULL
              ORDER BY relative_path, node_id"
@@ -226,26 +350,48 @@ pub(crate) fn load_child_nodes(
     match parent_node_id {
         Some(parent_node_id) => statement
             .query_map(params![plan_id, parent_node_id], |row| {
-                Ok(NodeRecord {
-                    node_id: row.get(0)?,
-                    relative_path: row.get(1)?,
-                    parent_node_id: row.get(2)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
             })
             .context("failed to query child nodes")?
             .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to read child nodes"),
+            .context("failed to read child nodes")?
+            .into_iter()
+            .map(|(node_id, relative_path, node_kind, parent_node_id)| {
+                Ok(NodeRecord {
+                    node_id,
+                    relative_path,
+                    node_kind: parse_node_kind(node_kind)?,
+                    parent_node_id,
+                })
+            })
+            .collect(),
         None => statement
             .query_map(params![plan_id], |row| {
-                Ok(NodeRecord {
-                    node_id: row.get(0)?,
-                    relative_path: row.get(1)?,
-                    parent_node_id: row.get(2)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
             })
             .context("failed to query child nodes")?
             .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to read child nodes"),
+            .context("failed to read child nodes")?
+            .into_iter()
+            .map(|(node_id, relative_path, node_kind, parent_node_id)| {
+                Ok(NodeRecord {
+                    node_id,
+                    relative_path,
+                    node_kind: parse_node_kind(node_kind)?,
+                    parent_node_id,
+                })
+            })
+            .collect(),
     }
 }
 
@@ -274,41 +420,131 @@ pub(crate) fn load_latest_passed_leaf_gate_summary(
         .context("failed to load passed leaf gate summary")
 }
 
+pub(crate) fn load_latest_frontier_gate_summary(
+    connection: &Connection,
+    plan_id: &str,
+    parent_node_id: &str,
+) -> Result<Option<FrontierGateSummary>> {
+    connection
+        .query_row(
+            "SELECT frontier_gate_run_id, reviewer_role_id, summary
+             FROM GEN_PLAN__frontier_gate_runs
+             WHERE plan_id = ?1 AND parent_node_id = ?2
+             ORDER BY CAST(created_at AS INTEGER) DESC, frontier_gate_run_id DESC
+             LIMIT 1",
+            params![plan_id, parent_node_id],
+            |row| {
+                Ok(FrontierGateSummary {
+                    gate_run_id: row.get(0)?,
+                    reviewer_role_id: row.get(1)?,
+                    summary: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .context("failed to load latest frontier gate summary")
+}
+
+pub(crate) fn require_leaf_node_record(node: &NodeRecord) -> Result<()> {
+    validate_registered_node_path("relative_path", &node.relative_path)?;
+    if node.node_kind != NodeKind::Leaf {
+        return Err(anyhow!(
+            "leaf review requires a leaf node target, but `{}` is `{}`",
+            node.relative_path,
+            node.node_kind.as_str()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn require_parent_node_record(node: &NodeRecord) -> Result<()> {
+    require_parent_node_path("relative_path", &node.relative_path)?;
+    if node.node_kind != NodeKind::Parent {
+        return Err(anyhow!(
+            "frontier review requires a parent node target, but `{}` is `{}`",
+            node.relative_path,
+            node.node_kind.as_str()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_plan_markdown_file_exists(plan_root: &Path, relative_path: &str) -> Result<()> {
+    let full_path = plan_root.join(relative_path);
+    let metadata = std::fs::metadata(&full_path)
+        .with_context(|| format!("missing plan markdown {}", full_path.display()))?;
+    if !metadata.is_file() {
+        return Err(anyhow!(
+            "expected plan markdown file at {}, but found a non-file target",
+            full_path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_parent_child_runtime_coherence(
+    connection: &Connection,
+    plan_id: &str,
+    parent: &NodeRecord,
+) -> Result<()> {
+    require_parent_node_record(parent)?;
+    for child in load_child_nodes(connection, plan_id, Some(&parent.node_id))? {
+        validate_direct_child_relationship(
+            &child.relative_path,
+            Some(&parent.relative_path),
+            child.node_kind,
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_node_id_for_path(
     connection: &Connection,
     plan_id: &str,
     relative_path: &str,
     parent_relative_path: Option<&str>,
 ) -> Result<String> {
-    let requested_parent_node_id = match parent_relative_path {
+    let requested_node_kind = validate_registration_request(relative_path, parent_relative_path)?;
+    let requested_parent = match parent_relative_path {
         Some(parent_relative_path) if parent_relative_path == relative_path => {
             return Err(anyhow!(
                 "parent_relative_path must differ from relative_path for `{relative_path}`"
             ));
         }
-        Some(parent_relative_path) => Some(ensure_node_id_for_path(
-            connection,
-            plan_id,
-            parent_relative_path,
-            None,
-        )?),
+        Some(parent_relative_path) => {
+            let parent = load_node_record_by_relative_path(connection, plan_id, parent_relative_path)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "parent_relative_path `{parent_relative_path}` must reference an existing tracked parent node before registering `{relative_path}`"
+                    )
+                })?;
+            if parent.node_kind != NodeKind::Parent {
+                return Err(anyhow!(
+                    "parent_relative_path `{parent_relative_path}` must point to a tracked parent node, but it is `{}`",
+                    parent.node_kind.as_str()
+                ));
+            }
+            Some(parent)
+        }
         None => None,
     };
 
-    if let Some(existing) = select_node(connection, plan_id, relative_path)? {
-        if let Some(requested_parent_node_id) = requested_parent_node_id.as_deref() {
-            if existing.parent_node_id.as_deref() != Some(requested_parent_node_id) {
-                return Err(anyhow!(
-                    "parent_relative_path conflicts with existing node linkage for `{relative_path}`"
-                ));
-            }
-        }
+    if let Some(existing) = select_node_by_relative_path(connection, plan_id, relative_path)? {
+        ensure_existing_node_matches_request(
+            connection,
+            plan_id,
+            relative_path,
+            requested_node_kind,
+            requested_parent.as_ref(),
+            &existing,
+        )?;
         return Ok(existing.node_id);
     }
 
     let node_id = Uuid::new_v4().to_string();
     let node_name = node_name(relative_path);
     let timestamp = current_timestamp()?;
+    let requested_parent_node_id = requested_parent.as_ref().map(|node| node.node_id.as_str());
 
     if let Err(error) = connection.execute(
         "INSERT INTO GEN_PLAN__nodes (
@@ -316,34 +552,141 @@ fn ensure_node_id_for_path(
             node_id,
             relative_path,
             node_name,
+            node_kind,
             parent_node_id,
             created_at,
             updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             plan_id,
             node_id,
             relative_path,
             node_name,
+            requested_node_kind.as_str(),
             requested_parent_node_id,
             timestamp,
             timestamp,
         ],
     ) {
-        if let Some(existing) = select_node(connection, plan_id, relative_path)? {
-            if let Some(requested_parent_node_id) = requested_parent_node_id.as_deref() {
-                if existing.parent_node_id.as_deref() != Some(requested_parent_node_id) {
-                    return Err(anyhow!(
-                        "parent_relative_path conflicts with existing node linkage for `{relative_path}`"
-                    ));
-                }
-            }
+        if let Some(existing) = select_node_by_relative_path(connection, plan_id, relative_path)? {
+            ensure_existing_node_matches_request(
+                connection,
+                plan_id,
+                relative_path,
+                requested_node_kind,
+                requested_parent.as_ref(),
+                &existing,
+            )?;
             return Ok(existing.node_id);
         }
         return Err(error).context("failed to persist node metadata");
     }
 
     Ok(node_id)
+}
+
+fn ensure_existing_node_matches_request(
+    connection: &Connection,
+    plan_id: &str,
+    relative_path: &str,
+    requested_node_kind: NodeKind,
+    requested_parent: Option<&NodeRecord>,
+    existing: &NodeRow,
+) -> Result<()> {
+    if existing.node_kind != requested_node_kind {
+        return Err(anyhow!(
+            "requested target path `{relative_path}` resolves to node kind `{}`, but existing node `{}` is stored as `{}`",
+            requested_node_kind.as_str(),
+            existing.node_id,
+            existing.node_kind.as_str()
+        ));
+    }
+
+    let requested_parent_node_id = requested_parent.map(|parent| parent.node_id.as_str());
+    let existing_parent_node_id = existing.parent_node_id.as_deref();
+    if existing_parent_node_id != requested_parent_node_id {
+        let existing_parent_relative_path = match existing.parent_node_id.as_deref() {
+            Some(parent_node_id) => Some(
+                connection
+                    .query_row(
+                        "SELECT relative_path FROM GEN_PLAN__nodes WHERE plan_id = ?1 AND node_id = ?2",
+                        params![plan_id, parent_node_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .context("failed to read conflicting parent relative path")?
+                    .unwrap_or_else(|| "<unknown-parent>".to_owned()),
+            ),
+            None => None,
+        };
+        return Err(anyhow!(
+            "parent_relative_path conflicts with existing node linkage for `{relative_path}`: requested_parent_relative_path={:?}, existing_node_id=`{}`, existing_parent_node_id={:?}, existing_parent_relative_path={:?}, existing_relative_path=`{}`",
+            requested_parent.map(|parent| parent.relative_path.as_str()),
+            existing.node_id,
+            existing.parent_node_id,
+            existing_parent_relative_path,
+            existing.relative_path,
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_registration_request(
+    relative_path: &str,
+    parent_relative_path: Option<&str>,
+) -> Result<NodeKind> {
+    let node_kind = validate_registered_node_path("relative_path", relative_path)?;
+    match parent_relative_path {
+        Some(parent_relative_path) => {
+            require_parent_node_path("parent_relative_path", parent_relative_path)?;
+            validate_direct_child_relationship(relative_path, Some(parent_relative_path), node_kind)?;
+            Ok(node_kind)
+        }
+        None => {
+            let components = Path::new(relative_path).components().count();
+            match (node_kind, components) {
+                (NodeKind::Leaf, 1) | (NodeKind::Parent, 2) => Ok(node_kind),
+                (NodeKind::Leaf, _) => Err(anyhow!(
+                    "relative_path `{relative_path}` is a nested leaf and requires parent_relative_path pointing to the tracked parent markdown path"
+                )),
+                (NodeKind::Parent, _) => Err(anyhow!(
+                    "relative_path `{relative_path}` is a nested parent and requires parent_relative_path pointing to the tracked parent markdown path"
+                )),
+            }
+        }
+    }
+}
+
+fn validate_direct_child_relationship(
+    relative_path: &str,
+    parent_relative_path: Option<&str>,
+    node_kind: NodeKind,
+) -> Result<()> {
+    let Some(parent_relative_path) = parent_relative_path else {
+        return Ok(());
+    };
+    let parent_dir = Path::new(parent_relative_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let child_relative = Path::new(relative_path)
+        .strip_prefix(parent_dir)
+        .map_err(|_| {
+            anyhow!(
+                "relative_path `{relative_path}` must stay within the direct child scope of parent_relative_path `{parent_relative_path}`"
+            )
+        })?;
+    let child_components: Vec<_> = child_relative.components().collect();
+    let expected_components = match node_kind {
+        NodeKind::Leaf => 1,
+        NodeKind::Parent => 2,
+    };
+    if child_components.len() != expected_components {
+        return Err(anyhow!(
+            "relative_path `{relative_path}` must be a direct child of parent_relative_path `{parent_relative_path}`"
+        ));
+    }
+    Ok(())
 }
 
 fn repair_plan_project_directory(
@@ -408,26 +751,52 @@ fn select_plan(
     Ok(plan)
 }
 
-fn select_node(
+fn select_node_by_relative_path(
     connection: &Connection,
     plan_id: &str,
     relative_path: &str,
 ) -> Result<Option<NodeRow>> {
-    connection
+    let row = connection
         .query_row(
-            "SELECT node_id, parent_node_id
+            "SELECT node_id, relative_path, node_kind, parent_node_id
              FROM GEN_PLAN__nodes
              WHERE plan_id = ?1 AND relative_path = ?2",
             params![plan_id, relative_path],
             |row| {
-                Ok(NodeRow {
-                    node_id: row.get(0)?,
-                    parent_node_id: row.get(1)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
             },
         )
         .optional()
-        .context("failed to read persisted node metadata")
+        .context("failed to read persisted node metadata")?;
+    row.map(|(node_id, relative_path, node_kind, parent_node_id)| {
+        Ok(NodeRow {
+            node_id,
+            relative_path,
+            node_kind: parse_node_kind(node_kind)?,
+            parent_node_id,
+        })
+    })
+    .transpose()
+}
+
+fn load_node_record_by_relative_path(
+    connection: &Connection,
+    plan_id: &str,
+    relative_path: &str,
+) -> Result<Option<NodeRecord>> {
+    select_node_by_relative_path(connection, plan_id, relative_path).map(|node| {
+        node.map(|node| NodeRecord {
+            node_id: node.node_id,
+            relative_path: node.relative_path,
+            node_kind: node.node_kind,
+            parent_node_id: node.parent_node_id,
+        })
+    })
 }
 
 fn validate_plan_local_path(label: &str, input: &str) -> Result<String> {
@@ -478,6 +847,48 @@ fn validate_plan_local_path(label: &str, input: &str) -> Result<String> {
     Ok(normalized)
 }
 
+pub(crate) fn validate_registered_node_path(label: &str, relative_path: &str) -> Result<NodeKind> {
+    let path = Path::new(relative_path);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("{label} must point to a canonical markdown file path"))?;
+    let stem = file_name
+        .strip_suffix(".md")
+        .ok_or_else(|| anyhow!("{label} must point to a canonical markdown file path ending in `.md`"))?;
+    if stem.is_empty() {
+        return Err(anyhow!(
+            "{label} must point to a canonical markdown file path with a non-empty stem"
+        ));
+    }
+    let components: Vec<_> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => component.to_str(),
+            _ => None,
+        })
+        .collect();
+    if components.is_empty() {
+        return Err(anyhow!("{label} must point to a canonical markdown file path"));
+    }
+
+    let parent_dir_name = path.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str());
+    if parent_dir_name == Some(stem) {
+        Ok(NodeKind::Parent)
+    } else {
+        Ok(NodeKind::Leaf)
+    }
+}
+
+pub(crate) fn require_parent_node_path(label: &str, relative_path: &str) -> Result<()> {
+    if validate_registered_node_path(label, relative_path)? != NodeKind::Parent {
+        return Err(anyhow!(
+            "{label} must point to a canonical parent markdown path such as `scope/scope.md`"
+        ));
+    }
+    Ok(())
+}
+
 fn current_timestamp() -> Result<String> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -515,6 +926,39 @@ fn node_name(relative_path: &str) -> String {
         .to_owned()
 }
 
+fn parse_node_kind(value: String) -> Result<NodeKind> {
+    match value.as_str() {
+        "parent" => Ok(NodeKind::Parent),
+        "leaf" => Ok(NodeKind::Leaf),
+        other => Err(anyhow!("invalid persisted node_kind `{other}`")),
+    }
+}
+
+fn node_record_to_summary(node: NodeRecord) -> NodeSummary {
+    NodeSummary {
+        node_id: node.node_id,
+        relative_path: node.relative_path,
+        node_kind: node.node_kind,
+        parent_node_id: node.parent_node_id,
+    }
+}
+
+fn leaf_gate_summary_to_api(summary: LeafGateSummary) -> GateSummary {
+    GateSummary {
+        gate_run_id: summary.gate_run_id,
+        reviewer_role_id: summary.reviewer_role_id,
+        summary: summary.summary,
+    }
+}
+
+fn frontier_gate_summary_to_api(summary: FrontierGateSummary) -> GateSummary {
+    GateSummary {
+        gate_run_id: summary.gate_run_id,
+        reviewer_role_id: summary.reviewer_role_id,
+        summary: summary.summary,
+    }
+}
+
 struct PlanRow {
     plan_id: String,
     plan_root: String,
@@ -524,12 +968,13 @@ struct PlanRow {
     project_directory_source: String,
 }
 
-struct NodeRow {
-    node_id: String,
-    parent_node_id: Option<String>,
+pub(crate) struct LeafGateSummary {
+    pub gate_run_id: String,
+    pub reviewer_role_id: String,
+    pub summary: String,
 }
 
-pub(crate) struct LeafGateSummary {
+pub(crate) struct FrontierGateSummary {
     pub gate_run_id: String,
     pub reviewer_role_id: String,
     pub summary: String,

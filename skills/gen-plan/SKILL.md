@@ -83,6 +83,36 @@ Installed runtime helpers must be invoked against the project workspace root rat
 The Agent must not silently change the runtime workspace base between retries or compensating calls in order to “make the state line up.”
 The Agent must not inspect `.loopy/loopy.db` directly as part of planning or runtime recovery; runtime state must be learned through installed runtime APIs rather than ad hoc DB reads.
 
+### 0.3.1.1 Canonical Node Path Contract
+
+When using installed `ensure-node-id`, the Agent must treat markdown targets as the only authoritative node identities.
+
+Canonical path shapes:
+- root leaf: `leaf.md`
+- root child parent: `scope/scope.md`
+- nested leaf: `parent/leaf.md`
+- nested parent: `parent/child/child.md`
+
+Hard rules:
+- never register a directory path such as `scope`,
+- never register a node path without `.md`,
+- never pass a parent directory where a parent markdown path is required,
+- always use the tracked parent node’s self-markdown path as `parent_relative_path`,
+- treat child registration as parent-scoped: the parent node must already be tracked before registering its children.
+
+This means installed `ensure-node-id` is not a substitute for inventing or auto-creating missing parent runtime state.
+
+### 0.3.1.2 Registration Checklist
+
+Before every installed `ensure-node-id` call, the Agent MUST check:
+- is the target node a leaf or a parent,
+- does `relative_path` point to the canonical markdown target for that node kind,
+- if `parent_relative_path` is present, does it point to the tracked parent node’s canonical self-markdown path,
+- if `parent_relative_path` is present, is the target a direct child of that parent rather than a deeper descendant,
+- has the parent node already been successfully registered if this is not a root node.
+
+If any answer is no, the Agent must repair the request or the missing prerequisite runtime state before calling `ensure-node-id`.
+
 ### 0.3.2 Gate Authority Contract
 
 `leaf review gate` and `frontier review gate` are runtime gates, not informal review concepts.
@@ -588,6 +618,21 @@ Example:
 - if a child is a non-leaf node, link to `./<child-node-name>/<child-node-name>.md`
 - if a child is a leaf node, link to `./<leaf-node-name>.md`
 
+### 13.3.1 Runtime Registration Examples
+
+Good examples:
+- root parent node: `ensure-node-id --relative-path docs/docs.md`
+- child leaf under that parent: `ensure-node-id --relative-path docs/spec.md --parent-relative-path docs/docs.md`
+- child parent under that parent: `ensure-node-id --relative-path docs/cli/cli.md --parent-relative-path docs/docs.md`
+
+Bad examples:
+- directory path as node id target: `ensure-node-id --relative-path docs`
+- missing markdown suffix: `ensure-node-id --relative-path docs/spec`
+- parent directory instead of parent markdown path: `ensure-node-id --relative-path docs/spec.md --parent-relative-path docs`
+- deeper descendant registered against the wrong parent: `ensure-node-id --relative-path docs/cli/details.md --parent-relative-path docs/docs.md`
+
+The Agent must treat the bad examples as request-construction errors, not as acceptable alternate spellings.
+
 ### 13.4 Naming Style
 
 Recommended naming style:
@@ -648,6 +693,7 @@ Each layer should follow the same flow:
 8. expand only that parent node’s direct children as a candidate parent-scoped expansion,
 9. if any unresolved user choice or missing constraint would materially change that expansion, ask the necessary clarification question or questions and wait for the user,
 10. register each newly introduced child node through successful `ensure-node-id` before treating it as a tracked node or invoking any review gate against it,
+    using the parent node’s canonical self-markdown path as `parent_relative_path` and ensuring that parent node was already registered first,
     if child registration fails because of request construction or missing prerequisite runtime state, repair that runtime-call sequence without modifying plan content, then continue only after registration succeeds,
 11. ask the user to confirm that candidate parent-scoped expansion,
 12. run installed `run-leaf-review-gate` on every candidate leaf under that parent before accepting any of them as leaves,

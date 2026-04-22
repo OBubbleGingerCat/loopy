@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Error as SqliteError};
 
@@ -28,6 +30,7 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
                 node_id TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
                 node_name TEXT NOT NULL,
+                node_kind TEXT NOT NULL DEFAULT '',
                 parent_node_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -85,6 +88,13 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
         "project_directory_source",
         "TEXT NOT NULL DEFAULT 'explicit'",
     )?;
+    ensure_column_exists(
+        connection,
+        "GEN_PLAN__nodes",
+        "node_kind",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    backfill_node_kinds(connection)?;
     if project_directory_added {
         connection
             .execute(
@@ -111,6 +121,45 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn backfill_node_kinds(connection: &Connection) -> Result<()> {
+    let mut statement = connection
+        .prepare(
+            "SELECT plan_id, node_id, relative_path
+             FROM GEN_PLAN__nodes
+             WHERE node_kind = '' OR node_kind NOT IN ('parent', 'leaf')",
+        )
+        .context("failed to prepare node_kind backfill query")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .context("failed to query node_kind backfill rows")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read node_kind backfill rows")?;
+
+    for (plan_id, node_id, relative_path) in rows {
+        let Some(node_kind) = infer_node_kind(&relative_path) else {
+            continue;
+        };
+        connection
+            .execute(
+                "UPDATE GEN_PLAN__nodes
+                 SET node_kind = ?1
+                 WHERE plan_id = ?2 AND node_id = ?3",
+                [node_kind, &plan_id, &node_id],
+            )
+            .with_context(|| {
+                format!("failed to backfill node_kind for `{relative_path}` in plan `{plan_id}`")
+            })?;
+    }
+
+    Ok(())
+}
+
 fn ensure_column_exists(
     connection: &Connection,
     table_name: &str,
@@ -133,5 +182,20 @@ fn is_duplicate_column_error(error: &SqliteError) -> bool {
             .to_ascii_lowercase()
             .contains("duplicate column name"),
         _ => false,
+    }
+}
+
+fn infer_node_kind(relative_path: &str) -> Option<&'static str> {
+    let path = PathBuf::from(relative_path);
+    let file_name = path.file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".md")?;
+    if stem.is_empty() {
+        return None;
+    }
+    let parent_dir_name = path.parent()?.file_name().and_then(|name| name.to_str());
+    if parent_dir_name == Some(stem) {
+        Some("parent")
+    } else {
+        Some("leaf")
     }
 }
