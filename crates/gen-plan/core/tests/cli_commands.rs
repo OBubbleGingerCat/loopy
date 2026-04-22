@@ -50,6 +50,8 @@ fn help_lists_plan_and_gate_commands() -> Result<()> {
         "ensure-plan",
         "open-plan",
         "ensure-node-id",
+        "inspect-node",
+        "list-children",
         "run-leaf-review-gate",
         "run-frontier-review-gate",
         "mock-leaf-reviewer",
@@ -169,6 +171,11 @@ fn ensure_node_id_command_prints_pretty_json() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: workspace.path().to_path_buf(),
     })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
 
     let output = run_cli(
         &[
@@ -183,7 +190,7 @@ fn ensure_node_id_command_prints_pretty_json() -> Result<()> {
             "--relative-path",
             "docs/spec.md",
             "--parent-relative-path",
-            "docs",
+            "docs/docs.md",
         ],
         Some("failed to run loopy-gen-plan ensure-node-id"),
     )?;
@@ -203,9 +210,138 @@ fn ensure_node_id_command_prints_pretty_json() -> Result<()> {
     let reopened = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id,
         relative_path: "docs/spec.md".to_owned(),
-        parent_relative_path: Some("docs".to_owned()),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
     })?;
     assert_eq!(value["node_id"], Value::String(reopened.node_id));
+
+    Ok(())
+}
+
+#[test]
+fn inspect_node_command_prints_pretty_json() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-inspect-node".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let output = run_cli(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "inspect-node",
+            "--plan-id",
+            &plan.plan_id,
+            "--relative-path",
+            "docs/spec.md",
+        ],
+        Some("failed to run loopy-gen-plan inspect-node"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected inspect-node command to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("\n  \"node_id\""),
+        "expected pretty-printed JSON output, stdout was:\n{stdout}"
+    );
+    let value: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(value["node_id"], Value::String(leaf.node_id));
+    assert_eq!(value["node_kind"], Value::String("leaf".to_owned()));
+    assert_eq!(
+        value["parent_node_id"],
+        Value::String(parent.node_id.to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn list_children_command_prints_pretty_json() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-list-children".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/cli/cli.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let output = run_cli(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "list-children",
+            "--plan-id",
+            &plan.plan_id,
+            "--parent-node-id",
+            &parent.node_id,
+        ],
+        Some("failed to run loopy-gen-plan list-children"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected list-children command to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("\n  \"children\""),
+        "expected pretty-printed JSON output, stdout was:\n{stdout}"
+    );
+    let value: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(
+        value["parent_relative_path"],
+        Value::String("docs/docs.md".to_owned())
+    );
+    assert_eq!(
+        value["children"][0]["relative_path"],
+        Value::String("docs/cli/cli.md".to_owned())
+    );
+    assert_eq!(
+        value["children"][1]["relative_path"],
+        Value::String("docs/spec.md".to_owned())
+    );
 
     Ok(())
 }
@@ -232,18 +368,27 @@ fn leaf_gate_command_prints_pretty_json() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: project_directory.clone(),
     })?;
-    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
-        plan_id: plan.plan_id.clone(),
-        relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: None,
-    })?;
     fs::create_dir_all(workspace.path().join(".loopy/plans/cli-leaf-gate/api"))?;
+    fs::write(
+        workspace.path().join(".loopy/plans/cli-leaf-gate/api/api.md"),
+        "# API\n",
+    )?;
     fs::write(
         workspace
             .path()
             .join(".loopy/plans/cli-leaf-gate/api/implement-endpoint.md"),
         "# Implement endpoint\n",
     )?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
 
     let output = run_cli_with_env(
         &[

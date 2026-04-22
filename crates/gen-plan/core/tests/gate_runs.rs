@@ -14,10 +14,6 @@ use rusqlite::{Connection, params};
 
 const REAL_LEAF_SUMMARY: &str = "Leaf review passed through fake codex.";
 const REAL_FRONTIER_SUMMARY: &str = "Frontier review passed through fake codex.";
-const FRONTIER_LEAF_CHILD_NODE_ID: &str = "node-frontier-leaf-child";
-const FRONTIER_NON_LEAF_CHILD_NODE_ID: &str = "node-frontier-non-leaf-child";
-const FRONTIER_GRANDCHILD_NODE_ID: &str = "node-frontier-grandchild";
-
 #[test]
 fn ensure_plan_resolves_default_leaf_and_frontier_reviewers() -> Result<()> {
     let workspace = support::workspace()?;
@@ -62,6 +58,11 @@ fn leaf_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Result<
         task_type: "coding-task".to_owned(),
         project_directory: project_directory.clone(),
     })?;
+    fs::create_dir_all(workspace.path().join(".loopy/plans/leaf-gate/api"))?;
+    fs::write(
+        workspace.path().join(".loopy/plans/leaf-gate/api/api.md"),
+        "# API\n",
+    )?;
 
     let leaf_path = workspace
         .path()
@@ -73,10 +74,15 @@ fn leaf_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Result<
     )?;
     fs::write(&leaf_path, "# Implement endpoint\n")?;
 
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
     let node = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
         relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: None,
+        parent_relative_path: Some("api/api.md".to_owned()),
     })?;
 
     let result = {
@@ -156,14 +162,20 @@ fn leaf_gate_uses_repaired_project_directory_for_existing_plan() -> Result<()> {
     assert_eq!(plan.plan_id, "plan-repair");
 
     fs::create_dir_all(repaired_plan_root.join("api"))?;
+    fs::write(repaired_plan_root.join("api/api.md"), "# API\n")?;
     fs::write(
         repaired_plan_root.join("api/implement-endpoint.md"),
         "# Implement endpoint\n",
     )?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
     let node = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
         relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: None,
+        parent_relative_path: Some("api/api.md".to_owned()),
     })?;
 
     let result = {
@@ -202,33 +214,20 @@ fn leaf_gate_rejects_non_leaf_nodes() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: workspace.path().to_path_buf(),
     })?;
+    fs::create_dir_all(workspace.path().join(".loopy/plans/leaf-non-leaf-gate/api"))?;
+    fs::write(
+        workspace
+            .path()
+            .join(".loopy/plans/leaf-non-leaf-gate/api/api.md"),
+        "# API\n",
+    )?;
 
     let target = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
-        relative_path: "api/implement-endpoint.md".to_owned(),
+        relative_path: "api/api.md".to_owned(),
         parent_relative_path: None,
     })?;
     let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
-    connection.execute(
-        "INSERT INTO GEN_PLAN__nodes (
-            plan_id,
-            node_id,
-            relative_path,
-            node_name,
-            parent_node_id,
-            created_at,
-            updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            &plan.plan_id,
-            "node-leaf-gate-child",
-            "api/implement-endpoint/details.md",
-            "details.md",
-            &target.node_id,
-            "0",
-            "0",
-        ],
-    )?;
 
     let error = runtime
         .run_leaf_review_gate(RunLeafReviewGateRequest {
@@ -250,6 +249,49 @@ fn leaf_gate_rejects_non_leaf_nodes() -> Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(persisted_run_count, 0);
+
+    Ok(())
+}
+
+#[test]
+fn leaf_gate_preflight_rejects_missing_target_markdown_before_dispatch() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "leaf-preflight-missing".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    fs::create_dir_all(workspace.path().join(".loopy/plans/leaf-preflight-missing/api"))?;
+    fs::write(
+        workspace
+            .path()
+            .join(".loopy/plans/leaf-preflight-missing/api/api.md"),
+        "# API\n",
+    )?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    let error = runtime
+        .run_leaf_review_gate(RunLeafReviewGateRequest {
+            plan_id: plan.plan_id,
+            node_id: leaf.node_id,
+            planner_mode: PlannerMode::Auto,
+        })
+        .expect_err("missing leaf markdown should fail locally before reviewer dispatch");
+    assert!(
+        format!("{error:#}").contains("plan markdown")
+            || format!("{error:#}").contains("missing"),
+        "unexpected error: {error:#}"
+    );
 
     Ok(())
 }
@@ -277,15 +319,25 @@ fn leaf_gate_fails_closed_on_malformed_reviewer_json() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: project_directory,
     })?;
+    fs::create_dir_all(workspace.path().join(".loopy/plans/malformed-leaf/api"))?;
+    fs::write(
+        workspace.path().join(".loopy/plans/malformed-leaf/api/api.md"),
+        "# API\n",
+    )?;
     let leaf_path = workspace
         .path()
         .join(".loopy/plans/malformed-leaf/api/implement-endpoint.md");
     fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
     fs::write(&leaf_path, "# Implement endpoint\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
     let node = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
         relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: None,
+        parent_relative_path: Some("api/api.md".to_owned()),
     })?;
 
     let error = {
@@ -329,15 +381,27 @@ fn leaf_gate_fails_closed_when_required_fields_are_missing() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: project_directory,
     })?;
+    fs::create_dir_all(workspace.path().join(".loopy/plans/missing-fields-leaf/api"))?;
+    fs::write(
+        workspace
+            .path()
+            .join(".loopy/plans/missing-fields-leaf/api/api.md"),
+        "# API\n",
+    )?;
     let leaf_path = workspace
         .path()
         .join(".loopy/plans/missing-fields-leaf/api/implement-endpoint.md");
     fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
     fs::write(&leaf_path, "# Implement endpoint\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
     let node = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
         relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: None,
+        parent_relative_path: Some("api/api.md".to_owned()),
     })?;
 
     let error = {
@@ -382,15 +446,25 @@ fn leaf_gate_requires_pause_for_user_decision_issues_to_include_user_question_fi
         task_type: "coding-task".to_owned(),
         project_directory: project_directory,
     })?;
+    fs::create_dir_all(workspace.path().join(".loopy/plans/pause-leaf/api"))?;
+    fs::write(
+        workspace.path().join(".loopy/plans/pause-leaf/api/api.md"),
+        "# API\n",
+    )?;
     let leaf_path = workspace
         .path()
         .join(".loopy/plans/pause-leaf/api/implement-endpoint.md");
     fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
     fs::write(&leaf_path, "# Implement endpoint\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
     let node = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
         relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: None,
+        parent_relative_path: Some("api/api.md".to_owned()),
     })?;
 
     let error = {
@@ -434,15 +508,27 @@ fn leaf_gate_fails_closed_when_issue_payload_has_unknown_fields() -> Result<()> 
         task_type: "coding-task".to_owned(),
         project_directory,
     })?;
+    fs::create_dir_all(workspace.path().join(".loopy/plans/unknown-issue-field-leaf/api"))?;
+    fs::write(
+        workspace
+            .path()
+            .join(".loopy/plans/unknown-issue-field-leaf/api/api.md"),
+        "# API\n",
+    )?;
     let leaf_path = workspace
         .path()
         .join(".loopy/plans/unknown-issue-field-leaf/api/implement-endpoint.md");
     fs::create_dir_all(leaf_path.parent().expect("leaf path parent should exist"))?;
     fs::write(&leaf_path, "# Implement endpoint\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
     let node = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
         relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: None,
+        parent_relative_path: Some("api/api.md".to_owned()),
     })?;
 
     let error = {
@@ -489,7 +575,7 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
         plan_root.join("backend/implement-endpoint.md"),
         "# Implement endpoint\n",
     )?;
-    fs::write(plan_root.join("backend/subtree.md"), "# Subtree\n")?;
+    fs::write(plan_root.join("backend/subtree/subtree.md"), "# Subtree\n")?;
     fs::write(plan_root.join("backend/subtree/details.md"), "# Details\n")?;
 
     let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
@@ -497,67 +583,22 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
         relative_path: "backend/backend.md".to_owned(),
         parent_relative_path: None,
     })?;
+    let leaf_child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+    let non_leaf_child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/subtree/subtree.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/subtree/details.md".to_owned(),
+        parent_relative_path: Some("backend/subtree/subtree.md".to_owned()),
+    })?;
     let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
-    connection.execute(
-        "INSERT INTO GEN_PLAN__nodes (
-            plan_id,
-            node_id,
-            relative_path,
-            node_name,
-            parent_node_id,
-            created_at,
-            updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            &plan.plan_id,
-            FRONTIER_LEAF_CHILD_NODE_ID,
-            "backend/implement-endpoint.md",
-            "implement-endpoint.md",
-            &parent.node_id,
-            "0",
-            "0",
-        ],
-    )?;
-    connection.execute(
-        "INSERT INTO GEN_PLAN__nodes (
-            plan_id,
-            node_id,
-            relative_path,
-            node_name,
-            parent_node_id,
-            created_at,
-            updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            &plan.plan_id,
-            FRONTIER_NON_LEAF_CHILD_NODE_ID,
-            "backend/subtree.md",
-            "subtree.md",
-            &parent.node_id,
-            "0",
-            "0",
-        ],
-    )?;
-    connection.execute(
-        "INSERT INTO GEN_PLAN__nodes (
-            plan_id,
-            node_id,
-            relative_path,
-            node_name,
-            parent_node_id,
-            created_at,
-            updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            &plan.plan_id,
-            FRONTIER_GRANDCHILD_NODE_ID,
-            "backend/subtree/details.md",
-            "details.md",
-            FRONTIER_NON_LEAF_CHILD_NODE_ID,
-            "0",
-            "0",
-        ],
-    )?;
 
     let result = {
         let _env_guard = fake_codex_env(&fake_bin_dir);
@@ -579,14 +620,14 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
         "SELECT COUNT(*)
          FROM GEN_PLAN__nodes
          WHERE plan_id = ?1 AND parent_node_id = ?2 AND node_id = ?3",
-        params![&plan.plan_id, &parent.node_id, FRONTIER_LEAF_CHILD_NODE_ID],
+        params![&plan.plan_id, &parent.node_id, &leaf_child.node_id],
         |row| row.get(0),
     )?;
     assert_eq!(existing_invalidated_leaf_count, 1);
     assert!(
         !result
             .invalidated_leaf_node_ids
-            .contains(&FRONTIER_NON_LEAF_CHILD_NODE_ID.to_owned())
+            .contains(&non_leaf_child.node_id)
     );
 
     let (persisted_reviewer_role_id, persisted_summary): (String, String) = connection.query_row(
@@ -641,26 +682,11 @@ fn frontier_gate_fails_closed_when_invalidations_field_is_missing() -> Result<()
         relative_path: "backend/backend.md".to_owned(),
         parent_relative_path: None,
     })?;
-    Connection::open(workspace.path().join(".loopy/loopy.db"))?.execute(
-        "INSERT INTO GEN_PLAN__nodes (
-            plan_id,
-            node_id,
-            relative_path,
-            node_name,
-            parent_node_id,
-            created_at,
-            updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            &plan.plan_id,
-            FRONTIER_LEAF_CHILD_NODE_ID,
-            "backend/implement-endpoint.md",
-            "implement-endpoint.md",
-            &parent.node_id,
-            "0",
-            "0",
-        ],
-    )?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
 
     let error = {
         let _env_guard = fake_codex_env(&fake_bin_dir);
@@ -674,6 +700,49 @@ fn frontier_gate_fails_closed_when_invalidations_field_is_missing() -> Result<()
     };
     assert!(
         format!("{error:#}").contains("failed to parse frontier reviewer JSON result"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn frontier_gate_preflight_rejects_leaf_nodes_before_dispatch() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "frontier-preflight-leaf".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/frontier-preflight-leaf");
+    fs::create_dir_all(plan_root.join("backend"))?;
+    fs::write(plan_root.join("backend/backend.md"), "# Backend\n")?;
+    fs::write(
+        plan_root.join("backend/implement-endpoint.md"),
+        "# Implement endpoint\n",
+    )?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/backend.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+
+    let error = runtime
+        .run_frontier_review_gate(RunFrontierReviewGateRequest {
+            plan_id: plan.plan_id,
+            parent_node_id: leaf.node_id,
+            planner_mode: PlannerMode::Auto,
+        })
+        .expect_err("frontier gate should reject leaf targets locally");
+    assert!(
+        format!("{error:#}").contains("frontier review")
+            || format!("{error:#}").contains("parent"),
         "unexpected error: {error:#}"
     );
 

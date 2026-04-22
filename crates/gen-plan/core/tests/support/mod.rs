@@ -31,6 +31,7 @@ pub fn workspace() -> Result<TestWorkspace> {
     Ok(TestWorkspace { path })
 }
 
+#[allow(dead_code)]
 pub fn assert_dir_exists(path: &Path) {
     assert!(path.is_dir(), "expected directory at {}", path.display());
 }

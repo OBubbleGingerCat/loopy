@@ -3,7 +3,10 @@ mod support;
 use std::fs;
 
 use anyhow::Result;
-use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, Runtime};
+use loopy_gen_plan::{
+    EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest, NodeKind,
+    OpenPlanRequest, Runtime,
+};
 use rusqlite::{Connection, params};
 
 #[test]
@@ -237,15 +240,20 @@ fn ensure_node_id_is_stable_for_a_relative_path() -> Result<()> {
         project_directory: workspace.path().to_path_buf(),
     })?;
 
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
     let first = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
-        relative_path: "docs/plan.md".to_owned(),
-        parent_relative_path: None,
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
     })?;
     let second = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id,
-        relative_path: "docs/plan.md".to_owned(),
-        parent_relative_path: None,
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
     })?;
 
     assert_eq!(first.node_id, second.node_id);
@@ -343,7 +351,7 @@ fn ensure_node_id_rejects_paths_that_are_not_valid_plan_local_paths() -> Result<
     let error = runtime
         .ensure_node_id(EnsureNodeIdRequest {
             plan_id: plan.plan_id,
-            relative_path: "docs/plan.md".to_owned(),
+            relative_path: "docs/spec.md".to_owned(),
             parent_relative_path: Some("../".to_owned()),
         })
         .expect_err("invalid parent_relative_path should be rejected");
@@ -357,7 +365,100 @@ fn ensure_node_id_rejects_paths_that_are_not_valid_plan_local_paths() -> Result<
 }
 
 #[test]
-fn ensure_node_id_rejects_conflicting_parent_for_existing_node() -> Result<()> {
+fn ensure_node_id_accepts_canonical_parent_and_child_paths() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    let nested_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id,
+        relative_path: "docs/cli/cli.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    assert_ne!(parent.node_id, leaf.node_id);
+    assert_ne!(leaf.node_id, nested_parent.node_id);
+
+    Ok(())
+}
+
+#[test]
+fn ensure_node_id_rejects_noncanonical_node_shapes_and_missing_parents() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    for relative_path in ["docs", "docs/spec", "docs/spec.md"] {
+        let error = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: relative_path.to_owned(),
+                parent_relative_path: None,
+            })
+            .expect_err("noncanonical path shape should be rejected");
+        let error_text = format!("{error:#}");
+        assert!(
+            error_text.contains("canonical") || error_text.contains("parent_relative_path"),
+            "unexpected error for `{relative_path}`: {error_text}"
+        );
+    }
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    assert!(!parent.node_id.is_empty());
+
+    let error = runtime
+        .ensure_node_id(EnsureNodeIdRequest {
+            plan_id: plan.plan_id.clone(),
+            relative_path: "docs/cli/notes.md".to_owned(),
+            parent_relative_path: Some("docs/docs.md".to_owned()),
+        })
+        .expect_err("non-direct child path should be rejected");
+    let error_text = format!("{error:#}");
+    assert!(
+        error_text.contains("direct child") || error_text.contains("canonical"),
+        "unexpected non-direct-child error: {error_text}"
+    );
+
+    let error = runtime
+        .ensure_node_id(EnsureNodeIdRequest {
+            plan_id: plan.plan_id,
+            relative_path: "missing/spec.md".to_owned(),
+            parent_relative_path: Some("missing/missing.md".to_owned()),
+        })
+        .expect_err("missing tracked parent should be rejected");
+    let error_text = format!("{error:#}");
+    assert!(
+        error_text.contains("existing tracked parent") || error_text.contains("does not exist"),
+        "unexpected missing-parent error: {error_text}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ensure_node_id_rejects_conflicting_parent_for_existing_node_with_context() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
     let plan = runtime.ensure_plan(EnsurePlanRequest {
@@ -368,22 +469,146 @@ fn ensure_node_id_rejects_conflicting_parent_for_existing_node() -> Result<()> {
 
     runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
-        relative_path: "docs/plan.md".to_owned(),
-        parent_relative_path: Some("docs".to_owned()),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
     })?;
+    let legacy_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/legacy/legacy.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "UPDATE GEN_PLAN__nodes
+         SET parent_node_id = ?1
+         WHERE plan_id = ?2 AND node_id = ?3",
+        params![legacy_parent.node_id, &plan.plan_id, &node.node_id],
+    )?;
 
     let error = runtime
         .ensure_node_id(EnsureNodeIdRequest {
             plan_id: plan.plan_id,
-            relative_path: "docs/plan.md".to_owned(),
-            parent_relative_path: Some("other".to_owned()),
+            relative_path: "docs/spec.md".to_owned(),
+            parent_relative_path: Some("docs/docs.md".to_owned()),
         })
         .expect_err("conflicting parent linkage should be rejected");
     let error_text = format!("{error:#}");
     assert!(
-        error_text.contains("parent_relative_path"),
-        "unexpected conflicting parent error: {error_text}"
+        error_text.contains(&node.node_id),
+        "error should include existing node id: {error_text}"
     );
+    assert!(
+        error_text.contains("docs/docs.md") && error_text.contains("docs/legacy/legacy.md"),
+        "error should include both parent paths: {error_text}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn inspect_node_reports_runtime_metadata_and_direct_children() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "inspect-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    let nested_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/cli/cli.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let inspected = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id.clone(),
+        node_id: None,
+        relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    assert_eq!(inspected.node_id, parent.node_id);
+    assert_eq!(inspected.relative_path, "docs/docs.md");
+    assert_eq!(inspected.node_kind, NodeKind::Parent);
+    assert_eq!(inspected.parent_relative_path, None);
+    assert_eq!(inspected.children.len(), 2);
+    assert_eq!(inspected.children[0].node_id, nested_parent.node_id);
+    assert_eq!(inspected.children[0].node_kind, NodeKind::Parent);
+    assert_eq!(inspected.children[1].node_id, leaf.node_id);
+    assert_eq!(inspected.children[1].node_kind, NodeKind::Leaf);
+
+    let by_id = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(leaf.node_id.clone()),
+        relative_path: None,
+    })?;
+    assert_eq!(by_id.node_id, leaf.node_id);
+    assert_eq!(by_id.relative_path, "docs/spec.md");
+    assert_eq!(by_id.node_kind, NodeKind::Leaf);
+    assert_eq!(by_id.parent_node_id, Some(parent.node_id));
+
+    Ok(())
+}
+
+#[test]
+fn list_children_can_lookup_by_parent_id_and_path() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "children-plan".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/cli/cli.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let by_path = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: None,
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    assert_eq!(by_path.parent_node_id, parent.node_id);
+    assert_eq!(by_path.parent_relative_path, "docs/docs.md");
+    assert_eq!(by_path.children.len(), 2);
+    assert_eq!(by_path.children[0].relative_path, "docs/cli/cli.md");
+    assert_eq!(by_path.children[1].relative_path, "docs/spec.md");
+
+    let by_id = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id,
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(by_id.children.len(), 2);
 
     Ok(())
 }

@@ -247,6 +247,8 @@ helper_pattern = (
     r'|'
     r'"[^"\n]*/loopy-gen-plan"'
     r'|'
+    r"'[^'\n]*/loopy-gen-plan'"
+    r'|'
     r"[^'\"\s\n]*/loopy-gen-plan"
     r')'
 )
@@ -499,7 +501,12 @@ Use the \`loopy:gen-plan\` skill.
 - If installed \`ensure-plan\`, \`open-plan\`, or \`ensure-node-id\` fails because of request construction or missing prerequisite runtime state, use the returned runtime error plus the current plan tree/runtime state to repair the runtime call sequence.
 - During runtime-call recovery for \`ensure-plan\`, \`open-plan\`, or \`ensure-node-id\`, do not change plan content.
 - Do not blindly guess parameters or keep replaying the same class of runtime error without new runtime evidence or relevant state changes.
+- Treat markdown targets as the only canonical node identities for installed \`ensure-node-id\`.
+- Canonical node path shapes are: root leaf \`leaf.md\`, root child parent \`scope/scope.md\`, nested leaf \`parent/leaf.md\`, nested parent \`parent/child/child.md\`.
+- Never register a directory path as a node target, and never register a node path without \`.md\`.
 - When registering child node ids with \`ensure-node-id\`, always pass \`--parent-relative-path\` pointing at the parent node's self-description markdown path.
+- Register parent nodes first; do not rely on installed \`ensure-node-id\` to invent missing parent runtime state.
+- Treat child registration as direct-child registration under the tracked parent markdown target rather than a recursive descendant shortcut.
 - Do not omit \`--parent-relative-path\` for child nodes.
 - Do not run leaf review on non-leaf parent nodes.
 - Use frontier review for parent nodes that already have child nodes.
