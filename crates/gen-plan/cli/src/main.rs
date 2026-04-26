@@ -3,6 +3,9 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use loopy_gen_plan::refine::{
+    RefineStaleGateClassification, RefineStaleResultHandoff, StaleGateTargetKind,
+};
 use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest, NodeKind,
     OpenPlanRequest, PlannerMode, ReconcileParentChildLinksRequest, RunFrontierReviewGateRequest,
@@ -252,6 +255,18 @@ fn refine_invalidatable_leaf_node_ids_for_cli(
 
     let mut node_ids = Vec::new();
     collect_descendant_leaf_node_ids(runtime, plan_id, parent_node_id, &mut node_ids)?;
+    let parent = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan_id.to_owned(),
+        node_id: Some(parent_node_id.to_owned()),
+        relative_path: None,
+    })?;
+    if let Some(context) = refine_revalidation_context.as_deref() {
+        for node_id in
+            stale_leaf_node_ids_from_refine_context(context, parent_node_id, &parent.relative_path)?
+        {
+            push_unique(&mut node_ids, node_id);
+        }
+    }
     for node_id in explicit_node_ids {
         push_unique(&mut node_ids, node_id);
     }
@@ -278,6 +293,39 @@ fn collect_descendant_leaf_node_ids(
         }
     }
     Ok(())
+}
+
+fn stale_leaf_node_ids_from_refine_context(
+    refine_context: &str,
+    parent_node_id: &str,
+    parent_relative_path: &str,
+) -> Result<Vec<String>> {
+    let Some(json) = json_section(refine_context, "Stale Handoff") else {
+        return Ok(Vec::new());
+    };
+    let handoffs: Vec<RefineStaleResultHandoff> = serde_json::from_str(json)
+        .context("failed to parse Stale Handoff refine context section")?;
+    Ok(handoffs
+        .into_iter()
+        .filter(|handoff| {
+            handoff.target_kind == StaleGateTargetKind::Leaf
+                && handoff.classification == RefineStaleGateClassification::Stale
+                && !handoff.invalidation_reason.trim().is_empty()
+                && (handoff.parent_node_id.as_deref() == Some(parent_node_id)
+                    || handoff.parent_relative_path.as_deref() == Some(parent_relative_path))
+        })
+        .filter_map(|handoff| handoff.node_id)
+        .collect())
+}
+
+fn json_section<'a>(refine_context: &'a str, title: &str) -> Option<&'a str> {
+    let marker = format!("## {title}");
+    let section = refine_context.split_once(&marker)?.1;
+    let json_start = section.find("```json")?;
+    let json = &section[json_start + "```json".len()..];
+    let json = json.strip_prefix('\n').unwrap_or(json);
+    let json_end = json.find("```")?;
+    Some(json[..json_end].trim())
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {

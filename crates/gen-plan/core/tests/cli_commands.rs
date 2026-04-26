@@ -870,6 +870,146 @@ fn frontier_gate_command_refine_context_preserves_frontier_invalidation_scope() 
 }
 
 #[test]
+fn frontier_gate_command_refine_context_preserves_detached_stale_invalidations() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    write_dev_registry(
+        workspace.path(),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../skills/gen-plan")
+            .canonicalize()
+            .context("checked-in skills/gen-plan root should resolve")?,
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-frontier-gate-detached-scope".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/cli-frontier-gate-detached-scope");
+    fs::create_dir_all(plan_root.join("backend"))?;
+    fs::write(
+        plan_root.join("backend/backend.md"),
+        "# Backend\n\n## Child Nodes\n\n",
+    )?;
+    fs::write(plan_root.join("backend/old.md"), "# Old\n")?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/backend.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let old_leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/old.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+    let connection = rusqlite::Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "UPDATE GEN_PLAN__nodes
+         SET parent_node_id = NULL
+         WHERE plan_id = ?1 AND node_id = ?2",
+        rusqlite::params![plan.plan_id, old_leaf.node_id],
+    )?;
+
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    let old_leaf_node_id = old_leaf.node_id.clone();
+    let frontier_output = serde_json::json!({
+        "verdict": "revise_frontier",
+        "summary": "Detached old leaf approval is stale.",
+        "issues": [{
+            "issue_kind": "detached_stale_leaf",
+            "target_node_id": old_leaf_node_id,
+            "target_parent_node_id": parent.node_id,
+            "target_node_ids": null,
+            "summary": "Invalidates the detached old leaf.",
+            "rationale": "The old leaf was removed from this frontier by refine.",
+            "expected_revision": "Regenerate or retire the stale old leaf approval.",
+            "question_for_user": null,
+            "decision_impact": null
+        }],
+        "invalidated_leaf_node_ids": [old_leaf_node_id]
+    })
+    .to_string();
+    write_fake_codex_expecting_prompt(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        "Gate: frontier_review",
+        Some("backend/old.md"),
+        &frontier_output,
+    )?;
+    let context_file = workspace.path().join("frontier-refine-context.md");
+    fs::write(
+        &context_file,
+        format!(
+            "## Stale Handoff\n```json\n{}\n```\n",
+            serde_json::to_string_pretty(&serde_json::json!([{
+                "target_kind": "Leaf",
+                "node_id": old_leaf.node_id,
+                "relative_path": "backend/old.md",
+                "parent_node_id": parent.node_id,
+                "parent_relative_path": "backend/backend.md",
+                "regenerated_child_relative_path": null,
+                "classification": "Stale",
+                "invalidation_reason": "removed from backend frontier"
+            }]))?
+        ),
+    )?;
+
+    let output = run_cli_with_env(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "run-frontier-review-gate",
+            "--plan-id",
+            &plan.plan_id,
+            "--parent-node-id",
+            &parent.node_id,
+            "--planner-mode",
+            "auto",
+            "--refine-revalidation-context-file",
+            context_file
+                .to_str()
+                .context("context path must be utf-8")?,
+        ],
+        &[(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(fake_bin_dir.clone()).chain(
+                    std::env::var_os("PATH")
+                        .iter()
+                        .flat_map(std::env::split_paths),
+                ),
+            )
+            .expect("PATH should remain joinable"),
+        )],
+        Some("failed to run loopy-gen-plan run-frontier-review-gate"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected detached stale invalidation to be accepted, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value["invalidated_leaf_node_ids"][0],
+        Value::String(old_leaf.node_id)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn invalid_planner_mode_is_rejected_for_gate_command() -> Result<()> {
     let output = run_cli(
         &[

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest, NodeKind,
-    OpenPlanRequest, Runtime,
+    OpenPlanRequest, ReconcileParentChildLinksRequest, Runtime,
 };
 use rusqlite::{Connection, params};
 
@@ -1143,6 +1143,69 @@ fn refine_reuses_tracked_node_identity() -> Result<()> {
             .iter()
             .any(|child| child.node_id == unregistered.node_id)
     );
+
+    Ok(())
+}
+
+#[test]
+fn reconcile_allows_reparent_when_existing_parent_markdown_was_deleted() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "deleted-source-reparent".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/deleted-source-reparent");
+    fs::create_dir_all(plan_root.join("deleted-source-reparent"))?;
+    fs::write(
+        plan_root.join("deleted-source-reparent.md"),
+        "# Root\n\n## Child Nodes\n\n- [Leaf](./deleted-source-reparent/leaf.md)\n",
+    )?;
+    fs::write(
+        plan_root.join("deleted-source-reparent/leaf.md"),
+        "# Leaf\n",
+    )?;
+
+    let root_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "deleted-source-reparent.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let old_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "deleted-source-reparent/deleted-source-reparent.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "deleted-source-reparent/leaf.md".to_owned(),
+        parent_relative_path: Some("deleted-source-reparent/deleted-source-reparent.md".to_owned()),
+    })?;
+
+    let result = runtime.reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_relative_path: "deleted-source-reparent.md".to_owned(),
+    })?;
+    assert_eq!(result.parent_node_id, root_parent.node_id);
+    assert_eq!(
+        result.attached_child_relative_paths,
+        vec!["deleted-source-reparent/leaf.md".to_owned()]
+    );
+
+    let inspected = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(child.node_id),
+        relative_path: None,
+    })?;
+    assert_eq!(inspected.parent_node_id, Some(root_parent.node_id));
+    assert_eq!(
+        inspected.parent_relative_path.as_deref(),
+        Some("deleted-source-reparent.md")
+    );
+    assert_ne!(inspected.parent_node_id, Some(old_parent.node_id));
 
     Ok(())
 }

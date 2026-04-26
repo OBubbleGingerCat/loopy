@@ -16,7 +16,9 @@ use super::gate_registration::{
     RegisteredRefineFrontierTarget, RegisteredRefineGateTargets, RegisteredRefineLeafTarget,
 };
 use super::rewrite::RefineRewriteResult;
-use super::runtime_state::RefineStaleResultHandoff;
+use super::runtime_state::{
+    RefineStaleGateClassification, RefineStaleResultHandoff, StaleGateTargetKind,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRefineGateRevalidationRequest {
@@ -480,7 +482,26 @@ fn invalidatable_leaf_node_ids_for_frontier(
             )?,
         }
     }
+    for handoff in &request.refine_context.stale_result_handoff {
+        if stale_leaf_handoff_matches_frontier(handoff, target) {
+            if let Some(node_id) = &handoff.node_id {
+                push_unique(&mut leaf_node_ids, node_id.clone());
+            }
+        }
+    }
     Ok(leaf_node_ids)
+}
+
+fn stale_leaf_handoff_matches_frontier(
+    handoff: &RefineStaleResultHandoff,
+    target: &RegisteredRefineFrontierTarget,
+) -> bool {
+    handoff.target_kind == StaleGateTargetKind::Leaf
+        && handoff.classification == RefineStaleGateClassification::Stale
+        && !handoff.invalidation_reason.trim().is_empty()
+        && (handoff.parent_node_id.as_deref() == Some(target.parent_node_id.as_str())
+            || handoff.parent_relative_path.as_deref()
+                == Some(target.parent_relative_path.as_str()))
 }
 
 fn collect_descendant_leaf_node_ids(
@@ -910,7 +931,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::refine::{RefineGateTargetReason, RegisteredRefineGateTargets};
+    use crate::refine::{
+        RefineGateTargetReason, RefineStaleGateClassification, RefineStaleResultHandoff,
+        RegisteredRefineGateTargets, StaleGateTargetKind,
+    };
     use crate::{EnsureNodeIdRequest, EnsurePlanRequest};
     use rusqlite::{Connection, params};
 
@@ -1024,6 +1048,76 @@ mod tests {
             },
         )
         .expect("removed child paths should not have to remain runtime-visible");
+    }
+
+    #[test]
+    fn frontier_invalidatable_scope_includes_detached_stale_leaf_handoff() {
+        let workspace = temp_workspace();
+        let runtime = Runtime::new(&workspace).expect("runtime should initialize");
+        let plan = runtime
+            .ensure_plan(EnsurePlanRequest {
+                plan_name: "detached-stale-invalidations".to_owned(),
+                task_type: "coding-task".to_owned(),
+                project_directory: workspace.clone(),
+            })
+            .expect("plan should be created");
+        let plan_root = PathBuf::from(&plan.plan_root);
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n").unwrap();
+        fs::write(plan_root.join("api/old.md"), "# Old\n").unwrap();
+
+        let parent = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/api.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("parent should be tracked");
+        let old_leaf = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/old.md".to_owned(),
+                parent_relative_path: Some("api/api.md".to_owned()),
+            })
+            .expect("old leaf should be tracked");
+        let connection = Connection::open(workspace.join(".loopy/loopy.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE GEN_PLAN__nodes SET parent_node_id = NULL WHERE plan_id = ?1 AND node_id = ?2",
+                params![plan.plan_id, old_leaf.node_id],
+            )
+            .unwrap();
+
+        let request = RunRefineGateRevalidationRequest {
+            plan_id: plan.plan_id,
+            plan_root,
+            planner_mode: PlannerMode::Manual,
+            registered_targets: RegisteredRefineGateTargets::default(),
+            retry_policy: RefineGateRetryPolicy::default(),
+            refine_context: RefineGateRevalidationContext {
+                stale_result_handoff: vec![RefineStaleResultHandoff {
+                    target_kind: StaleGateTargetKind::Leaf,
+                    node_id: Some(old_leaf.node_id.clone()),
+                    relative_path: "api/old.md".to_owned(),
+                    parent_node_id: Some(parent.node_id.clone()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    regenerated_child_relative_path: None,
+                    classification: RefineStaleGateClassification::Stale,
+                    invalidation_reason: "removed from api frontier".to_owned(),
+                }],
+                ..Default::default()
+            },
+        };
+        let target = RegisteredRefineFrontierTarget {
+            parent_node_id: parent.node_id,
+            parent_relative_path: "api/api.md".to_owned(),
+            changed_child_relative_paths: Vec::new(),
+            reasons: vec![RefineGateTargetReason::ChangedChildSet],
+        };
+
+        let invalidatable = invalidatable_leaf_node_ids_for_frontier(&runtime, &request, &target)
+            .expect("detached stale handoff should be inspectable");
+        assert_eq!(invalidatable, vec![old_leaf.node_id]);
     }
 
     #[test]

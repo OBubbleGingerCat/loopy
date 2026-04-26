@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -404,17 +405,21 @@ fn reject_still_linked_reparent_conflicts(
                     "failed to inspect existing parent `{existing_parent_node_id}` for linked child `{}`",
                     child.relative_path
                 )
-            })?;
+        })?;
         require_parent_node_record(&existing_parent)?;
-        ensure_plan_markdown_file_exists(&plan.plan_root, &existing_parent.relative_path)?;
         let existing_parent_path = plan.plan_root.join(&existing_parent.relative_path);
-        let existing_parent_markdown = std::fs::read_to_string(&existing_parent_path)
-            .with_context(|| {
-                format!(
-                    "failed to read plan markdown {}",
-                    existing_parent_path.display()
-                )
-            })?;
+        let existing_parent_markdown = match std::fs::read_to_string(&existing_parent_path) {
+            Ok(markdown) => markdown,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to read plan markdown {}",
+                        existing_parent_path.display()
+                    )
+                });
+            }
+        };
         let existing_parent_links =
             parse_child_node_link_paths(&existing_parent.relative_path, &existing_parent_markdown)?;
         if existing_parent_links
