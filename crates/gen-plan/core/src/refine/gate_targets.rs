@@ -126,6 +126,13 @@ pub fn select_refine_gate_targets(
     // does not define or build those shared input types itself.
     // It returns expected targets only, never actual runtime gate pass/fail results.
     let mut selection = RefineGateTargetSelection::default();
+    let explicitly_removed_paths = request
+        .rewrite_result
+        .changed_files
+        .iter()
+        .filter(|file| file.change_kind == RefineChangedFileKind::ExplicitlyRemoved)
+        .map(|file| file.relative_path.as_str())
+        .collect::<Vec<_>>();
 
     for file in &request.rewrite_result.changed_files {
         match file.change_kind {
@@ -136,6 +143,13 @@ pub fn select_refine_gate_targets(
                         &request.runtime_snapshot,
                         &file.relative_path,
                         Vec::new(),
+                        RefineGateTargetReason::ParentContractChanged,
+                    );
+                    upsert_descendant_leaf_targets(
+                        &mut selection.leaf_targets,
+                        &request.runtime_snapshot,
+                        &file.relative_path,
+                        &explicitly_removed_paths,
                         RefineGateTargetReason::ParentContractChanged,
                     );
                 } else {
@@ -312,6 +326,65 @@ fn apply_stale_handoff(
                         stale_reasons,
                     });
                 }
+            }
+        }
+    }
+}
+
+fn upsert_descendant_leaf_targets(
+    targets: &mut Vec<RefineLeafGateTarget>,
+    snapshot: &RefineRuntimeNodeSnapshot,
+    parent_relative_path: &str,
+    explicitly_removed_paths: &[&str],
+    reason: RefineGateTargetReason,
+) {
+    let Some(parent_node) = find_node(snapshot, parent_relative_path) else {
+        return;
+    };
+    for child_relative_path in &parent_node.child_relative_paths {
+        upsert_descendant_leaf_target(
+            targets,
+            snapshot,
+            child_relative_path,
+            explicitly_removed_paths,
+            reason.clone(),
+        );
+    }
+}
+
+fn upsert_descendant_leaf_target(
+    targets: &mut Vec<RefineLeafGateTarget>,
+    snapshot: &RefineRuntimeNodeSnapshot,
+    relative_path: &str,
+    explicitly_removed_paths: &[&str],
+    reason: RefineGateTargetReason,
+) {
+    if explicitly_removed_paths
+        .iter()
+        .any(|removed| *removed == relative_path)
+    {
+        return;
+    }
+    let Some(node) = find_node(snapshot, relative_path) else {
+        return;
+    };
+    match node.node_kind {
+        NodeKind::Leaf => upsert_leaf(
+            targets,
+            snapshot,
+            &node.relative_path,
+            Some(node.node_id.clone()),
+            reason,
+        ),
+        NodeKind::Parent => {
+            for child_relative_path in &node.child_relative_paths {
+                upsert_descendant_leaf_target(
+                    targets,
+                    snapshot,
+                    child_relative_path,
+                    explicitly_removed_paths,
+                    reason.clone(),
+                );
             }
         }
     }

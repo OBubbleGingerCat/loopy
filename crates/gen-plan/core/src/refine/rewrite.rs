@@ -150,10 +150,10 @@ pub fn apply_refine_rewrite(
     apply_in_place_node_rewrites(&request, &sanitized_payloads, &mut reports)?;
     create_new_node_files(&request, &sanitized_payloads, &mut reports)?;
     apply_explicit_removals(&request, &mut reports)?;
-    let stale_report = mark_stale_nodes(&request)?;
+    let stale_report = mark_stale_nodes(&request, &sanitized_payloads)?;
     reports.changed_files.extend(stale_report.changed_files);
     reports.stale_nodes.extend(stale_report.stale_nodes);
-    let link_report = apply_rewrite_link_updates(&request)?;
+    let link_report = apply_rewrite_link_updates(&request, &sanitized_payloads)?;
     reports
         .changed_files
         .extend(link_report.changed_parent_files);
@@ -222,8 +222,8 @@ fn cleanup_processed_comment_blocks(
 ) -> Result<Vec<(String, String)>, RefineRewriteError> {
     // processed comment block cleanup
     let mut sanitized_payloads = Vec::new();
-    for target in &request.rewrite_scope.rewrite_targets {
-        let path = request.plan_root.join(&target.relative_path);
+    for relative_path in comment_cleanup_paths(&request.rewrite_scope) {
+        let path = request.plan_root.join(&relative_path);
         if !path.is_file() {
             continue;
         }
@@ -231,11 +231,31 @@ fn cleanup_processed_comment_blocks(
             path: path.display().to_string(),
             source: source.to_string(),
         })?;
-        let preserved_blocks = preserved_comment_blocks_for_path(request, &target.relative_path);
-        let sanitized = remove_comment_blocks(&target.relative_path, &markdown, &preserved_blocks)?;
-        sanitized_payloads.push((target.relative_path.clone(), sanitized));
+        let preserved_blocks = preserved_comment_blocks_for_path(request, &relative_path);
+        let sanitized = remove_comment_blocks(&relative_path, &markdown, &preserved_blocks)?;
+        sanitized_payloads.push((relative_path, sanitized));
     }
     Ok(sanitized_payloads)
+}
+
+fn comment_cleanup_paths(scope: &RefineRewriteScope) -> Vec<String> {
+    let mut paths = Vec::new();
+    for target in &scope.rewrite_targets {
+        push_unique_path(&mut paths, &target.relative_path);
+    }
+    for stale in &scope.stale_descendants {
+        push_unique_path(&mut paths, &stale.relative_path);
+    }
+    for change in &scope.link_changes {
+        push_unique_path(&mut paths, &change.parent_relative_path);
+    }
+    paths
+}
+
+fn push_unique_path(paths: &mut Vec<String>, relative_path: &str) {
+    if !paths.iter().any(|path| path == relative_path) {
+        paths.push(relative_path.to_owned());
+    }
 }
 
 fn apply_in_place_node_rewrites(
@@ -314,6 +334,7 @@ fn apply_explicit_removals(
 
 fn mark_stale_nodes(
     request: &RefineRewriteRequest,
+    sanitized_payloads: &[(String, String)],
 ) -> Result<RefineStaleMarkReport, RefineRewriteError> {
     // stale node handling rules: request.rewrite_scope.stale_descendants use the selected stale-descendant policy.
     // mark stale node content non-destructively; stale markdown files remain on disk, and physical file removal
@@ -327,10 +348,8 @@ fn mark_stale_nodes(
         if !path.is_file() {
             return Err(RefineRewriteError::InvalidRewriteScope);
         }
-        let markdown = fs::read_to_string(&path).map_err(|source| RefineRewriteError::Io {
-            path: path.display().to_string(),
-            source: source.to_string(),
-        })?;
+        let markdown =
+            markdown_from_sanitized_or_disk(request, sanitized_payloads, &stale.relative_path)?;
         let marked = apply_stale_marker(&markdown, &stale.reason);
         write_plan_file(&request.plan_root, &stale.relative_path, &marked)?;
         report.changed_files.push(RefineChangedFile {
@@ -349,6 +368,7 @@ fn mark_stale_nodes(
 
 fn apply_rewrite_link_updates(
     request: &RefineRewriteRequest,
+    sanitized_payloads: &[(String, String)],
 ) -> Result<RefineLinkUpdateReport, RefineRewriteError> {
     // rewrite link update rules: request.rewrite_scope.link_changes are merged in stable first-seen parent order.
     // This helper owns all parent Child Nodes section mutations. Add-link targets must exist as canonical markdown files,
@@ -366,7 +386,8 @@ fn apply_rewrite_link_updates(
         .collect::<HashSet<_>>();
 
     for change in merged_changes {
-        let Some(mutation) = apply_single_link_update(request, &change, &created_parent_paths)?
+        let Some(mutation) =
+            apply_single_link_update(request, &change, &created_parent_paths, sanitized_payloads)?
         else {
             continue;
         };
@@ -586,6 +607,7 @@ fn apply_single_link_update(
     request: &RefineRewriteRequest,
     change: &MergedLinkChange,
     created_parent_paths: &HashSet<&str>,
+    sanitized_payloads: &[(String, String)],
 ) -> Result<Option<ParentLinkMutation>, RefineRewriteError> {
     let parent_path = request.plan_root.join(&change.parent_relative_path);
     if !parent_path.is_file() {
@@ -598,10 +620,11 @@ fn apply_single_link_update(
         }
     }
 
-    let markdown = fs::read_to_string(&parent_path).map_err(|source| RefineRewriteError::Io {
-        path: parent_path.display().to_string(),
-        source: source.to_string(),
-    })?;
+    let markdown = if path_mutated_before_link_updates(request, &change.parent_relative_path) {
+        read_plan_markdown(request, &change.parent_relative_path)?
+    } else {
+        markdown_from_sanitized_or_disk(request, sanitized_payloads, &change.parent_relative_path)?
+    };
     let existing_rows = parse_existing_child_links(&change.parent_relative_path, &markdown)?;
     let existing_paths = existing_rows
         .iter()
@@ -968,6 +991,49 @@ fn replacement_for_path(request: &RefineRewriteRequest, relative_path: &str) -> 
         .and_then(|action| action.replacement_markdown.clone())
 }
 
+fn markdown_from_sanitized_or_disk(
+    request: &RefineRewriteRequest,
+    sanitized_payloads: &[(String, String)],
+    relative_path: &str,
+) -> Result<String, RefineRewriteError> {
+    if let Some((_, markdown)) = sanitized_payloads
+        .iter()
+        .find(|(path, _)| path == relative_path)
+    {
+        return Ok(markdown.clone());
+    }
+    read_plan_markdown(request, relative_path)
+}
+
+fn read_plan_markdown(
+    request: &RefineRewriteRequest,
+    relative_path: &str,
+) -> Result<String, RefineRewriteError> {
+    let path = request.plan_root.join(relative_path);
+    fs::read_to_string(&path).map_err(|source| RefineRewriteError::Io {
+        path: path.display().to_string(),
+        source: source.to_string(),
+    })
+}
+
+fn path_mutated_before_link_updates(request: &RefineRewriteRequest, relative_path: &str) -> bool {
+    request
+        .rewrite_scope
+        .rewrite_targets
+        .iter()
+        .any(|target| target.relative_path == relative_path)
+        || request
+            .rewrite_scope
+            .node_creations
+            .iter()
+            .any(|creation| creation.relative_path == relative_path)
+        || request
+            .rewrite_scope
+            .stale_descendants
+            .iter()
+            .any(|stale| stale.relative_path == relative_path)
+}
+
 fn remove_comment_blocks(
     relative_path: &str,
     markdown: &str,
@@ -975,9 +1041,9 @@ fn remove_comment_blocks(
 ) -> Result<String, RefineRewriteError> {
     let parsed_blocks =
         parse_comment_blocks_for_file(relative_path, markdown).map_err(map_comment_error)?;
-    let mut output = Vec::new();
+    let mut output = String::new();
     let mut preserve_current_block = None::<bool>;
-    for (index, line) in markdown.lines().enumerate() {
+    for (index, line) in markdown.split_inclusive('\n').enumerate() {
         let line_number = index + 1;
         match line.trim() {
             "BEGIN_COMMENT" => {
@@ -987,20 +1053,20 @@ fn remove_comment_blocks(
                     .is_some_and(|block| should_preserve_comment_block(block, preserved_blocks));
                 preserve_current_block = Some(preserve);
                 if preserve {
-                    output.push(line);
+                    output.push_str(line);
                 }
             }
             "END_COMMENT" => {
                 if preserve_current_block.unwrap_or(false) {
-                    output.push(line);
+                    output.push_str(line);
                 }
                 preserve_current_block = None;
             }
-            _ if preserve_current_block.unwrap_or(true) => output.push(line),
+            _ if preserve_current_block.unwrap_or(true) => output.push_str(line),
             _ => {}
         }
     }
-    Ok(output.join("\n"))
+    Ok(output)
 }
 
 fn preserved_comment_blocks_for_path(
@@ -1238,6 +1304,54 @@ mod tests {
         assert!(updated.contains("BEGIN_COMMENT\nlater\nEND_COMMENT"));
         assert_eq!(updated.matches("BEGIN_COMMENT").count(), 1);
         assert_eq!(result.unresolved_follow_ups.len(), 1);
+    }
+
+    #[test]
+    fn refine_non_text_rewrites_remove_processed_comment_blocks() {
+        let plan_root = temp_plan_root();
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(
+            plan_root.join("api/api.md"),
+            "# API\n\nBEGIN_COMMENT\nremove old child\nEND_COMMENT\n\n## Child Nodes\n\n- [Remove](./remove.md)\n",
+        )
+        .unwrap();
+        fs::write(plan_root.join("api/remove.md"), "# Remove\n").unwrap();
+        fs::write(
+            plan_root.join("api/stale.md"),
+            "# Stale\n\nBEGIN_COMMENT\nstale this node\nEND_COMMENT\n",
+        )
+        .unwrap();
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![confirmed_decision(Vec::new(), Vec::new())],
+            rewrite_scope: RefineRewriteScope {
+                stale_descendants: vec![RefineStaleDescendant {
+                    relative_path: "api/stale.md".to_owned(),
+                    node_id: Some("stale-1".to_owned()),
+                    reason: "parent changed".to_owned(),
+                }],
+                link_changes: vec![RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: Vec::new(),
+                    remove_child_relative_paths: vec!["api/remove.md".to_owned()],
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect("link-only and stale-only rewrite should pass");
+
+        let parent_markdown = fs::read_to_string(plan_root.join("api/api.md")).unwrap();
+        assert!(!parent_markdown.contains("BEGIN_COMMENT"));
+        assert!(!parent_markdown.contains("remove old child"));
+        assert!(!parent_markdown.contains("remove.md"));
+
+        let stale_markdown = fs::read_to_string(plan_root.join("api/stale.md")).unwrap();
+        assert!(stale_markdown.starts_with("<!-- loopy-refine-status: stale -->"));
+        assert!(!stale_markdown.contains("BEGIN_COMMENT"));
+        assert!(!stale_markdown.contains("stale this node"));
     }
 
     #[test]

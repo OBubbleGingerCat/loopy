@@ -168,6 +168,86 @@ fn refine_gate_targets_select_expected_targets_without_running_gates() {
 }
 
 #[test]
+fn parent_contract_changes_select_descendant_leaf_revalidation_targets() {
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![RefineChangedFile {
+            relative_path: "api/api.md".to_owned(),
+            node_id: Some("parent-1".to_owned()),
+            change_kind: RefineChangedFileKind::TextUpdated,
+        }],
+        structural_changes: vec![],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result,
+        runtime_snapshot: RefineRuntimeNodeSnapshot {
+            nodes: vec![
+                RefineRuntimeNodeSummary {
+                    node_id: "parent-1".to_owned(),
+                    relative_path: "api/api.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: None,
+                    parent_relative_path: None,
+                    child_relative_paths: vec![
+                        "api/add-auth-tests.md".to_owned(),
+                        "api/auth/auth.md".to_owned(),
+                    ],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "leaf-1".to_owned(),
+                    relative_path: "api/add-auth-tests.md".to_owned(),
+                    node_kind: NodeKind::Leaf,
+                    parent_node_id: Some("parent-1".to_owned()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    child_relative_paths: vec![],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "nested-parent-1".to_owned(),
+                    relative_path: "api/auth/auth.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: Some("parent-1".to_owned()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    child_relative_paths: vec!["api/auth/check.md".to_owned()],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "nested-leaf-1".to_owned(),
+                    relative_path: "api/auth/check.md".to_owned(),
+                    node_kind: NodeKind::Leaf,
+                    parent_node_id: Some("nested-parent-1".to_owned()),
+                    parent_relative_path: Some("api/auth/auth.md".to_owned()),
+                    child_relative_paths: vec![],
+                },
+            ],
+        },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+
+    assert_eq!(selection.frontier_targets.len(), 1);
+    assert_eq!(selection.leaf_targets.len(), 2);
+    for relative_path in ["api/add-auth-tests.md", "api/auth/check.md"] {
+        let target = selection
+            .leaf_targets
+            .iter()
+            .find(|target| target.relative_path == relative_path)
+            .expect("descendant leaf should be selected");
+        assert!(
+            target
+                .reasons
+                .contains(&RefineGateTargetReason::ParentContractChanged),
+            "missing parent-contract reason for {relative_path}"
+        );
+    }
+}
+
+#[test]
 fn refine_gate_registration_prepares_targets_fail_closed() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
