@@ -325,7 +325,7 @@ pub(crate) fn reconcile_parent_child_links(
                     "linked child_relative_path `{child_relative_path}` must be tracked before reconciling parent `{}`",
                     parent.relative_path
                 )
-            })?;
+        })?;
         validate_direct_child_relationship(
             &child.relative_path,
             Some(&parent.relative_path),
@@ -333,6 +333,13 @@ pub(crate) fn reconcile_parent_child_links(
         )?;
         validated_linked_children.push(child);
     }
+    reject_still_linked_reparent_conflicts(
+        connection,
+        &plan,
+        &plan_id,
+        &parent,
+        &validated_linked_children,
+    )?;
 
     let timestamp = current_timestamp()?;
 
@@ -374,6 +381,54 @@ pub(crate) fn reconcile_parent_child_links(
         attached_child_relative_paths,
         detached_child_relative_paths,
     })
+}
+
+fn reject_still_linked_reparent_conflicts(
+    connection: &Connection,
+    plan: &GatePlanContext,
+    plan_id: &str,
+    parent: &NodeRecord,
+    linked_children: &[NodeRecord],
+) -> Result<()> {
+    for child in linked_children {
+        let Some(existing_parent_node_id) = child.parent_node_id.as_deref() else {
+            continue;
+        };
+        if existing_parent_node_id == parent.node_id {
+            continue;
+        }
+        let existing_parent = load_node_record(connection, plan_id, existing_parent_node_id)
+            .with_context(|| {
+                format!(
+                    "failed to inspect existing parent `{existing_parent_node_id}` for linked child `{}`",
+                    child.relative_path
+                )
+            })?;
+        require_parent_node_record(&existing_parent)?;
+        ensure_plan_markdown_file_exists(&plan.plan_root, &existing_parent.relative_path)?;
+        let existing_parent_path = plan.plan_root.join(&existing_parent.relative_path);
+        let existing_parent_markdown = std::fs::read_to_string(&existing_parent_path)
+            .with_context(|| {
+                format!(
+                    "failed to read plan markdown {}",
+                    existing_parent_path.display()
+                )
+            })?;
+        let existing_parent_links =
+            parse_child_node_link_paths(&existing_parent.relative_path, &existing_parent_markdown)?;
+        if existing_parent_links
+            .iter()
+            .any(|relative_path| relative_path == &child.relative_path)
+        {
+            return Err(anyhow!(
+                "linked child_relative_path `{}` is still linked from existing parent `{}`; reconcile that parent before attaching it to `{}`",
+                child.relative_path,
+                existing_parent.relative_path,
+                parent.relative_path
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn load_gate_plan_context(

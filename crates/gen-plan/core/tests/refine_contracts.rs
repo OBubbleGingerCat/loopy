@@ -172,6 +172,82 @@ fn refine_gate_targets_select_expected_targets_without_running_gates() {
 }
 
 #[test]
+fn refine_gate_registration_preserves_new_nested_parent_ancestor_link() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api/auth"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Auth](./auth/auth.md)\n",
+    )?;
+    fs::write(plan_root.join("api/auth/auth.md"), "# Auth\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: plan.plan_id.clone(),
+        rewrite_result: RefineRewriteResult {
+            changed_files: vec![RefineChangedFile {
+                relative_path: "api/auth/auth.md".to_owned(),
+                node_id: None,
+                change_kind: RefineChangedFileKind::Created,
+            }],
+            structural_changes: vec![],
+            stale_nodes: vec![],
+            context_invalidations: vec![],
+            unchanged_nodes: vec![],
+            expected_gate_targets: vec![],
+            unresolved_follow_ups: vec![],
+            summary: Default::default(),
+        },
+        runtime_snapshot: RefineRuntimeNodeSnapshot {
+            nodes: vec![RefineRuntimeNodeSummary {
+                node_id: "api-parent".to_owned(),
+                relative_path: "api/api.md".to_owned(),
+                node_kind: NodeKind::Parent,
+                parent_node_id: None,
+                parent_relative_path: None,
+                child_relative_paths: vec![],
+            }],
+        },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+    let registration_request = selection.to_registration_request(plan.plan_id.clone());
+    assert_eq!(registration_request.parent_candidates.len(), 1);
+    assert_eq!(
+        registration_request.parent_candidates[0]
+            .parent_relative_path
+            .as_deref(),
+        Some("api/api.md")
+    );
+
+    let registered = register_refine_gate_targets(&runtime, registration_request)
+        .expect("new nested parent should register under its tracked ancestor");
+    assert_eq!(registered.parent_targets.len(), 1);
+    assert_eq!(
+        registered.parent_targets[0].parent_relative_path.as_deref(),
+        Some("api/api.md")
+    );
+    let nested = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: None,
+        relative_path: Some("api/auth/auth.md".to_owned()),
+    })?;
+    assert_eq!(nested.parent_relative_path.as_deref(), Some("api/api.md"));
+    Ok(())
+}
+
+#[test]
 fn parent_contract_changes_select_descendant_leaf_revalidation_targets() {
     let rewrite_result = RefineRewriteResult {
         changed_files: vec![RefineChangedFile {
@@ -1055,6 +1131,76 @@ fn reconcile_parent_child_links_rejects_untracked_linked_children_before_detachi
     })?;
     assert_eq!(children.children.len(), 1);
     assert_eq!(children.children[0].node_id, old_child.node_id);
+    Ok(())
+}
+
+#[test]
+fn reconcile_parent_child_links_rejects_stealing_still_linked_child() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api/auth"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Check](./auth/check.md)\n",
+    )?;
+    fs::write(
+        plan_root.join("api/auth/auth.md"),
+        "# Auth\n\n## Child Nodes\n\n- [Check](./check.md)\n",
+    )?;
+    fs::write(plan_root.join("api/auth/check.md"), "# Check\n")?;
+    let root_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let nested_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/auth/auth.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/auth/check.md".to_owned(),
+        parent_relative_path: Some("api/auth/auth.md".to_owned()),
+    })?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "UPDATE GEN_PLAN__nodes
+         SET parent_node_id = ?1
+         WHERE plan_id = ?2 AND node_id = ?3",
+        params![root_parent.node_id, plan.plan_id, child.node_id],
+    )?;
+
+    let error = runtime
+        .reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_relative_path: "api/auth/auth.md".to_owned(),
+        })
+        .expect_err("reconcile should reject stealing a still-linked child");
+    assert!(
+        format!("{error:#}").contains("still linked"),
+        "unexpected reconcile error: {error:#}"
+    );
+
+    let child_after = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id.clone(),
+        node_id: None,
+        relative_path: Some("api/auth/check.md".to_owned()),
+    })?;
+    assert_eq!(
+        child_after.parent_node_id.as_deref(),
+        Some(root_parent.node_id.as_str())
+    );
+    assert_ne!(
+        child_after.parent_node_id.as_deref(),
+        Some(nested_parent.node_id.as_str())
+    );
     Ok(())
 }
 

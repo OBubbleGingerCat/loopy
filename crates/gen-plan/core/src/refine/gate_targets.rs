@@ -92,7 +92,7 @@ impl RefineGateTargetSelection {
                 })
                 .map(|target| RefineParentRegistrationCandidate {
                     relative_path: target.parent_relative_path.clone(),
-                    parent_relative_path: parent_self_path(&target.parent_relative_path),
+                    parent_relative_path: ancestor_parent_self_path(&target.parent_relative_path),
                     reasons: target.reasons.clone(),
                 })
                 .collect(),
@@ -546,6 +546,18 @@ fn parent_self_path(relative_path: &str) -> Option<String> {
     let parent = path.parent()?;
     let name = parent.file_name()?.to_str()?;
     let self_path = parent
+        .join(format!("{name}.md"))
+        .to_string_lossy()
+        .into_owned();
+    (self_path != relative_path).then_some(self_path)
+}
+
+fn ancestor_parent_self_path(relative_path: &str) -> Option<String> {
+    let path = Path::new(relative_path);
+    let parent = path.parent()?;
+    let ancestor = parent.parent()?;
+    let name = ancestor.file_name()?.to_str()?;
+    let self_path = ancestor
         .join(format!("{name}.md"))
         .to_string_lossy()
         .into_owned();
