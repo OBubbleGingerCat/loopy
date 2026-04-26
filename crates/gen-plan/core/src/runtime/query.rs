@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,11 +7,13 @@ use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
+use super::child_links::parse_child_node_link_paths;
 use super::db::{PROJECT_DIRECTORY_SOURCE_BACKFILLED_LEGACY, PROJECT_DIRECTORY_SOURCE_EXPLICIT};
 use crate::{
     EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse, GateSummary,
     InspectNodeRequest, InspectNodeResponse, ListChildrenRequest, ListChildrenResponse, NodeKind,
-    NodeSummary, OpenPlanRequest, OpenPlanResponse,
+    NodeSummary, OpenPlanRequest, OpenPlanResponse, ReconcileParentChildLinksRequest,
+    ReconcileParentChildLinksResponse,
 };
 
 const ACTIVE_PLAN_STATUS: &str = "active";
@@ -177,8 +180,9 @@ pub(crate) fn inspect_node(
         (None, Some(relative_path)) => {
             let relative_path = validate_plan_local_path("relative_path", &relative_path)?;
             validate_registered_node_path("relative_path", &relative_path)?;
-            load_node_record_by_relative_path(connection, &plan_id, &relative_path)?
-                .ok_or_else(|| anyhow!("relative_path `{relative_path}` does not exist for plan `{plan_id}`"))?
+            load_node_record_by_relative_path(connection, &plan_id, &relative_path)?.ok_or_else(
+                || anyhow!("relative_path `{relative_path}` does not exist for plan `{plan_id}`"),
+            )?
         }
         (Some(_), Some(_)) => {
             return Err(anyhow!(
@@ -197,7 +201,9 @@ pub(crate) fn inspect_node(
         .map(node_record_to_summary)
         .collect();
     let parent_relative_path = match node.parent_node_id.as_deref() {
-        Some(parent_node_id) => Some(load_node_record(connection, &plan_id, parent_node_id)?.relative_path),
+        Some(parent_node_id) => {
+            Some(load_node_record(connection, &plan_id, parent_node_id)?.relative_path)
+        }
         None => None,
     };
 
@@ -267,6 +273,98 @@ pub(crate) fn list_children(
             .into_iter()
             .map(node_record_to_summary)
             .collect(),
+    })
+}
+
+pub(crate) fn reconcile_parent_child_links(
+    connection: &Connection,
+    request: ReconcileParentChildLinksRequest,
+) -> Result<ReconcileParentChildLinksResponse> {
+    let ReconcileParentChildLinksRequest {
+        plan_id,
+        parent_relative_path,
+    } = request;
+    let parent_relative_path =
+        validate_plan_local_path("parent_relative_path", &parent_relative_path)?;
+    require_parent_node_path("parent_relative_path", &parent_relative_path)?;
+    let plan = load_gate_plan_context(connection, &plan_id)?;
+    let parent = load_node_record_by_relative_path(connection, &plan_id, &parent_relative_path)?
+        .ok_or_else(|| {
+            anyhow!(
+                "parent_relative_path `{parent_relative_path}` does not exist for plan `{plan_id}`"
+            )
+        })?;
+    require_parent_node_record(&parent)?;
+    ensure_plan_markdown_file_exists(&plan.plan_root, &parent.relative_path)?;
+    let parent_markdown = std::fs::read_to_string(plan.plan_root.join(&parent.relative_path))
+        .with_context(|| {
+            format!(
+                "failed to read plan markdown {}",
+                plan.plan_root.join(&parent.relative_path).display()
+            )
+        })?;
+    let linked_child_relative_paths =
+        parse_child_node_link_paths(&parent.relative_path, &parent_markdown)?;
+    let linked_child_set = linked_child_relative_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let timestamp = current_timestamp()?;
+
+    let current_children = load_child_nodes(connection, &plan_id, Some(&parent.node_id))?;
+    let mut detached_child_relative_paths = Vec::new();
+    for child in current_children {
+        if linked_child_set.contains(child.relative_path.as_str()) {
+            continue;
+        }
+        set_node_parent(
+            connection,
+            &plan_id,
+            &child.node_id,
+            None,
+            timestamp.as_str(),
+        )?;
+        detached_child_relative_paths.push(child.relative_path);
+    }
+
+    let mut attached_child_relative_paths = Vec::new();
+    for child_relative_path in &linked_child_relative_paths {
+        let child_kind = validate_registered_node_path("child_relative_path", child_relative_path)?;
+        validate_direct_child_relationship(
+            child_relative_path,
+            Some(&parent.relative_path),
+            child_kind,
+        )?;
+        ensure_plan_markdown_file_exists(&plan.plan_root, child_relative_path)?;
+        let Some(child) =
+            load_node_record_by_relative_path(connection, &plan_id, child_relative_path)?
+        else {
+            continue;
+        };
+        validate_direct_child_relationship(
+            &child.relative_path,
+            Some(&parent.relative_path),
+            child.node_kind,
+        )?;
+        if child.parent_node_id.as_deref() == Some(parent.node_id.as_str()) {
+            continue;
+        }
+        set_node_parent(
+            connection,
+            &plan_id,
+            &child.node_id,
+            Some(parent.node_id.as_str()),
+            timestamp.as_str(),
+        )?;
+        attached_child_relative_paths.push(child.relative_path);
+    }
+
+    Ok(ReconcileParentChildLinksResponse {
+        parent_node_id: parent.node_id,
+        parent_relative_path: parent.relative_path,
+        linked_child_relative_paths,
+        attached_child_relative_paths,
+        detached_child_relative_paths,
     })
 }
 
@@ -469,7 +567,10 @@ pub(crate) fn require_parent_node_record(node: &NodeRecord) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn ensure_plan_markdown_file_exists(plan_root: &Path, relative_path: &str) -> Result<()> {
+pub(crate) fn ensure_plan_markdown_file_exists(
+    plan_root: &Path,
+    relative_path: &str,
+) -> Result<()> {
     let full_path = plan_root.join(relative_path);
     let metadata = std::fs::metadata(&full_path)
         .with_context(|| format!("missing plan markdown {}", full_path.display()))?;
@@ -495,6 +596,25 @@ pub(crate) fn ensure_parent_child_runtime_coherence(
             child.node_kind,
         )?;
     }
+    Ok(())
+}
+
+fn set_node_parent(
+    connection: &Connection,
+    plan_id: &str,
+    node_id: &str,
+    parent_node_id: Option<&str>,
+    updated_at: &str,
+) -> Result<()> {
+    connection
+        .execute(
+            "UPDATE GEN_PLAN__nodes
+             SET parent_node_id = ?1,
+                 updated_at = ?2
+             WHERE plan_id = ?3 AND node_id = ?4",
+            params![parent_node_id, updated_at, plan_id, node_id],
+        )
+        .context("failed to update node parent linkage")?;
     Ok(())
 }
 
@@ -640,7 +760,11 @@ fn validate_registration_request(
     match parent_relative_path {
         Some(parent_relative_path) => {
             require_parent_node_path("parent_relative_path", parent_relative_path)?;
-            validate_direct_child_relationship(relative_path, Some(parent_relative_path), node_kind)?;
+            validate_direct_child_relationship(
+                relative_path,
+                Some(parent_relative_path),
+                node_kind,
+            )?;
             Ok(node_kind)
         }
         None => {
@@ -853,9 +977,9 @@ pub(crate) fn validate_registered_node_path(label: &str, relative_path: &str) ->
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("{label} must point to a canonical markdown file path"))?;
-    let stem = file_name
-        .strip_suffix(".md")
-        .ok_or_else(|| anyhow!("{label} must point to a canonical markdown file path ending in `.md`"))?;
+    let stem = file_name.strip_suffix(".md").ok_or_else(|| {
+        anyhow!("{label} must point to a canonical markdown file path ending in `.md`")
+    })?;
     if stem.is_empty() {
         return Err(anyhow!(
             "{label} must point to a canonical markdown file path with a non-empty stem"
@@ -869,10 +993,15 @@ pub(crate) fn validate_registered_node_path(label: &str, relative_path: &str) ->
         })
         .collect();
     if components.is_empty() {
-        return Err(anyhow!("{label} must point to a canonical markdown file path"));
+        return Err(anyhow!(
+            "{label} must point to a canonical markdown file path"
+        ));
     }
 
-    let parent_dir_name = path.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str());
+    let parent_dir_name = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str());
     if parent_dir_name == Some(stem) {
         Ok(NodeKind::Parent)
     } else {

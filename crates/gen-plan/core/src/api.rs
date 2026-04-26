@@ -122,6 +122,21 @@ pub struct ListChildrenResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileParentChildLinksRequest {
+    pub plan_id: String,
+    pub parent_relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileParentChildLinksResponse {
+    pub parent_node_id: String,
+    pub parent_relative_path: String,
+    pub linked_child_relative_paths: Vec<String>,
+    pub attached_child_relative_paths: Vec<String>,
+    pub detached_child_relative_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewIssue {
     pub issue_kind: String,

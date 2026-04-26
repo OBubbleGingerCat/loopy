@@ -214,6 +214,13 @@ fn validate_refine_rewrite_request(
             validate_plan_relative_markdown_path(child)?;
         }
     }
+    for source in request
+        .decisions
+        .iter()
+        .flat_map(|decision| decision.source_comments.iter())
+    {
+        validate_plan_relative_markdown_path(&source.source_path)?;
+    }
     prevalidate_rewrite_link_updates(request)?;
     Ok(())
 }
@@ -258,7 +265,7 @@ fn cleanup_processed_comment_blocks(
 ) -> Result<Vec<(String, String)>, RefineRewriteError> {
     // processed comment block cleanup
     let mut sanitized_payloads = Vec::new();
-    for relative_path in comment_cleanup_paths(&request.rewrite_scope) {
+    for relative_path in comment_cleanup_paths(request) {
         let path = request.plan_root.join(&relative_path);
         if !path.is_file() {
             continue;
@@ -269,23 +276,61 @@ fn cleanup_processed_comment_blocks(
         })?;
         let preserved_blocks = preserved_comment_blocks_for_path(request, &relative_path);
         let sanitized = remove_comment_blocks(&relative_path, &markdown, &preserved_blocks)?;
+        if sanitized != markdown && !path_mutated_after_comment_cleanup(request, &relative_path) {
+            write_plan_file(&request.plan_root, &relative_path, &sanitized)?;
+        }
         sanitized_payloads.push((relative_path, sanitized));
     }
     Ok(sanitized_payloads)
 }
 
-fn comment_cleanup_paths(scope: &RefineRewriteScope) -> Vec<String> {
+fn comment_cleanup_paths(request: &RefineRewriteRequest) -> Vec<String> {
     let mut paths = Vec::new();
-    for target in &scope.rewrite_targets {
+    for target in &request.rewrite_scope.rewrite_targets {
         push_unique_path(&mut paths, &target.relative_path);
     }
-    for stale in &scope.stale_descendants {
+    for stale in &request.rewrite_scope.stale_descendants {
         push_unique_path(&mut paths, &stale.relative_path);
     }
-    for change in &scope.link_changes {
+    for change in &request.rewrite_scope.link_changes {
         push_unique_path(&mut paths, &change.parent_relative_path);
     }
+    for source in request
+        .decisions
+        .iter()
+        .flat_map(|decision| decision.source_comments.iter())
+    {
+        push_unique_path(&mut paths, &source.source_path);
+    }
     paths
+}
+
+fn path_mutated_after_comment_cleanup(request: &RefineRewriteRequest, relative_path: &str) -> bool {
+    request
+        .rewrite_scope
+        .rewrite_targets
+        .iter()
+        .any(|target| target.relative_path == relative_path)
+        || request
+            .rewrite_scope
+            .node_creations
+            .iter()
+            .any(|creation| creation.relative_path == relative_path)
+        || request
+            .rewrite_scope
+            .node_removals
+            .iter()
+            .any(|removal| removal.relative_path == relative_path)
+        || request
+            .rewrite_scope
+            .stale_descendants
+            .iter()
+            .any(|stale| stale.relative_path == relative_path)
+        || request
+            .rewrite_scope
+            .link_changes
+            .iter()
+            .any(|change| change.parent_relative_path == relative_path)
 }
 
 fn push_unique_path(paths: &mut Vec<String>, relative_path: &str) {
@@ -1400,6 +1445,59 @@ mod tests {
         assert!(stale_markdown.starts_with("<!-- loopy-refine-status: stale -->"));
         assert!(!stale_markdown.contains("BEGIN_COMMENT"));
         assert!(!stale_markdown.contains("stale this node"));
+    }
+
+    #[test]
+    fn refine_side_effect_decisions_remove_processed_source_comment_blocks() {
+        let plan_root = temp_plan_root();
+        fs::write(
+            plan_root.join("source.md"),
+            "# Source\n\nBEGIN_COMMENT\ncreate the child elsewhere\nEND_COMMENT\n\nBody\n",
+        )
+        .unwrap();
+
+        let mut decision = confirmed_decision(
+            Vec::new(),
+            vec![RefineRewriteAction {
+                action_kind: RefineRewriteActionKind::CreateNode,
+                target_relative_path: Some("created.md".to_owned()),
+                parent_relative_path: None,
+                node_kind: Some("leaf".to_owned()),
+                link_change: None,
+                replacement_markdown: Some("# Created\n".to_owned()),
+                rationale: None,
+            }],
+        );
+        decision.source_comments = vec![RefineCommentSource {
+            source_path: "source.md".to_owned(),
+            begin_comment_line: 3,
+            end_comment_line: 5,
+            comment_text: Some("create the child elsewhere".to_owned()),
+        }];
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![decision],
+            rewrite_scope: RefineRewriteScope {
+                node_creations: vec![crate::refine::RefineNodeCreation {
+                    relative_path: "created.md".to_owned(),
+                    parent_relative_path: None,
+                    node_kind: Some("leaf".to_owned()),
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect("side-effect-only rewrite should pass");
+
+        let source_markdown = fs::read_to_string(plan_root.join("source.md")).unwrap();
+        assert!(!source_markdown.contains("BEGIN_COMMENT"));
+        assert!(!source_markdown.contains("create the child elsewhere"));
+        assert_eq!(
+            fs::read_to_string(plan_root.join("created.md")).unwrap(),
+            "# Created\n"
+        );
     }
 
     #[test]

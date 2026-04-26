@@ -16,7 +16,10 @@ use loopy_gen_plan::refine::{
 use loopy_gen_plan::runtime::comments::{
     CommentDiscoveryError, collect_plan_markdown_files, discover_plan_comments,
 };
-use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, GateSummary, NodeKind, Runtime};
+use loopy_gen_plan::{
+    EnsureNodeIdRequest, EnsurePlanRequest, GateSummary, InspectNodeRequest, ListChildrenRequest,
+    NodeKind, Runtime,
+};
 
 #[test]
 fn refine_comment_discovery_is_deterministic_and_fail_closed() -> Result<()> {
@@ -323,6 +326,14 @@ fn refine_gate_registration_prepares_targets_fail_closed() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: workspace.path().to_path_buf(),
     })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api/auth"))?;
+    fs::write(plan_root.join("api/api.md"), "# API\n")?;
+    fs::write(
+        plan_root.join("api/auth/auth.md"),
+        "# Auth\n\n## Child Nodes\n\n- [Check](./check.md)\n",
+    )?;
+    fs::write(plan_root.join("api/auth/check.md"), "# Check\n")?;
 
     let registered = register_refine_gate_targets(
         &runtime,
@@ -376,6 +387,68 @@ fn refine_gate_registration_prepares_targets_fail_closed() -> Result<()> {
         error,
         loopy_gen_plan::refine::RefineGatePreparationError::EmptySelectionReasons { .. }
     ));
+    Ok(())
+}
+
+#[test]
+fn refine_gate_registration_reconciles_removed_child_links_before_frontier() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Removed](./removed.md)\n",
+    )?;
+    fs::write(plan_root.join("api/removed.md"), "# Removed\n")?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/removed.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n")?;
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_candidates: vec![],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "api/api.md".to_owned(),
+                changed_child_relative_paths: vec!["api/removed.md".to_owned()],
+                reasons: vec![RefineGateTargetReason::ChangedChildSet],
+            }],
+        },
+    )
+    .expect("removed child should not remain runtime-visible under the old parent");
+
+    assert_eq!(registered.frontier_targets.len(), 1);
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert!(children.children.is_empty());
+    let child = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(child.node_id),
+        relative_path: None,
+    })?;
+    assert_eq!(child.parent_node_id, None);
+    assert_eq!(child.parent_relative_path, None);
     Ok(())
 }
 

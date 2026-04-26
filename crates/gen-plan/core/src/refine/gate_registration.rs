@@ -4,7 +4,10 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{EnsureNodeIdRequest, InspectNodeRequest, ListChildrenRequest, NodeKind, Runtime};
+use crate::{
+    EnsureNodeIdRequest, InspectNodeRequest, ListChildrenRequest, NodeKind,
+    ReconcileParentChildLinksRequest, Runtime,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterRefineGateTargetsRequest {
@@ -194,6 +197,15 @@ pub fn register_refine_gate_targets(
                 child_relative_path: candidate.parent_relative_path.clone(),
                 parent_relative_path: candidate.parent_relative_path.clone(),
             })?;
+        let reconciled = runtime
+            .reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+                plan_id: request.plan_id.clone(),
+                parent_relative_path: candidate.parent_relative_path.clone(),
+            })
+            .map_err(|source| RefineGatePreparationError::RegistrationFailed {
+                relative_path: candidate.parent_relative_path.clone(),
+                source: source.to_string(),
+            })?;
         let children = runtime
             .list_children(ListChildrenRequest {
                 plan_id: request.plan_id.clone(),
@@ -209,10 +221,17 @@ pub fn register_refine_gate_targets(
             .iter()
             .map(|child| child.relative_path.as_str())
             .collect();
+        let linked_child_paths: HashSet<_> = reconciled
+            .linked_child_relative_paths
+            .iter()
+            .map(String::as_str)
+            .collect();
         let missing: Vec<String> = candidate
             .changed_child_relative_paths
             .iter()
-            .filter(|child| !child_paths.contains(child.as_str()))
+            .filter(|child| {
+                linked_child_paths.contains(child.as_str()) && !child_paths.contains(child.as_str())
+            })
             .cloned()
             .collect();
         if !missing.is_empty() {

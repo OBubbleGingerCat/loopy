@@ -458,6 +458,8 @@ fn validate_registered_targets(
         {
             return invalid("frontier parent markdown file must exist under plan_root");
         }
+        let linked_child_paths =
+            linked_child_paths_for_parent(&request.plan_root, &target.parent_relative_path)?;
         let children = runtime
             .list_children(ListChildrenRequest {
                 plan_id: request.plan_id.clone(),
@@ -476,12 +478,39 @@ fn validate_registered_targets(
             .collect();
         for child in &target.changed_child_relative_paths {
             validate_target_path(&request.plan_root, child)?;
-            if !visible_children.contains(child) {
-                return invalid("frontier changed child path must be runtime-visible");
+            if linked_child_paths.contains(child) {
+                if !visible_children.contains(child) {
+                    return invalid("frontier linked child path must be runtime-visible");
+                }
+            } else if visible_children.contains(child) {
+                return invalid("frontier removed child path must not be runtime-visible");
             }
         }
     }
     Ok(())
+}
+
+fn linked_child_paths_for_parent(
+    plan_root: &Path,
+    parent_relative_path: &str,
+) -> Result<HashSet<String>, RefineGateExecutionError> {
+    let markdown = fs::read_to_string(plan_root.join(parent_relative_path)).map_err(|source| {
+        RefineGateExecutionError::InvalidRegisteredTargets {
+            reason: source.to_string(),
+        }
+    })?;
+    crate::runtime::child_links::parse_child_node_link_paths(parent_relative_path, &markdown)
+        .map_err(
+            |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                reason: source.to_string(),
+            },
+        )?
+        .into_iter()
+        .map(|path| {
+            validate_target_path(plan_root, &path)?;
+            Ok(path)
+        })
+        .collect()
 }
 
 fn leaf_fingerprint(
@@ -603,6 +632,7 @@ mod tests {
     use super::*;
     use crate::refine::{RefineGateTargetReason, RegisteredRefineGateTargets};
     use crate::{EnsureNodeIdRequest, EnsurePlanRequest};
+    use rusqlite::{Connection, params};
 
     #[test]
     fn frontier_fingerprint_skips_runtime_children_deleted_from_disk() {
@@ -653,6 +683,65 @@ mod tests {
         let fingerprint = frontier_fingerprint(&runtime, &request, &target)
             .expect("deleted children should not abort frontier fingerprinting");
         assert_eq!(fingerprint.len(), 64);
+    }
+
+    #[test]
+    fn validate_registered_frontier_allows_removed_children_to_be_absent() {
+        let workspace = temp_workspace();
+        let runtime = Runtime::new(&workspace).expect("runtime should initialize");
+        let plan = runtime
+            .ensure_plan(EnsurePlanRequest {
+                plan_name: "removed-child-refine".to_owned(),
+                task_type: "coding-task".to_owned(),
+                project_directory: workspace.clone(),
+            })
+            .expect("plan should be created");
+        let plan_root = PathBuf::from(&plan.plan_root);
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n").unwrap();
+        fs::write(plan_root.join("api/old-child.md"), "# Old Child\n").unwrap();
+
+        let parent = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/api.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("parent should be tracked");
+        let child = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/old-child.md".to_owned(),
+                parent_relative_path: Some("api/api.md".to_owned()),
+            })
+            .expect("child should be tracked");
+        let connection = Connection::open(workspace.join(".loopy/loopy.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE GEN_PLAN__nodes SET parent_node_id = NULL WHERE plan_id = ?1 AND node_id = ?2",
+                params![plan.plan_id, child.node_id],
+            )
+            .unwrap();
+
+        validate_registered_targets(
+            &runtime,
+            &RunRefineGateRevalidationRequest {
+                plan_id: plan.plan_id,
+                plan_root,
+                planner_mode: PlannerMode::Manual,
+                registered_targets: RegisteredRefineGateTargets {
+                    frontier_targets: vec![RegisteredRefineFrontierTarget {
+                        parent_node_id: parent.node_id,
+                        parent_relative_path: "api/api.md".to_owned(),
+                        changed_child_relative_paths: vec!["api/old-child.md".to_owned()],
+                        reasons: vec![RefineGateTargetReason::ChangedChildSet],
+                    }],
+                    ..Default::default()
+                },
+                retry_policy: RefineGateRetryPolicy::default(),
+            },
+        )
+        .expect("removed child paths should not have to remain runtime-visible");
     }
 
     fn temp_workspace() -> PathBuf {
