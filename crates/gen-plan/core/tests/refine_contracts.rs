@@ -20,6 +20,7 @@ use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, GateSummary, InspectNodeRequest, ListChildrenRequest,
     NodeKind, ReconcileParentChildLinksRequest, Runtime,
 };
+use rusqlite::{Connection, params};
 
 #[test]
 fn refine_comment_discovery_is_deterministic_and_fail_closed() -> Result<()> {
@@ -632,6 +633,100 @@ fn parent_contract_frontier_registration_does_not_detach_existing_children() -> 
     })?;
     assert_eq!(children.children.len(), 1);
     assert_eq!(children.children[0].node_id, child.node_id);
+    Ok(())
+}
+
+#[test]
+fn refine_gate_registration_accepts_existing_root_parent_for_leaf_targets() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("demo"))?;
+    fs::write(plan_root.join("demo.md"), "# Demo\n")?;
+    fs::write(plan_root.join("demo/leaf.md"), "# Leaf\n")?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
+        params![plan.plan_id, "root-1", "demo.md", "demo", "parent", Option::<String>::None],
+    )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
+        params![plan.plan_id, "leaf-1", "demo/leaf.md", "leaf", "leaf", "root-1"],
+    )?;
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id,
+            parent_candidates: vec![],
+            leaf_candidates: vec![RefineLeafRegistrationCandidate {
+                relative_path: "demo/leaf.md".to_owned(),
+                parent_relative_path: Some("demo.md".to_owned()),
+                reasons: vec![RefineGateTargetReason::TextChanged],
+            }],
+            frontier_candidates: vec![],
+        },
+    )
+    .expect("existing root-parent leaf should register for refine gates");
+
+    assert_eq!(registered.leaf_targets.len(), 1);
+    assert_eq!(registered.leaf_targets[0].node_id, "leaf-1");
+    assert_eq!(
+        registered.leaf_targets[0].parent_relative_path.as_deref(),
+        Some("demo.md")
+    );
+    Ok(())
+}
+
+#[test]
+fn refine_gate_registration_accepts_existing_root_parent_for_frontier_targets() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::write(plan_root.join("demo.md"), "# Demo\n\nUpdated contract\n")?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
+        params![plan.plan_id, "root-1", "demo.md", "demo", "parent", Option::<String>::None],
+    )?;
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id,
+            parent_candidates: vec![],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "demo.md".to_owned(),
+                changed_child_relative_paths: Vec::new(),
+                reasons: vec![RefineGateTargetReason::ParentContractChanged],
+            }],
+        },
+    )
+    .expect("existing root parent should register for frontier revalidation");
+
+    assert_eq!(registered.frontier_targets.len(), 1);
+    assert_eq!(registered.frontier_targets[0].parent_node_id, "root-1");
+    assert_eq!(
+        registered.frontier_targets[0].parent_relative_path,
+        "demo.md"
+    );
     Ok(())
 }
 

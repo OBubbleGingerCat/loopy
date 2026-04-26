@@ -496,6 +496,17 @@ fn validate_registered_targets(
                 }
             } else if visible_children.contains(child) {
                 return invalid("frontier removed child path must not be runtime-visible");
+            } else if runtime
+                .inspect_node(InspectNodeRequest {
+                    plan_id: request.plan_id.clone(),
+                    node_id: None,
+                    relative_path: Some(child.clone()),
+                })
+                .is_err()
+            {
+                return invalid(
+                    "frontier changed child path must be linked, runtime-visible, or tracked",
+                );
             }
         }
     }
@@ -807,6 +818,57 @@ mod tests {
             },
         )
         .expect("removed child paths should not have to remain runtime-visible");
+    }
+
+    #[test]
+    fn validate_registered_frontier_rejects_unknown_changed_child_paths() {
+        let workspace = temp_workspace();
+        let runtime = Runtime::new(&workspace).expect("runtime should initialize");
+        let plan = runtime
+            .ensure_plan(EnsurePlanRequest {
+                plan_name: "unknown-child-refine".to_owned(),
+                task_type: "coding-task".to_owned(),
+                project_directory: workspace.clone(),
+            })
+            .expect("plan should be created");
+        let plan_root = PathBuf::from(&plan.plan_root);
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n").unwrap();
+
+        let parent = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/api.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("parent should be tracked");
+
+        let error = validate_registered_targets(
+            &runtime,
+            &RunRefineGateRevalidationRequest {
+                plan_id: plan.plan_id,
+                plan_root,
+                planner_mode: PlannerMode::Manual,
+                registered_targets: RegisteredRefineGateTargets {
+                    frontier_targets: vec![RegisteredRefineFrontierTarget {
+                        parent_node_id: parent.node_id,
+                        parent_relative_path: "api/api.md".to_owned(),
+                        changed_child_relative_paths: vec!["api/typo.md".to_owned()],
+                        reasons: vec![RefineGateTargetReason::ChangedChildSet],
+                    }],
+                    ..Default::default()
+                },
+                retry_policy: RefineGateRetryPolicy::default(),
+            },
+        )
+        .expect_err("unknown changed child paths should fail preflight");
+
+        assert!(
+            format!("{error:?}").contains(
+                "frontier changed child path must be linked, runtime-visible, or tracked"
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

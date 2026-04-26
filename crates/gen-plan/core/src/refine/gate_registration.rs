@@ -142,21 +142,39 @@ pub fn register_refine_gate_targets(
                 });
             }
         }
-        let response = runtime
-            .ensure_node_id(EnsureNodeIdRequest {
-                plan_id: plan_id.clone(),
-                relative_path: candidate.relative_path.clone(),
-                parent_relative_path: candidate.parent_relative_path.clone(),
-            })
-            .map_err(|source| RefineGatePreparationError::RegistrationFailed {
-                relative_path: candidate.relative_path.clone(),
-                source: source.to_string(),
-            })?;
+        let node_id =
+            if let Ok(existing) = inspect_parent(runtime, &plan_id, &candidate.relative_path) {
+                if existing.parent_relative_path != candidate.parent_relative_path {
+                    return Err(RefineGatePreparationError::RegistrationFailed {
+                        relative_path: candidate.relative_path.clone(),
+                        source: "existing parent target has conflicting parent linkage".to_owned(),
+                    });
+                }
+                existing.node_id
+            } else {
+                if is_root_parent_path(&candidate.relative_path) {
+                    return Err(RefineGatePreparationError::MissingParentRegistration {
+                        child_relative_path: candidate.relative_path.clone(),
+                        parent_relative_path: candidate.relative_path.clone(),
+                    });
+                }
+                runtime
+                    .ensure_node_id(EnsureNodeIdRequest {
+                        plan_id: plan_id.clone(),
+                        relative_path: candidate.relative_path.clone(),
+                        parent_relative_path: candidate.parent_relative_path.clone(),
+                    })
+                    .map_err(|source| RefineGatePreparationError::RegistrationFailed {
+                        relative_path: candidate.relative_path.clone(),
+                        source: source.to_string(),
+                    })?
+                    .node_id
+            };
         tracked_parents.insert(candidate.relative_path.clone());
         registered
             .parent_targets
             .push(RegisteredRefineParentTarget {
-                node_id: response.node_id,
+                node_id,
                 relative_path: candidate.relative_path,
                 parent_relative_path: candidate.parent_relative_path,
                 reasons: stable_dedup_reasons(candidate.reasons),
@@ -290,6 +308,26 @@ fn register_leaf_candidate(
     plan_id: &str,
     candidate: RefineLeafRegistrationCandidate,
 ) -> Result<RegisteredRefineLeafTarget, RefineGatePreparationError> {
+    if let Ok(existing) = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan_id.to_owned(),
+        node_id: None,
+        relative_path: Some(candidate.relative_path.clone()),
+    }) {
+        if existing.node_kind != NodeKind::Leaf {
+            return Err(RefineGatePreparationError::RegistrationFailed {
+                relative_path: candidate.relative_path.clone(),
+                source: "existing target path is not a leaf node".to_owned(),
+            });
+        }
+        if existing.parent_relative_path == candidate.parent_relative_path {
+            return Ok(RegisteredRefineLeafTarget {
+                node_id: existing.node_id,
+                relative_path: candidate.relative_path,
+                parent_relative_path: candidate.parent_relative_path,
+                reasons: stable_dedup_reasons(candidate.reasons),
+            });
+        }
+    }
     let response = runtime
         .ensure_node_id(EnsureNodeIdRequest {
             plan_id: plan_id.to_owned(),
@@ -431,13 +469,19 @@ fn validate_parent_path(
         .parent()
         .and_then(|parent| parent.file_name())
         .and_then(|name| name.to_str());
-    if stem.is_none() || parent_dir != stem {
+    let is_scoped_parent_path = stem.is_some() && parent_dir == stem;
+    let is_root_plan_parent_path = stem.is_some() && is_root_parent_path(relative_path);
+    if !is_scoped_parent_path && !is_root_plan_parent_path {
         return Err(RefineGatePreparationError::InvalidCanonicalPath {
             field: field.to_owned(),
             relative_path: relative_path.to_owned(),
         });
     }
     Ok(())
+}
+
+fn is_root_parent_path(relative_path: &str) -> bool {
+    Path::new(relative_path).components().count() == 1
 }
 
 fn validate_markdown_path(
