@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::decision::{RefineDecision, RefineDecisionStatus, RefineRewriteActionKind};
+use super::decision::{
+    RefineDecision, RefineDecisionStatus, RefineRewriteActionKind, RefineRewriteLinkChangeKind,
+};
 
 /// Rewrite Scope Planning: rewrite scope planning scaffold.
 ///
@@ -115,10 +117,10 @@ pub fn plan_refine_rewrite_scope(
             return Err(RefineRewriteScopeError::UnconfirmedDecision);
         }
 
+        let decision_rationale = decision.confirmation.rationale.clone();
         for action in decision.rewrite_actions {
             match action.action_kind {
-                RefineRewriteActionKind::UpdateExistingNode
-                | RefineRewriteActionKind::MarkStale => {
+                RefineRewriteActionKind::UpdateExistingNode => {
                     let Some(relative_path) = action.target_relative_path else {
                         return Err(RefineRewriteScopeError::UnmappedImpact);
                     };
@@ -126,6 +128,19 @@ pub fn plan_refine_rewrite_scope(
                         relative_path,
                         node_id: None,
                         action_kind: action.action_kind,
+                    });
+                }
+                RefineRewriteActionKind::MarkStale => {
+                    let Some(relative_path) = action.target_relative_path else {
+                        return Err(RefineRewriteScopeError::UnmappedImpact);
+                    };
+                    let reason = action
+                        .rationale
+                        .unwrap_or_else(|| decision_rationale.clone());
+                    scope.stale_descendants.push(RefineStaleDescendant {
+                        relative_path,
+                        node_id: None,
+                        reason,
                     });
                 }
                 RefineRewriteActionKind::CreateNode => {
@@ -159,7 +174,17 @@ pub fn plan_refine_rewrite_scope(
                         remove_child_relative_paths: Vec::new(),
                     };
                     if let Some(target) = action.target_relative_path {
-                        link_change.add_child_relative_paths.push(target);
+                        match action
+                            .link_change
+                            .unwrap_or(RefineRewriteLinkChangeKind::AddChildLink)
+                        {
+                            RefineRewriteLinkChangeKind::AddChildLink => {
+                                link_change.add_child_relative_paths.push(target);
+                            }
+                            RefineRewriteLinkChangeKind::RemoveChildLink => {
+                                link_change.remove_child_relative_paths.push(target);
+                            }
+                        }
                     }
                     scope.link_changes.push(link_change);
                 }
@@ -168,4 +193,118 @@ pub fn plan_refine_rewrite_scope(
     }
 
     Ok(scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::refine::{
+        RefineAffectedScope, RefineDecisionConfirmation, RefineRewriteAction,
+        RefineRewriteLinkChangeKind,
+    };
+
+    #[test]
+    fn scope_routes_mark_stale_actions_to_stale_descendants() {
+        let plan_root = temp_plan_root();
+        let scope = plan_refine_rewrite_scope(RefineRewriteScopeRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root,
+            decisions: vec![confirmed_decision(vec![RefineRewriteAction {
+                action_kind: RefineRewriteActionKind::MarkStale,
+                target_relative_path: Some("api/old-child.md".to_owned()),
+                parent_relative_path: Some("api/api.md".to_owned()),
+                node_kind: Some("leaf".to_owned()),
+                link_change: None,
+                replacement_markdown: None,
+                rationale: Some("parent contract changed".to_owned()),
+            }])],
+        })
+        .expect("scope planning should pass");
+
+        assert!(scope.rewrite_targets.is_empty());
+        assert_eq!(
+            scope.stale_descendants,
+            vec![RefineStaleDescendant {
+                relative_path: "api/old-child.md".to_owned(),
+                node_id: None,
+                reason: "parent contract changed".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn scope_respects_update_link_change_kind() {
+        let plan_root = temp_plan_root();
+        let scope = plan_refine_rewrite_scope(RefineRewriteScopeRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root,
+            decisions: vec![confirmed_decision(vec![
+                RefineRewriteAction {
+                    action_kind: RefineRewriteActionKind::UpdateLinks,
+                    target_relative_path: Some("api/new-child.md".to_owned()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    node_kind: Some("leaf".to_owned()),
+                    link_change: Some(RefineRewriteLinkChangeKind::AddChildLink),
+                    replacement_markdown: None,
+                    rationale: None,
+                },
+                RefineRewriteAction {
+                    action_kind: RefineRewriteActionKind::UpdateLinks,
+                    target_relative_path: Some("api/old-child.md".to_owned()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    node_kind: Some("leaf".to_owned()),
+                    link_change: Some(RefineRewriteLinkChangeKind::RemoveChildLink),
+                    replacement_markdown: None,
+                    rationale: None,
+                },
+            ])],
+        })
+        .expect("scope planning should pass");
+
+        assert_eq!(
+            scope.link_changes,
+            vec![
+                RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: vec!["api/new-child.md".to_owned()],
+                    remove_child_relative_paths: Vec::new(),
+                },
+                RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: Vec::new(),
+                    remove_child_relative_paths: vec!["api/old-child.md".to_owned()],
+                },
+            ]
+        );
+    }
+
+    fn confirmed_decision(rewrite_actions: Vec<RefineRewriteAction>) -> RefineDecision {
+        RefineDecision {
+            source_comments: Vec::new(),
+            affected_scope: RefineAffectedScope::default(),
+            change_types: Vec::new(),
+            confirmation: RefineDecisionConfirmation {
+                status: RefineDecisionStatus::ConfirmationCleared,
+                rationale: "confirmed".to_owned(),
+                question_for_user: None,
+                decision_impact: None,
+            },
+            rewrite_actions,
+            expected_gate_revalidation: Vec::new(),
+        }
+    }
+
+    fn temp_plan_root() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("loopy-refine-scope-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 }

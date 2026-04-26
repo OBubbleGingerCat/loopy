@@ -5,10 +5,13 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::comments::{CommentDiscoveryError, parse_comment_blocks_for_file};
+use crate::runtime::comments::{
+    CommentBlock, CommentDiscoveryError, parse_comment_blocks_for_file,
+};
 
 use super::decision::{
-    ExpectedGateRevalidation, RefineDecision, RefineDecisionStatus, RefineRewriteActionKind,
+    ExpectedGateRevalidation, RefineCommentSource, RefineDecision, RefineDecisionStatus,
+    RefineRewriteActionKind,
 };
 use super::scope::{RefineLinkChange, RefineRewriteScope, RefineStaleDescendant};
 use super::summary::{RefineRewriteSummary, build_refine_rewrite_summary};
@@ -130,6 +133,12 @@ struct MutationReports {
     unchanged_nodes: Vec<RefineUnchangedNode>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreservedCommentBlock {
+    start_line: usize,
+    end_line: usize,
+}
+
 pub fn apply_refine_rewrite(
     request: RefineRewriteRequest,
 ) -> Result<RefineRewriteResult, RefineRewriteError> {
@@ -222,7 +231,8 @@ fn cleanup_processed_comment_blocks(
             path: path.display().to_string(),
             source: source.to_string(),
         })?;
-        let sanitized = remove_comment_blocks(&target.relative_path, &markdown)?;
+        let preserved_blocks = preserved_comment_blocks_for_path(request, &target.relative_path);
+        let sanitized = remove_comment_blocks(&target.relative_path, &markdown, &preserved_blocks)?;
         sanitized_payloads.push((target.relative_path.clone(), sanitized));
     }
     Ok(sanitized_payloads)
@@ -961,19 +971,65 @@ fn replacement_for_path(request: &RefineRewriteRequest, relative_path: &str) -> 
 fn remove_comment_blocks(
     relative_path: &str,
     markdown: &str,
+    preserved_blocks: &[PreservedCommentBlock],
 ) -> Result<String, RefineRewriteError> {
-    parse_comment_blocks_for_file(relative_path, markdown).map_err(map_comment_error)?;
+    let parsed_blocks =
+        parse_comment_blocks_for_file(relative_path, markdown).map_err(map_comment_error)?;
     let mut output = Vec::new();
-    let mut inside = false;
-    for line in markdown.lines() {
+    let mut preserve_current_block = None::<bool>;
+    for (index, line) in markdown.lines().enumerate() {
+        let line_number = index + 1;
         match line.trim() {
-            "BEGIN_COMMENT" => inside = true,
-            "END_COMMENT" => inside = false,
-            _ if !inside => output.push(line),
+            "BEGIN_COMMENT" => {
+                let preserve = parsed_blocks
+                    .iter()
+                    .find(|block| block.start_line == line_number)
+                    .is_some_and(|block| should_preserve_comment_block(block, preserved_blocks));
+                preserve_current_block = Some(preserve);
+                if preserve {
+                    output.push(line);
+                }
+            }
+            "END_COMMENT" => {
+                if preserve_current_block.unwrap_or(false) {
+                    output.push(line);
+                }
+                preserve_current_block = None;
+            }
+            _ if preserve_current_block.unwrap_or(true) => output.push(line),
             _ => {}
         }
     }
     Ok(output.join("\n"))
+}
+
+fn preserved_comment_blocks_for_path(
+    request: &RefineRewriteRequest,
+    relative_path: &str,
+) -> Vec<PreservedCommentBlock> {
+    request
+        .blocked_follow_ups
+        .iter()
+        .flat_map(|decision| decision.source_comments.iter())
+        .filter(|source| source.source_path == relative_path)
+        .map(comment_source_to_preserved_block)
+        .collect()
+}
+
+fn comment_source_to_preserved_block(source: &RefineCommentSource) -> PreservedCommentBlock {
+    PreservedCommentBlock {
+        start_line: source.begin_comment_line,
+        end_line: source.end_comment_line,
+    }
+}
+
+fn should_preserve_comment_block(
+    block: &CommentBlock,
+    preserved_blocks: &[PreservedCommentBlock],
+) -> bool {
+    preserved_blocks.iter().any(|preserved| {
+        preserved.start_line == block.start_line && preserved.end_line == block.end_line
+    })
 }
 
 fn map_comment_error(error: CommentDiscoveryError) -> RefineRewriteError {
@@ -1046,8 +1102,9 @@ mod tests {
     use super::*;
     use crate::refine::summary::{RefineStaleNodeSummaryEntry, RefineStaleNodeSummaryKind};
     use crate::refine::{
-        RefineAffectedScope, RefineAffectedTrackedNode, RefineDecisionConfirmation,
-        RefineRewriteAction, RefineRewriteActionKind, RefineRewriteTarget,
+        RefineAffectedScope, RefineAffectedTrackedNode, RefineCommentSource,
+        RefineDecisionConfirmation, RefineRewriteAction, RefineRewriteActionKind,
+        RefineRewriteTarget,
     };
 
     #[test]
@@ -1128,6 +1185,59 @@ mod tests {
         })
         .expect_err("unconfirmed decision should fail before mutations");
         assert_eq!(error, RefineRewriteError::UnauthorizedDecision);
+    }
+
+    #[test]
+    fn refine_rewrite_preserves_unresolved_comment_blocks() {
+        let plan_root = temp_plan_root();
+        fs::write(
+            plan_root.join("api.md"),
+            "# API\n\nBEGIN_COMMENT\napply this\nEND_COMMENT\n\nBody\n\nBEGIN_COMMENT\nlater\nEND_COMMENT\n",
+        )
+        .unwrap();
+        let applied = confirmed_decision(
+            Vec::new(),
+            vec![RefineRewriteAction {
+                action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                target_relative_path: Some("api.md".to_owned()),
+                parent_relative_path: None,
+                node_kind: Some("leaf".to_owned()),
+                link_change: None,
+                replacement_markdown: None,
+                rationale: None,
+            }],
+        );
+        let follow_up = RefineDecision {
+            source_comments: vec![RefineCommentSource {
+                source_path: "api.md".to_owned(),
+                begin_comment_line: 9,
+                end_comment_line: 11,
+                comment_text: Some("later".to_owned()),
+            }],
+            ..confirmed_decision(Vec::new(), Vec::new())
+        };
+
+        let result = apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![applied],
+            rewrite_scope: RefineRewriteScope {
+                rewrite_targets: vec![RefineRewriteTarget {
+                    relative_path: "api.md".to_owned(),
+                    node_id: Some("leaf-1".to_owned()),
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: vec![follow_up],
+        })
+        .expect("rewrite should preserve deferred comments");
+
+        let updated = fs::read_to_string(plan_root.join("api.md")).unwrap();
+        assert!(!updated.contains("apply this"));
+        assert!(updated.contains("BEGIN_COMMENT\nlater\nEND_COMMENT"));
+        assert_eq!(updated.matches("BEGIN_COMMENT").count(), 1);
+        assert_eq!(result.unresolved_follow_ups.len(), 1);
     }
 
     #[test]

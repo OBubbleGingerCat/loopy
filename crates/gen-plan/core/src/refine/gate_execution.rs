@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -516,10 +517,33 @@ fn frontier_fingerprint(
             },
         )?;
     for child in children.children {
+        let Some(child_bytes) =
+            read_existing_target_bytes(&request.plan_root, &child.relative_path)?
+        else {
+            continue;
+        };
         bytes.extend_from_slice(format!("child\0{}\0", child.relative_path).as_bytes());
-        bytes.extend(read_target_bytes(&request.plan_root, &child.relative_path)?);
+        bytes.extend(child_bytes);
     }
     Ok(sha256_hex(&bytes))
+}
+
+fn read_existing_target_bytes(
+    plan_root: &Path,
+    relative_path: &str,
+) -> Result<Option<Vec<u8>>, RefineGateExecutionError> {
+    validate_target_path(plan_root, relative_path)?;
+    fs::read(plan_root.join(relative_path))
+        .map(Some)
+        .or_else(|source| {
+            if source.kind() == ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(RefineGateExecutionError::InvalidRegisteredTargets {
+                    reason: source.to_string(),
+                })
+            }
+        })
 }
 
 fn read_target_bytes(
@@ -570,4 +594,74 @@ fn invalid<T>(reason: &str) -> Result<T, RefineGateExecutionError> {
     Err(RefineGateExecutionError::InvalidRegisteredTargets {
         reason: reason.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::refine::{RefineGateTargetReason, RegisteredRefineGateTargets};
+    use crate::{EnsureNodeIdRequest, EnsurePlanRequest};
+
+    #[test]
+    fn frontier_fingerprint_skips_runtime_children_deleted_from_disk() {
+        let workspace = temp_workspace();
+        let runtime = Runtime::new(&workspace).expect("runtime should initialize");
+        let plan = runtime
+            .ensure_plan(EnsurePlanRequest {
+                plan_name: "deleted-child-refine".to_owned(),
+                task_type: "coding-task".to_owned(),
+                project_directory: workspace.clone(),
+            })
+            .expect("plan should be created");
+        let plan_root = PathBuf::from(&plan.plan_root);
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n").unwrap();
+        fs::write(plan_root.join("api/old-child.md"), "# Old Child\n").unwrap();
+
+        let parent = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/api.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("parent should be tracked");
+        runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/old-child.md".to_owned(),
+                parent_relative_path: Some("api/api.md".to_owned()),
+            })
+            .expect("child should be tracked");
+        fs::remove_file(plan_root.join("api/old-child.md")).unwrap();
+
+        let request = RunRefineGateRevalidationRequest {
+            plan_id: plan.plan_id,
+            plan_root,
+            planner_mode: PlannerMode::Manual,
+            registered_targets: RegisteredRefineGateTargets::default(),
+            retry_policy: RefineGateRetryPolicy::default(),
+        };
+        let target = RegisteredRefineFrontierTarget {
+            parent_node_id: parent.node_id,
+            parent_relative_path: "api/api.md".to_owned(),
+            changed_child_relative_paths: vec!["api/old-child.md".to_owned()],
+            reasons: vec![RefineGateTargetReason::ChangedChildSet],
+        };
+
+        let fingerprint = frontier_fingerprint(&runtime, &request, &target)
+            .expect("deleted children should not abort frontier fingerprinting");
+        assert_eq!(fingerprint.len(), 64);
+    }
+
+    fn temp_workspace() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("loopy-refine-gate-exec-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 }
