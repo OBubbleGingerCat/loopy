@@ -1021,6 +1021,41 @@ fn list_children_can_lookup_by_parent_id_and_path() -> Result<()> {
 }
 
 #[test]
+fn list_children_accepts_root_plan_parent_relative_path() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "root-children".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "root-children.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "root-children/leaf.md".to_owned(),
+        parent_relative_path: Some("root-children.md".to_owned()),
+    })?;
+
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id,
+        parent_node_id: None,
+        parent_relative_path: Some("root-children.md".to_owned()),
+    })?;
+    assert_eq!(children.parent_node_id, parent.node_id);
+    assert_eq!(children.parent_relative_path, "root-children.md");
+    assert_eq!(children.children.len(), 1);
+    assert_eq!(children.children[0].node_id, child.node_id);
+    assert_eq!(children.children[0].relative_path, "root-children/leaf.md");
+
+    Ok(())
+}
+
+#[test]
 fn refine_reuses_tracked_node_identity() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;

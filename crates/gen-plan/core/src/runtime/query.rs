@@ -244,7 +244,7 @@ pub(crate) fn list_children(
         (None, Some(parent_relative_path)) => {
             let parent_relative_path =
                 validate_plan_local_path("parent_relative_path", &parent_relative_path)?;
-            require_parent_node_path("parent_relative_path", &parent_relative_path)?;
+            require_reconcilable_parent_node_path("parent_relative_path", &parent_relative_path)?;
             load_node_record_by_relative_path(connection, &plan_id, &parent_relative_path)?
                 .ok_or_else(|| anyhow!("parent_relative_path `{parent_relative_path}` does not exist for plan `{plan_id}`"))?
         }
@@ -1153,15 +1153,6 @@ pub(crate) fn validate_registered_node_path(label: &str, relative_path: &str) ->
     } else {
         Ok(NodeKind::Leaf)
     }
-}
-
-pub(crate) fn require_parent_node_path(label: &str, relative_path: &str) -> Result<()> {
-    if validate_registered_node_path(label, relative_path)? != NodeKind::Parent {
-        return Err(anyhow!(
-            "{label} must point to a canonical parent markdown path such as `scope/scope.md`"
-        ));
-    }
-    Ok(())
 }
 
 fn require_reconcilable_parent_node_path(label: &str, relative_path: &str) -> Result<()> {

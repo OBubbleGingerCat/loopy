@@ -4,7 +4,7 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use loopy_gen_plan::{
-    EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest,
+    EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest, NodeKind,
     OpenPlanRequest, PlannerMode, ReconcileParentChildLinksRequest, RunFrontierReviewGateRequest,
     RunLeafReviewGateRequest, Runtime,
 };
@@ -82,6 +82,8 @@ enum Commands {
         planner_mode: String,
         #[arg(long)]
         refine_revalidation_context_file: Option<PathBuf>,
+        #[arg(long = "refine-invalidatable-leaf-node-id")]
+        refine_invalidatable_leaf_node_ids: Vec<String>,
     },
     MockLeafReviewer {
         #[arg(long = "output-last-message")]
@@ -197,17 +199,25 @@ fn main() -> Result<()> {
             parent_node_id,
             planner_mode,
             refine_revalidation_context_file,
+            refine_invalidatable_leaf_node_ids,
         } => {
             let workspace = cli.workspace.clone().unwrap_or(std::env::current_dir()?);
             let runtime = Runtime::new(workspace)?;
             let refine_revalidation_context =
                 read_optional_context_file(refine_revalidation_context_file.as_deref())?;
+            let refine_invalidatable_leaf_node_ids = refine_invalidatable_leaf_node_ids_for_cli(
+                &runtime,
+                &plan_id,
+                &parent_node_id,
+                &refine_revalidation_context,
+                refine_invalidatable_leaf_node_ids,
+            )?;
             let response = runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
                 plan_id,
                 parent_node_id,
                 planner_mode: parse_planner_mode(&planner_mode)?,
                 refine_revalidation_context,
-                refine_invalidatable_leaf_node_ids: None,
+                refine_invalidatable_leaf_node_ids,
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
@@ -222,6 +232,64 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn refine_invalidatable_leaf_node_ids_for_cli(
+    runtime: &Runtime,
+    plan_id: &str,
+    parent_node_id: &str,
+    refine_revalidation_context: &Option<String>,
+    explicit_node_ids: Vec<String>,
+) -> Result<Option<Vec<String>>> {
+    if !has_refine_revalidation_context(refine_revalidation_context) {
+        if !explicit_node_ids.is_empty() {
+            bail!(
+                "--refine-invalidatable-leaf-node-id requires --refine-revalidation-context-file"
+            );
+        }
+        return Ok(None);
+    }
+
+    let mut node_ids = Vec::new();
+    collect_descendant_leaf_node_ids(runtime, plan_id, parent_node_id, &mut node_ids)?;
+    for node_id in explicit_node_ids {
+        push_unique(&mut node_ids, node_id);
+    }
+    Ok(Some(node_ids))
+}
+
+fn collect_descendant_leaf_node_ids(
+    runtime: &Runtime,
+    plan_id: &str,
+    parent_node_id: &str,
+    node_ids: &mut Vec<String>,
+) -> Result<()> {
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan_id.to_owned(),
+        parent_node_id: Some(parent_node_id.to_owned()),
+        parent_relative_path: None,
+    })?;
+    for child in children.children {
+        match child.node_kind {
+            NodeKind::Leaf => push_unique(node_ids, child.node_id),
+            NodeKind::Parent => {
+                collect_descendant_leaf_node_ids(runtime, plan_id, &child.node_id, node_ids)?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn has_refine_revalidation_context(context: &Option<String>) -> bool {
+    context
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn parse_planner_mode(value: &str) -> Result<PlannerMode> {

@@ -737,6 +737,139 @@ fn frontier_gate_command_accepts_refine_revalidation_context_file() -> Result<()
 }
 
 #[test]
+fn frontier_gate_command_refine_context_preserves_frontier_invalidation_scope() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    write_dev_registry(
+        workspace.path(),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../skills/gen-plan")
+            .canonicalize()
+            .context("checked-in skills/gen-plan root should resolve")?,
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-frontier-gate-refine-scope".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/cli-frontier-gate-refine-scope");
+    fs::create_dir_all(plan_root.join("backend"))?;
+    fs::create_dir_all(plan_root.join("docs"))?;
+    fs::write(
+        plan_root.join("backend/backend.md"),
+        "# Backend\n\n## Child Nodes\n\n- [Current](./current.md)\n",
+    )?;
+    fs::write(plan_root.join("backend/current.md"), "# Current\n")?;
+    fs::write(
+        plan_root.join("docs/docs.md"),
+        "# Docs\n\n## Child Nodes\n\n- [Guide](./guide.md)\n",
+    )?;
+    fs::write(plan_root.join("docs/guide.md"), "# Guide\n")?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/backend.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/current.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+    let docs_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let docs_leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/guide.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    let docs_leaf_node_id = docs_leaf.node_id.clone();
+    let frontier_output = serde_json::json!({
+        "verdict": "revise_frontier",
+        "summary": "Backend needs revision.",
+        "issues": [{
+            "issue_kind": "unscoped_cli_invalidation",
+            "target_node_id": docs_leaf_node_id,
+            "target_parent_node_id": docs_parent.node_id,
+            "target_node_ids": null,
+            "summary": "Invalidates a docs leaf.",
+            "rationale": "The CLI must not authorize every context-mentioned leaf.",
+            "expected_revision": "Keep invalidations scoped to the reviewed frontier.",
+            "question_for_user": null,
+            "decision_impact": null
+        }],
+        "invalidated_leaf_node_ids": [docs_leaf_node_id]
+    })
+    .to_string();
+    write_fake_codex_expecting_prompt(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        "Gate: frontier_review",
+        Some("docs/guide.md"),
+        &frontier_output,
+    )?;
+    let context_file = workspace.path().join("frontier-refine-context.md");
+    fs::write(&context_file, "Changed docs/guide.md during refine.\n")?;
+
+    let output = run_cli_with_env(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "run-frontier-review-gate",
+            "--plan-id",
+            &plan.plan_id,
+            "--parent-node-id",
+            &parent.node_id,
+            "--planner-mode",
+            "auto",
+            "--refine-revalidation-context-file",
+            context_file
+                .to_str()
+                .context("context path must be utf-8")?,
+        ],
+        &[(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(fake_bin_dir.clone()).chain(
+                    std::env::var_os("PATH")
+                        .iter()
+                        .flat_map(std::env::split_paths),
+                ),
+            )
+            .expect("PATH should remain joinable"),
+        )],
+        Some("failed to run loopy-gen-plan run-frontier-review-gate"),
+    )?;
+    assert!(
+        !output.status.success(),
+        "expected unscoped CLI invalidation to fail, stdout was:\n{}\nstderr was:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("invalidated unknown leaf child"),
+        "unexpected stderr:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn invalid_planner_mode_is_rejected_for_gate_command() -> Result<()> {
     let output = run_cli(
         &[
