@@ -227,6 +227,101 @@ fn ensure_plan_repairs_existing_project_directory_for_reopened_plan() -> Result<
 }
 
 #[test]
+fn bootstrap_backfills_legacy_root_plan_node_kind_as_parent() -> Result<()> {
+    let workspace = support::workspace()?;
+    let loopy_dir = workspace.path().join(".loopy");
+    fs::create_dir_all(&loopy_dir)?;
+    let connection = Connection::open(loopy_dir.join("loopy.db"))?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE GEN_PLAN__plans (
+            plan_id TEXT PRIMARY KEY,
+            workspace_root TEXT NOT NULL,
+            plan_name TEXT NOT NULL,
+            plan_root TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            plan_status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(workspace_root, plan_name)
+        );
+
+        CREATE TABLE GEN_PLAN__nodes (
+            plan_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            parent_node_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(plan_id, node_id),
+            UNIQUE(plan_id, relative_path)
+        );
+        "#,
+    )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__plans (
+            plan_id,
+            workspace_root,
+            plan_name,
+            plan_root,
+            task_type,
+            plan_status,
+            created_at,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            "plan-existing",
+            workspace.path().display().to_string(),
+            "demo",
+            workspace
+                .path()
+                .join(".loopy/plans/demo")
+                .display()
+                .to_string(),
+            "coding-task",
+            "active",
+            "0",
+            "0",
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            "plan-existing",
+            "root-1",
+            "demo.md",
+            "demo",
+            Option::<String>::None,
+            "0",
+            "0",
+        ],
+    )?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let root = runtime.inspect_node(InspectNodeRequest {
+        plan_id: "plan-existing".to_owned(),
+        node_id: None,
+        relative_path: Some("demo.md".to_owned()),
+    })?;
+    assert_eq!(root.node_kind, NodeKind::Parent);
+    assert_eq!(root.parent_relative_path, None);
+
+    let persisted_node_kind: String = Connection::open(loopy_dir.join("loopy.db"))?.query_row(
+        "SELECT node_kind
+         FROM GEN_PLAN__nodes
+         WHERE plan_id = ?1 AND node_id = ?2",
+        params!["plan-existing", "root-1"],
+        |row| row.get(0),
+    )?;
+    assert_eq!(persisted_node_kind, "parent");
+
+    Ok(())
+}
+
+#[test]
 fn ensure_plan_rejects_project_directory_redirect_for_existing_non_legacy_plan() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;

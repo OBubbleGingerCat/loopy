@@ -124,9 +124,10 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
 fn backfill_node_kinds(connection: &Connection) -> Result<()> {
     let mut statement = connection
         .prepare(
-            "SELECT plan_id, node_id, relative_path
-             FROM GEN_PLAN__nodes
-             WHERE node_kind = '' OR node_kind NOT IN ('parent', 'leaf')",
+            "SELECT nodes.plan_id, nodes.node_id, nodes.relative_path, plans.plan_name
+             FROM GEN_PLAN__nodes nodes
+             JOIN GEN_PLAN__plans plans ON plans.plan_id = nodes.plan_id
+             WHERE nodes.node_kind = '' OR nodes.node_kind NOT IN ('parent', 'leaf')",
         )
         .context("failed to prepare node_kind backfill query")?;
     let rows = statement
@@ -135,14 +136,15 @@ fn backfill_node_kinds(connection: &Connection) -> Result<()> {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })
         .context("failed to query node_kind backfill rows")?
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("failed to read node_kind backfill rows")?;
 
-    for (plan_id, node_id, relative_path) in rows {
-        let Some(node_kind) = infer_node_kind(&relative_path) else {
+    for (plan_id, node_id, relative_path, plan_name) in rows {
+        let Some(node_kind) = infer_node_kind(&relative_path, &plan_name) else {
             continue;
         };
         connection
@@ -185,12 +187,15 @@ fn is_duplicate_column_error(error: &SqliteError) -> bool {
     }
 }
 
-fn infer_node_kind(relative_path: &str) -> Option<&'static str> {
+fn infer_node_kind(relative_path: &str, plan_name: &str) -> Option<&'static str> {
     let path = PathBuf::from(relative_path);
     let file_name = path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".md")?;
     if stem.is_empty() {
         return None;
+    }
+    if path.components().count() == 1 && stem == plan_name {
+        return Some("parent");
     }
     let parent_dir_name = path.parent()?.file_name().and_then(|name| name.to_str());
     if parent_dir_name == Some(stem) {
