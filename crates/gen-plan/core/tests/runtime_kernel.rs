@@ -472,6 +472,61 @@ fn ensure_node_id_accepts_canonical_parent_and_child_paths() -> Result<()> {
 }
 
 #[test]
+fn ensure_node_id_accepts_root_plan_parent_for_scoped_children() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
+        params![
+            plan.plan_id.as_str(),
+            "root-1",
+            "demo.md",
+            "demo",
+            "parent",
+            Option::<String>::None
+        ],
+    )?;
+
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "demo/leaf.md".to_owned(),
+        parent_relative_path: Some("demo.md".to_owned()),
+    })?;
+    let nested_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "demo/api/api.md".to_owned(),
+        parent_relative_path: Some("demo.md".to_owned()),
+    })?;
+
+    let leaf = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id.clone(),
+        node_id: Some(leaf.node_id),
+        relative_path: None,
+    })?;
+    assert_eq!(leaf.parent_relative_path.as_deref(), Some("demo.md"));
+    let nested_parent = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(nested_parent.node_id),
+        relative_path: None,
+    })?;
+    assert_eq!(nested_parent.node_kind, NodeKind::Parent);
+    assert_eq!(
+        nested_parent.parent_relative_path.as_deref(),
+        Some("demo.md")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn ensure_node_id_rejects_noncanonical_node_shapes_and_missing_parents() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;

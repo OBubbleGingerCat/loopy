@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +82,7 @@ pub struct ExpectedFrontierGateTargetSummary {
 
 impl RefineGateTargetSelection {
     pub fn to_registration_request(&self, plan_id: String) -> RegisterRefineGateTargetsRequest {
+        let known_parent_paths = known_parent_paths(self);
         RegisterRefineGateTargetsRequest {
             plan_id,
             parent_candidates: self
@@ -92,7 +94,10 @@ impl RefineGateTargetSelection {
                 })
                 .map(|target| RefineParentRegistrationCandidate {
                     relative_path: target.parent_relative_path.clone(),
-                    parent_relative_path: ancestor_parent_self_path(&target.parent_relative_path),
+                    parent_relative_path: ancestor_parent_self_path(
+                        &target.parent_relative_path,
+                        &known_parent_paths,
+                    ),
                     reasons: target.reasons.clone(),
                 })
                 .collect(),
@@ -457,7 +462,7 @@ fn upsert_leaf(
         relative_path: relative_path.to_owned(),
         parent_relative_path: runtime_node
             .and_then(|node| node.parent_relative_path.clone())
-            .or_else(|| parent_self_path(relative_path)),
+            .or_else(|| parent_self_path(snapshot, relative_path)),
         reasons: vec![reason],
     });
 }
@@ -555,7 +560,28 @@ fn is_parent_target_path(snapshot: &RefineRuntimeNodeSnapshot, relative_path: &s
         || is_parent_path(relative_path)
 }
 
-fn parent_self_path(relative_path: &str) -> Option<String> {
+fn known_parent_paths(selection: &RefineGateTargetSelection) -> HashSet<String> {
+    let mut known = HashSet::new();
+    for target in &selection.frontier_targets {
+        known.insert(target.parent_relative_path.clone());
+    }
+    for target in &selection.leaf_targets {
+        if let Some(parent_relative_path) = &target.parent_relative_path {
+            known.insert(parent_relative_path.clone());
+        }
+    }
+    known
+}
+
+fn parent_self_path(snapshot: &RefineRuntimeNodeSnapshot, relative_path: &str) -> Option<String> {
+    root_scope_direct_parent_path(relative_path, 1)
+        .filter(|candidate| {
+            find_node(snapshot, candidate).is_some_and(|node| node.node_kind == NodeKind::Parent)
+        })
+        .or_else(|| scoped_parent_self_path(relative_path))
+}
+
+fn scoped_parent_self_path(relative_path: &str) -> Option<String> {
     let path = Path::new(relative_path);
     let parent = path.parent()?;
     let name = parent.file_name()?.to_str()?;
@@ -566,7 +592,16 @@ fn parent_self_path(relative_path: &str) -> Option<String> {
     (self_path != relative_path).then_some(self_path)
 }
 
-fn ancestor_parent_self_path(relative_path: &str) -> Option<String> {
+fn ancestor_parent_self_path(
+    relative_path: &str,
+    known_parent_paths: &HashSet<String>,
+) -> Option<String> {
+    root_scope_direct_parent_path(relative_path, 2)
+        .filter(|candidate| known_parent_paths.contains(candidate))
+        .or_else(|| scoped_ancestor_parent_self_path(relative_path))
+}
+
+fn scoped_ancestor_parent_self_path(relative_path: &str) -> Option<String> {
     let path = Path::new(relative_path);
     let parent = path.parent()?;
     let ancestor = parent.parent()?;
@@ -576,6 +611,24 @@ fn ancestor_parent_self_path(relative_path: &str) -> Option<String> {
         .to_string_lossy()
         .into_owned();
     (self_path != relative_path).then_some(self_path)
+}
+
+fn root_scope_direct_parent_path(
+    relative_path: &str,
+    child_component_count: usize,
+) -> Option<String> {
+    let components = Path::new(relative_path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => component.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.len() != child_component_count + 1 {
+        return None;
+    }
+    let parent_relative_path = format!("{}.md", components[0]);
+    (parent_relative_path != relative_path).then_some(parent_relative_path)
 }
 
 #[allow(dead_code)]

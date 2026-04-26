@@ -822,7 +822,7 @@ fn validate_registration_request(
     let node_kind = validate_registered_node_path("relative_path", relative_path)?;
     match parent_relative_path {
         Some(parent_relative_path) => {
-            require_parent_node_path("parent_relative_path", parent_relative_path)?;
+            require_reconcilable_parent_node_path("parent_relative_path", parent_relative_path)?;
             validate_direct_child_relationship(
                 relative_path,
                 Some(parent_relative_path),
@@ -868,12 +868,28 @@ fn validate_direct_child_relationship(
         NodeKind::Leaf => 1,
         NodeKind::Parent => 2,
     };
-    if child_components.len() != expected_components {
-        return Err(anyhow!(
-            "relative_path `{relative_path}` must be a direct child of parent_relative_path `{parent_relative_path}`"
-        ));
+    if child_components.len() == expected_components
+        || root_plan_parent_child_component_count(relative_path, parent_relative_path)
+            == Some(expected_components)
+    {
+        return Ok(());
     }
-    Ok(())
+    Err(anyhow!(
+        "relative_path `{relative_path}` must be a direct child of parent_relative_path `{parent_relative_path}`"
+    ))
+}
+
+fn root_plan_parent_child_component_count(
+    relative_path: &str,
+    parent_relative_path: &str,
+) -> Option<usize> {
+    if !is_root_plan_parent_path(parent_relative_path) {
+        return None;
+    }
+    let root_stem = Path::new(parent_relative_path).file_stem()?.to_str()?;
+    let child_relative = Path::new(relative_path).strip_prefix(root_stem).ok()?;
+    let component_count = child_relative.components().count();
+    (component_count > 0).then_some(component_count)
 }
 
 fn repair_plan_project_directory(

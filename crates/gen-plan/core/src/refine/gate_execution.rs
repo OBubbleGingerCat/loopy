@@ -305,6 +305,21 @@ fn run_frontier_target(
     report: &mut RefineGateExecutionReport,
 ) -> Result<RefineGateExecutionStatus, RefineGateExecutionError> {
     let mut first_failure_fingerprint = None::<String>;
+    let target_parent_relative_path = runtime
+        .inspect_node(InspectNodeRequest {
+            plan_id: request.plan_id.clone(),
+            node_id: Some(target.parent_node_id.clone()),
+            relative_path: None,
+        })
+        .map_err(
+            |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                reason: format!(
+                    "failed to inspect frontier target parent `{}`: {source}",
+                    target.parent_relative_path
+                ),
+            },
+        )?
+        .parent_relative_path;
     for attempt_index in 1..=request.retry_policy.max_invocation_retries {
         let fingerprint = frontier_fingerprint(runtime, request, target)?;
         if let Some(previous) = &first_failure_fingerprint {
@@ -325,7 +340,7 @@ fn run_frontier_target(
                 "frontier",
                 &target.parent_relative_path,
                 &target.parent_node_id,
-                Some(&target.parent_relative_path),
+                target_parent_relative_path.as_deref(),
                 &request.refine_context,
             )?),
         }) {

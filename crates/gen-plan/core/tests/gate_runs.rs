@@ -307,24 +307,33 @@ fn refine_gate_revalidation_passes_context_to_reviewer_prompts() -> Result<()> {
         project_directory,
     })?;
     let plan_root = workspace.path().join(".loopy/plans/refine-context-prompts");
-    fs::create_dir_all(plan_root.join("api"))?;
+    fs::create_dir_all(plan_root.join("api/auth"))?;
     fs::write(
         plan_root.join("api/api.md"),
-        "# API\n\n## Child Nodes\n\n- [Implement endpoint](./implement-endpoint.md)\n",
+        "# API\n\n## Child Nodes\n\n- [Auth](./auth/auth.md)\n",
     )?;
     fs::write(
-        plan_root.join("api/implement-endpoint.md"),
+        plan_root.join("api/auth/auth.md"),
+        "# Auth\n\n## Child Nodes\n\n- [Implement endpoint](./implement-endpoint.md)\n",
+    )?;
+    fs::write(
+        plan_root.join("api/auth/implement-endpoint.md"),
         "# Implement endpoint\n\nAdd the endpoint.\n",
     )?;
-    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+    let _parent = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
         relative_path: "api/api.md".to_owned(),
         parent_relative_path: None,
     })?;
+    let nested_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/auth/auth.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
     let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
-        relative_path: "api/implement-endpoint.md".to_owned(),
-        parent_relative_path: Some("api/api.md".to_owned()),
+        relative_path: "api/auth/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("api/auth/auth.md".to_owned()),
     })?;
 
     let report = {
@@ -339,21 +348,23 @@ fn refine_gate_revalidation_passes_context_to_reviewer_prompts() -> Result<()> {
                     parent_targets: vec![],
                     leaf_targets: vec![RegisteredRefineLeafTarget {
                         node_id: leaf.node_id.clone(),
-                        relative_path: "api/implement-endpoint.md".to_owned(),
-                        parent_relative_path: Some("api/api.md".to_owned()),
+                        relative_path: "api/auth/implement-endpoint.md".to_owned(),
+                        parent_relative_path: Some("api/auth/auth.md".to_owned()),
                         reasons: vec![RefineGateTargetReason::ContextInvalidated],
                     }],
                     frontier_targets: vec![RegisteredRefineFrontierTarget {
-                        parent_node_id: parent.node_id.clone(),
-                        parent_relative_path: "api/api.md".to_owned(),
-                        changed_child_relative_paths: vec!["api/implement-endpoint.md".to_owned()],
+                        parent_node_id: nested_parent.node_id.clone(),
+                        parent_relative_path: "api/auth/auth.md".to_owned(),
+                        changed_child_relative_paths: vec![
+                            "api/auth/implement-endpoint.md".to_owned(),
+                        ],
                         reasons: vec![RefineGateTargetReason::ChangedChildSet],
                     }],
                 },
                 retry_policy: RefineGateRetryPolicy::default(),
                 refine_context: RefineGateRevalidationContext {
                     processed_comment_blocks: vec![RefineGateProcessedCommentBlock {
-                        relative_path: "api/implement-endpoint.md".to_owned(),
+                        relative_path: "api/auth/implement-endpoint.md".to_owned(),
                         begin_comment_line: 3,
                         end_comment_line: 5,
                         comment_text: Some("processed feedback".to_owned()),
@@ -361,31 +372,31 @@ fn refine_gate_revalidation_passes_context_to_reviewer_prompts() -> Result<()> {
                     stale_result_handoff: vec![RefineStaleResultHandoff {
                         target_kind: StaleGateTargetKind::Leaf,
                         node_id: Some(leaf.node_id.clone()),
-                        relative_path: "api/implement-endpoint.md".to_owned(),
-                        parent_node_id: Some(parent.node_id.clone()),
-                        parent_relative_path: Some("api/api.md".to_owned()),
+                        relative_path: "api/auth/implement-endpoint.md".to_owned(),
+                        parent_node_id: Some(nested_parent.node_id.clone()),
+                        parent_relative_path: Some("api/auth/auth.md".to_owned()),
                         regenerated_child_relative_path: None,
                         classification: RefineStaleGateClassification::Stale,
                         invalidation_reason: "parent contract changed".to_owned(),
                     }],
                     rewrite_result: Some(RefineRewriteResult {
                         changed_files: vec![RefineChangedFile {
-                            relative_path: "api/api.md".to_owned(),
-                            node_id: Some(parent.node_id.clone()),
+                            relative_path: "api/auth/auth.md".to_owned(),
+                            node_id: Some(nested_parent.node_id.clone()),
                             change_kind: RefineChangedFileKind::TextUpdated,
                         }],
                         structural_changes: vec![RefineStructuralChange {
-                            parent_relative_path: "api/api.md".to_owned(),
-                            parent_node_id: Some(parent.node_id.clone()),
+                            parent_relative_path: "api/auth/auth.md".to_owned(),
+                            parent_node_id: Some(nested_parent.node_id.clone()),
                             change_kind: RefineStructuralChangeKind::ChangedChildSet,
                             added_child_relative_paths: vec![
-                                "api/implement-endpoint.md".to_owned(),
+                                "api/auth/implement-endpoint.md".to_owned(),
                             ],
                             removed_child_relative_paths: vec![],
                         }],
                         stale_nodes: vec![],
                         context_invalidations: vec![RefineContextInvalidation {
-                            relative_path: "api/implement-endpoint.md".to_owned(),
+                            relative_path: "api/auth/implement-endpoint.md".to_owned(),
                             node_id: Some(leaf.node_id.clone()),
                             reason: "parent context changed".to_owned(),
                         }],
@@ -427,10 +438,13 @@ fn refine_gate_revalidation_passes_context_to_reviewer_prompts() -> Result<()> {
         assert!(prompt.contains("processed feedback"));
         assert!(prompt.contains("Stale Handoff"));
         assert!(prompt.contains("Context Invalidations"));
-        assert!(prompt.contains("api/implement-endpoint.md"));
+        assert!(prompt.contains("api/auth/implement-endpoint.md"));
     }
     assert!(frontier_prompt.contains("Changed Child Links"));
     assert!(frontier_prompt.contains("parent context changed"));
+    assert!(frontier_prompt.contains("- Target Relative Path: api/auth/auth.md"));
+    assert!(frontier_prompt.contains("- Target Parent Relative Path: api/api.md"));
+    assert!(!frontier_prompt.contains("- Target Parent Relative Path: api/auth/auth.md"));
     Ok(())
 }
 
