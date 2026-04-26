@@ -767,6 +767,53 @@ fn root_scope_new_leaf_targets_use_root_plan_parent() {
 }
 
 #[test]
+fn root_scope_top_level_new_leaf_targets_use_root_plan_parent() {
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result: RefineRewriteResult {
+            changed_files: vec![RefineChangedFile {
+                relative_path: "intro.md".to_owned(),
+                node_id: None,
+                change_kind: RefineChangedFileKind::Created,
+            }],
+            structural_changes: vec![],
+            stale_nodes: vec![],
+            context_invalidations: vec![],
+            unchanged_nodes: vec![],
+            expected_gate_targets: vec![],
+            unresolved_follow_ups: vec![],
+            summary: Default::default(),
+        },
+        runtime_snapshot: RefineRuntimeNodeSnapshot {
+            nodes: vec![RefineRuntimeNodeSummary {
+                node_id: "root-1".to_owned(),
+                relative_path: "demo.md".to_owned(),
+                node_kind: NodeKind::Parent,
+                parent_node_id: None,
+                parent_relative_path: None,
+                child_relative_paths: vec![],
+            }],
+        },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+
+    let leaf = selection
+        .leaf_targets
+        .iter()
+        .find(|target| target.relative_path == "intro.md")
+        .expect("new top-level root-scope leaf should be selected");
+    assert_eq!(leaf.parent_relative_path.as_deref(), Some("demo.md"));
+    let registration = selection.to_registration_request("plan-1".to_owned());
+    assert_eq!(
+        registration.leaf_candidates[0]
+            .parent_relative_path
+            .as_deref(),
+        Some("demo.md")
+    );
+}
+
+#[test]
 fn root_scope_new_parent_registration_uses_root_plan_parent() {
     let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
         plan_id: "plan-1".to_owned(),

@@ -177,6 +177,8 @@ pub struct RunFrontierReviewGateRequest {
     pub planner_mode: PlannerMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refine_revalidation_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refine_invalidatable_leaf_node_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

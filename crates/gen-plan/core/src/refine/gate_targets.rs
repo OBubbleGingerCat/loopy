@@ -625,7 +625,33 @@ fn parent_self_path(snapshot: &RefineRuntimeNodeSnapshot, relative_path: &str) -
         .filter(|candidate| {
             find_node(snapshot, candidate).is_some_and(|node| node.node_kind == NodeKind::Parent)
         })
+        .or_else(|| top_level_root_parent_path(snapshot, relative_path))
         .or_else(|| scoped_parent_self_path(relative_path))
+}
+
+fn top_level_root_parent_path(
+    snapshot: &RefineRuntimeNodeSnapshot,
+    relative_path: &str,
+) -> Option<String> {
+    if Path::new(relative_path).components().count() != 1 {
+        return None;
+    }
+    let root_parent_paths = snapshot
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.node_kind == NodeKind::Parent
+                && node.parent_node_id.is_none()
+                && Path::new(&node.relative_path).components().count() == 1
+                && node.relative_path != relative_path
+        })
+        .map(|node| node.relative_path.clone())
+        .collect::<Vec<_>>();
+    if root_parent_paths.len() == 1 {
+        root_parent_paths.into_iter().next()
+    } else {
+        None
+    }
 }
 
 fn scoped_parent_self_path(relative_path: &str) -> Option<String> {

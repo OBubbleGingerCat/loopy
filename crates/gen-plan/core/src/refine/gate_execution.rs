@@ -229,7 +229,7 @@ fn run_leaf_target(
                 return Ok(RefineGateExecutionStatus::Passed);
             }
             Ok(response) => {
-                let status = status_for_review_issues(&response.issues);
+                let status = status_for_review_issues(&response.verdict, &response.issues);
                 if status == RefineGateExecutionStatus::PausedForUserDecision {
                     report.paused_for_user_decision = response
                         .issues
@@ -343,6 +343,9 @@ fn run_frontier_target(
                 target_parent_relative_path.as_deref(),
                 &request.refine_context,
             )?),
+            refine_invalidatable_leaf_node_ids: Some(invalidatable_leaf_node_ids_for_frontier(
+                runtime, request, target,
+            )?),
         }) {
             Ok(response) if response.passed => {
                 validate_frontier_response_contract(&response)?;
@@ -370,7 +373,7 @@ fn run_frontier_target(
                         report.invalidated_leaf_node_ids.push(invalidated.clone());
                     }
                 }
-                let status = status_for_review_issues(&response.issues);
+                let status = status_for_review_issues(&response.verdict, &response.issues);
                 if status == RefineGateExecutionStatus::PausedForUserDecision {
                     report.paused_for_user_decision = response
                         .issues
@@ -439,16 +442,78 @@ fn run_frontier_target(
     Ok(RefineGateExecutionStatus::ExhaustedInvocationRetries)
 }
 
-fn status_for_review_issues(issues: &[ReviewIssue]) -> RefineGateExecutionStatus {
-    if issues.iter().any(|issue| {
-        issue
-            .question_for_user
-            .as_deref()
-            .is_some_and(|q| !q.trim().is_empty())
-    }) {
+fn status_for_review_issues(verdict: &str, _issues: &[ReviewIssue]) -> RefineGateExecutionStatus {
+    if verdict == "pause_for_user_decision" {
         RefineGateExecutionStatus::PausedForUserDecision
     } else {
         RefineGateExecutionStatus::BlockedByReviewIssues
+    }
+}
+
+fn invalidatable_leaf_node_ids_for_frontier(
+    runtime: &Runtime,
+    request: &RunRefineGateRevalidationRequest,
+    target: &RegisteredRefineFrontierTarget,
+) -> Result<Vec<String>, RefineGateExecutionError> {
+    let mut leaf_node_ids = Vec::new();
+    collect_descendant_leaf_node_ids(
+        runtime,
+        &request.plan_id,
+        &target.parent_node_id,
+        &mut leaf_node_ids,
+    )?;
+    for child in &target.changed_child_relative_paths {
+        let Ok(node) = runtime.inspect_node(InspectNodeRequest {
+            plan_id: request.plan_id.clone(),
+            node_id: None,
+            relative_path: Some(child.clone()),
+        }) else {
+            continue;
+        };
+        match node.node_kind {
+            NodeKind::Leaf => push_unique(&mut leaf_node_ids, node.node_id),
+            NodeKind::Parent => collect_descendant_leaf_node_ids(
+                runtime,
+                &request.plan_id,
+                &node.node_id,
+                &mut leaf_node_ids,
+            )?,
+        }
+    }
+    Ok(leaf_node_ids)
+}
+
+fn collect_descendant_leaf_node_ids(
+    runtime: &Runtime,
+    plan_id: &str,
+    parent_node_id: &str,
+    leaf_node_ids: &mut Vec<String>,
+) -> Result<(), RefineGateExecutionError> {
+    let children = runtime
+        .list_children(ListChildrenRequest {
+            plan_id: plan_id.to_owned(),
+            parent_node_id: Some(parent_node_id.to_owned()),
+            parent_relative_path: None,
+        })
+        .map_err(
+            |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                reason: source.to_string(),
+            },
+        )?;
+    for child in children.children {
+        match child.node_kind {
+            NodeKind::Leaf => push_unique(leaf_node_ids, child.node_id),
+            NodeKind::Parent => {
+                collect_descendant_leaf_node_ids(runtime, plan_id, &child.node_id, leaf_node_ids)?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
     }
 }
 
@@ -1146,6 +1211,30 @@ mod tests {
             format!("{error:?}")
                 .contains("passed frontier target must not invalidate leaf approvals"),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn review_issue_status_uses_reviewer_verdict_not_question_fields() {
+        let issue = crate::ReviewIssue {
+            issue_kind: "needs_revision".to_owned(),
+            target_node_id: Some("leaf-1".to_owned()),
+            target_parent_node_id: None,
+            target_node_ids: None,
+            summary: "Needs revision.".to_owned(),
+            rationale: "The contract is incomplete.".to_owned(),
+            expected_revision: "Tighten the contract.".to_owned(),
+            question_for_user: Some("Should this mention the legacy API?".to_owned()),
+            decision_impact: Some("Clarifies the requested revision.".to_owned()),
+        };
+
+        assert_eq!(
+            status_for_review_issues("revise_leaf", &[issue.clone()]),
+            RefineGateExecutionStatus::BlockedByReviewIssues
+        );
+        assert_eq!(
+            status_for_review_issues("pause_for_user_decision", &[issue]),
+            RefineGateExecutionStatus::PausedForUserDecision
         );
     }
 

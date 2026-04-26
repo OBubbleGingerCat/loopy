@@ -275,6 +275,7 @@ fn refine_gate_consumers_use_persisted_project_directory() -> Result<()> {
             parent_node_id: parent.node_id,
             planner_mode: PlannerMode::Auto,
             refine_revalidation_context: None,
+            refine_invalidatable_leaf_node_ids: None,
         })?;
         (leaf_result, frontier_result)
     };
@@ -897,6 +898,7 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
             parent_node_id: parent.node_id.clone(),
             planner_mode: PlannerMode::Auto,
             refine_revalidation_context: None,
+            refine_invalidatable_leaf_node_ids: None,
         })?
     };
 
@@ -1015,12 +1017,113 @@ fn frontier_gate_refine_context_can_invalidate_detached_leaf_approval() -> Resul
             refine_revalidation_context: Some(
                 "Changed child set removed backend/removed.md".to_owned(),
             ),
+            refine_invalidatable_leaf_node_ids: Some(vec![removed_leaf.node_id.clone()]),
         })?
     };
 
     assert!(!result.passed);
     assert_eq!(result.verdict, "revise_frontier");
     assert_eq!(result.invalidated_leaf_node_ids, vec![removed_leaf.node_id]);
+
+    Ok(())
+}
+
+#[test]
+fn frontier_gate_refine_context_rejects_unrelated_leaf_invalidation() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "frontier-unrelated-leaf-invalidation".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/frontier-unrelated-leaf-invalidation");
+    fs::create_dir_all(plan_root.join("backend"))?;
+    fs::create_dir_all(plan_root.join("docs"))?;
+    fs::write(
+        plan_root.join("backend/backend.md"),
+        "# Backend\n\n## Child Nodes\n\n- [Current](./current.md)\n",
+    )?;
+    fs::write(plan_root.join("backend/current.md"), "# Current\n")?;
+    fs::write(
+        plan_root.join("docs/docs.md"),
+        "# Docs\n\n## Child Nodes\n\n- [Guide](./guide.md)\n",
+    )?;
+    fs::write(plan_root.join("docs/guide.md"), "# Guide\n")?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/backend.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/current.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+    let docs_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let sibling_leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/guide.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    let sibling_leaf_node_id = sibling_leaf.node_id.clone();
+    let frontier_output = serde_json::json!({
+        "verdict": "revise_frontier",
+        "summary": "Backend needs revision.",
+        "issues": [{
+            "issue_kind": "unrelated_invalidation",
+            "target_node_id": sibling_leaf_node_id,
+            "target_parent_node_id": docs_parent.node_id,
+            "target_node_ids": null,
+            "summary": "Invalidates a sibling branch.",
+            "rationale": "This should not be accepted for the backend frontier.",
+            "expected_revision": "Keep invalidations scoped to the target frontier.",
+            "question_for_user": null,
+            "decision_impact": null
+        }],
+        "invalidated_leaf_node_ids": [sibling_leaf_node_id]
+    })
+    .to_string();
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        r#"{"verdict":"approved_as_leaf","summary":"unused","issues":[]}"#,
+        &frontier_output,
+    )?;
+
+    let error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_frontier_review_gate(RunFrontierReviewGateRequest {
+                plan_id: plan.plan_id,
+                parent_node_id: parent.node_id,
+                planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: Some("Backend refine context".to_owned()),
+                refine_invalidatable_leaf_node_ids: None,
+            })
+            .expect_err("refine context must not allow unrelated leaf invalidations")
+    };
+    assert!(
+        format!("{error:#}").contains("invalidated unknown leaf child"),
+        "unexpected error: {error:#}"
+    );
 
     Ok(())
 }
@@ -1078,6 +1181,7 @@ fn frontier_gate_fails_closed_when_invalidations_field_is_missing() -> Result<()
                 parent_node_id: parent.node_id,
                 planner_mode: PlannerMode::Auto,
                 refine_revalidation_context: None,
+                refine_invalidatable_leaf_node_ids: None,
             })
             .expect_err("missing invalidated_leaf_node_ids should fail closed")
     };
@@ -1124,6 +1228,7 @@ fn frontier_gate_preflight_rejects_leaf_nodes_before_dispatch() -> Result<()> {
             parent_node_id: leaf.node_id,
             planner_mode: PlannerMode::Auto,
             refine_revalidation_context: None,
+            refine_invalidatable_leaf_node_ids: None,
         })
         .expect_err("frontier gate should reject leaf targets locally");
     assert!(

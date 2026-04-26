@@ -166,6 +166,7 @@ pub(crate) fn run_frontier_review_gate(
         parent_node_id,
         planner_mode,
         refine_revalidation_context,
+        refine_invalidatable_leaf_node_ids,
     } = request;
     let plan = query::load_gate_plan_context(connection, &plan_id)?;
     let parent_node = query::load_node_record(connection, &plan_id, &parent_node_id)?;
@@ -235,10 +236,14 @@ pub(crate) fn run_frontier_review_gate(
         other => bail!("unsupported frontier reviewer verdict `{other}`"),
     };
     validate_review_issues(&output.verdict, &output.issues, passed)?;
-    let valid_invalidations = if has_refine_revalidation_context(&refine_revalidation_context) {
-        select_plan_leaf_node_ids(connection, &plan_id)?
-    } else {
-        select_leaf_child_node_ids(connection, &plan_id, &parent_node_id)?
+    let valid_invalidations = match (
+        has_refine_revalidation_context(&refine_revalidation_context),
+        refine_invalidatable_leaf_node_ids,
+    ) {
+        (true, Some(node_ids)) => {
+            validate_refine_invalidatable_leaf_node_ids(connection, &plan_id, node_ids)?
+        }
+        _ => select_leaf_child_node_ids(connection, &plan_id, &parent_node_id)?,
     };
     for invalidated_node_id in &output.invalidated_leaf_node_ids {
         if !valid_invalidations
@@ -588,6 +593,27 @@ fn select_plan_leaf_node_ids(connection: &Connection, plan_id: &str) -> Result<V
         .context("failed to query plan leaf nodes for frontier gate")?
         .collect::<std::result::Result<Vec<String>, _>>()
         .context("failed to read plan leaf nodes for frontier gate")
+}
+
+fn validate_refine_invalidatable_leaf_node_ids(
+    connection: &Connection,
+    plan_id: &str,
+    node_ids: Vec<String>,
+) -> Result<Vec<String>> {
+    let plan_leaf_node_ids = select_plan_leaf_node_ids(connection, plan_id)?;
+    let mut valid = Vec::new();
+    for node_id in node_ids {
+        if !plan_leaf_node_ids
+            .iter()
+            .any(|candidate| candidate == &node_id)
+        {
+            bail!("refine invalidatable node_id `{node_id}` is not a tracked leaf in this plan");
+        }
+        if !valid.contains(&node_id) {
+            valid.push(node_id);
+        }
+    }
+    Ok(valid)
 }
 
 fn has_refine_revalidation_context(context: &Option<String>) -> bool {

@@ -207,6 +207,7 @@ fn main() -> Result<()> {
                 parent_node_id,
                 planner_mode: parse_planner_mode(&planner_mode)?,
                 refine_revalidation_context,
+                refine_invalidatable_leaf_node_ids: None,
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
