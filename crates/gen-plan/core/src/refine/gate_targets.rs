@@ -223,8 +223,22 @@ pub fn select_refine_gate_targets(
             &request.runtime_snapshot,
             &change.parent_relative_path,
             changed_child_relative_paths,
-            reason,
+            reason.clone(),
         );
+        for child in &change.added_child_relative_paths {
+            if matches!(
+                find_node(&request.runtime_snapshot, child).map(|node| node.node_kind),
+                Some(NodeKind::Leaf)
+            ) {
+                upsert_leaf(
+                    &mut selection.leaf_targets,
+                    &request.runtime_snapshot,
+                    child,
+                    None,
+                    reason.clone(),
+                );
+            }
+        }
     }
 
     apply_stale_handoff(&request, &mut selection);

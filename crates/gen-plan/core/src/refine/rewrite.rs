@@ -137,6 +137,7 @@ struct MutationReports {
 struct PreservedCommentBlock {
     start_line: usize,
     end_line: usize,
+    comment_text: Option<String>,
 }
 
 pub fn apply_refine_rewrite(
@@ -1186,6 +1187,7 @@ fn comment_source_to_preserved_block(source: &RefineCommentSource) -> PreservedC
     PreservedCommentBlock {
         start_line: source.begin_comment_line,
         end_line: source.end_comment_line,
+        comment_text: source.comment_text.clone(),
     }
 }
 
@@ -1194,7 +1196,11 @@ fn should_preserve_comment_block(
     preserved_blocks: &[PreservedCommentBlock],
 ) -> bool {
     preserved_blocks.iter().any(|preserved| {
-        preserved.start_line == block.start_line && preserved.end_line == block.end_line
+        (preserved.start_line == block.start_line && preserved.end_line == block.end_line)
+            || preserved
+                .comment_text
+                .as_deref()
+                .is_some_and(|text| text == block.text)
     })
 }
 
@@ -1404,6 +1410,61 @@ mod tests {
         assert!(updated.contains("BEGIN_COMMENT\nlater\nEND_COMMENT"));
         assert_eq!(updated.matches("BEGIN_COMMENT").count(), 1);
         assert_eq!(result.unresolved_follow_ups.len(), 1);
+    }
+
+    #[test]
+    fn refine_rewrite_preserves_blocked_comment_when_replacement_shifts_line_numbers() {
+        let plan_root = temp_plan_root();
+        fs::write(
+            plan_root.join("api.md"),
+            "# API\n\nBEGIN_COMMENT\napply this\nEND_COMMENT\n\nBody\n\nBEGIN_COMMENT\nlater\nEND_COMMENT\n",
+        )
+        .unwrap();
+        let applied = confirmed_decision(
+            Vec::new(),
+            vec![RefineRewriteAction {
+                action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                target_relative_path: Some("api.md".to_owned()),
+                parent_relative_path: None,
+                node_kind: Some("leaf".to_owned()),
+                link_change: None,
+                replacement_markdown: Some(
+                    "# API\n\nInserted line\n\nBEGIN_COMMENT\nlater\nEND_COMMENT\n\nUpdated\n"
+                        .to_owned(),
+                ),
+                rationale: None,
+            }],
+        );
+        let follow_up = RefineDecision {
+            source_comments: vec![RefineCommentSource {
+                source_path: "api.md".to_owned(),
+                begin_comment_line: 9,
+                end_comment_line: 11,
+                comment_text: Some("later".to_owned()),
+            }],
+            ..confirmed_decision(Vec::new(), Vec::new())
+        };
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![applied],
+            rewrite_scope: RefineRewriteScope {
+                rewrite_targets: vec![RefineRewriteTarget {
+                    relative_path: "api.md".to_owned(),
+                    node_id: Some("leaf-1".to_owned()),
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: vec![follow_up],
+        })
+        .expect("rewrite should preserve blocked follow-up comment by content");
+
+        let updated = fs::read_to_string(plan_root.join("api.md")).unwrap();
+        assert!(updated.contains("Inserted line"));
+        assert!(updated.contains("BEGIN_COMMENT\nlater\nEND_COMMENT"));
+        assert_eq!(updated.matches("BEGIN_COMMENT").count(), 1);
     }
 
     #[test]

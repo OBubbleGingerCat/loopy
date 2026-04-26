@@ -318,6 +318,65 @@ fn link_only_parent_edits_do_not_revalidate_unrelated_descendant_leaf_targets() 
 }
 
 #[test]
+fn added_existing_leaf_child_is_revalidated_before_frontier() {
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![],
+        structural_changes: vec![RefineStructuralChange {
+            parent_relative_path: "api/api.md".to_owned(),
+            parent_node_id: Some("parent-1".to_owned()),
+            change_kind: RefineStructuralChangeKind::ChangedChildSet,
+            added_child_relative_paths: vec!["api/attached.md".to_owned()],
+            removed_child_relative_paths: Vec::new(),
+        }],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result,
+        runtime_snapshot: RefineRuntimeNodeSnapshot {
+            nodes: vec![
+                RefineRuntimeNodeSummary {
+                    node_id: "parent-1".to_owned(),
+                    relative_path: "api/api.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: None,
+                    parent_relative_path: None,
+                    child_relative_paths: vec!["api/attached.md".to_owned()],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "leaf-1".to_owned(),
+                    relative_path: "api/attached.md".to_owned(),
+                    node_kind: NodeKind::Leaf,
+                    parent_node_id: Some("parent-1".to_owned()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    child_relative_paths: vec![],
+                },
+            ],
+        },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+
+    let leaf = selection
+        .leaf_targets
+        .iter()
+        .find(|target| target.relative_path == "api/attached.md")
+        .expect("added existing leaf should be revalidated");
+    assert_eq!(leaf.node_id.as_deref(), Some("leaf-1"));
+    assert!(
+        leaf.reasons
+            .contains(&RefineGateTargetReason::ChangedChildSet)
+    );
+    assert_eq!(selection.frontier_targets.len(), 1);
+}
+
+#[test]
 fn refine_gate_registration_prepares_targets_fail_closed() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -664,6 +723,55 @@ fn reconcile_parent_child_links_validates_before_detaching_children() -> Result<
     assert_eq!(children.children.len(), 1);
     assert_eq!(children.children[0].node_id, old_child.node_id);
     assert_eq!(children.children[0].relative_path, "api/old.md");
+    Ok(())
+}
+
+#[test]
+fn reconcile_parent_child_links_rejects_untracked_linked_children_before_detaching() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(plan_root.join("api/old.md"), "# Old\n")?;
+    fs::write(plan_root.join("api/untracked.md"), "# Untracked\n")?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Untracked](./untracked.md)\n",
+    )?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let old_child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/old.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    let error = runtime
+        .reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_relative_path: "api/api.md".to_owned(),
+        })
+        .expect_err("untracked linked child should reject reconciliation");
+    assert!(
+        format!("{error:#}").contains("untracked.md"),
+        "unexpected reconcile error: {error:#}"
+    );
+
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(children.children.len(), 1);
+    assert_eq!(children.children[0].node_id, old_child.node_id);
     Ok(())
 }
 

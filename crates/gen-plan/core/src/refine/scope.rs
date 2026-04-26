@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -92,6 +93,14 @@ pub enum RefineRewriteScopeError {
     InvalidScope,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RewritePathIntent {
+    Update,
+    MarkStale,
+    Create,
+    Remove,
+}
+
 impl fmt::Display for RefineRewriteScopeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{self:?}")
@@ -108,6 +117,7 @@ pub fn plan_refine_rewrite_scope(
     }
 
     let mut scope = RefineRewriteScope::default();
+    let mut path_intents = HashMap::<String, RewritePathIntent>::new();
     for decision in request.decisions {
         if matches!(
             decision.confirmation.status,
@@ -124,6 +134,11 @@ pub fn plan_refine_rewrite_scope(
                     let Some(relative_path) = action.target_relative_path else {
                         return Err(RefineRewriteScopeError::UnmappedImpact);
                     };
+                    record_path_intent(
+                        &mut path_intents,
+                        &relative_path,
+                        RewritePathIntent::Update,
+                    )?;
                     scope.rewrite_targets.push(RefineRewriteTarget {
                         relative_path,
                         node_id: None,
@@ -134,6 +149,11 @@ pub fn plan_refine_rewrite_scope(
                     let Some(relative_path) = action.target_relative_path else {
                         return Err(RefineRewriteScopeError::UnmappedImpact);
                     };
+                    record_path_intent(
+                        &mut path_intents,
+                        &relative_path,
+                        RewritePathIntent::MarkStale,
+                    )?;
                     let reason = action
                         .rationale
                         .unwrap_or_else(|| decision_rationale.clone());
@@ -147,6 +167,11 @@ pub fn plan_refine_rewrite_scope(
                     let Some(relative_path) = action.target_relative_path else {
                         return Err(RefineRewriteScopeError::UnmappedImpact);
                     };
+                    record_path_intent(
+                        &mut path_intents,
+                        &relative_path,
+                        RewritePathIntent::Create,
+                    )?;
                     scope.node_creations.push(RefineNodeCreation {
                         relative_path,
                         parent_relative_path: action.parent_relative_path,
@@ -157,6 +182,11 @@ pub fn plan_refine_rewrite_scope(
                     let Some(relative_path) = action.target_relative_path else {
                         return Err(RefineRewriteScopeError::UnmappedImpact);
                     };
+                    record_path_intent(
+                        &mut path_intents,
+                        &relative_path,
+                        RewritePathIntent::Remove,
+                    )?;
                     scope.node_removals.push(RefineNodeRemoval {
                         relative_path,
                         parent_relative_path: action.parent_relative_path,
@@ -193,6 +223,25 @@ pub fn plan_refine_rewrite_scope(
     }
 
     Ok(scope)
+}
+
+fn record_path_intent(
+    path_intents: &mut HashMap<String, RewritePathIntent>,
+    relative_path: &str,
+    intent: RewritePathIntent,
+) -> Result<(), RefineRewriteScopeError> {
+    match path_intents.get(relative_path).copied() {
+        Some(RewritePathIntent::Update) if intent == RewritePathIntent::Update => Ok(()),
+        Some(RewritePathIntent::MarkStale) if intent == RewritePathIntent::MarkStale => Ok(()),
+        Some(existing) if existing == intent => {
+            Err(RefineRewriteScopeError::ConflictingRewriteTargets)
+        }
+        Some(_) => Err(RefineRewriteScopeError::ConflictingRewriteTargets),
+        None => {
+            path_intents.insert(relative_path.to_owned(), intent);
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +329,38 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn scope_rejects_contradictory_actions_for_same_path() {
+        let plan_root = temp_plan_root();
+        let error = plan_refine_rewrite_scope(RefineRewriteScopeRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root,
+            decisions: vec![confirmed_decision(vec![
+                RefineRewriteAction {
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                    target_relative_path: Some("api/delete-me.md".to_owned()),
+                    parent_relative_path: None,
+                    node_kind: Some("leaf".to_owned()),
+                    link_change: None,
+                    replacement_markdown: Some("# Delete Me\n\nUpdated\n".to_owned()),
+                    rationale: None,
+                },
+                RefineRewriteAction {
+                    action_kind: RefineRewriteActionKind::RemoveNode,
+                    target_relative_path: Some("api/delete-me.md".to_owned()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    node_kind: Some("leaf".to_owned()),
+                    link_change: None,
+                    replacement_markdown: None,
+                    rationale: None,
+                },
+            ])],
+        })
+        .expect_err("update and remove for the same path should fail closed");
+
+        assert_eq!(error, RefineRewriteScopeError::ConflictingRewriteTargets);
     }
 
     fn confirmed_decision(rewrite_actions: Vec<RefineRewriteAction>) -> RefineDecision {

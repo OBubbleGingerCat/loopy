@@ -319,11 +319,13 @@ pub(crate) fn reconcile_parent_child_links(
             child_kind,
         )?;
         ensure_plan_markdown_file_exists(&plan.plan_root, child_relative_path)?;
-        let Some(child) =
-            load_node_record_by_relative_path(connection, &plan_id, child_relative_path)?
-        else {
-            continue;
-        };
+        let child = load_node_record_by_relative_path(connection, &plan_id, child_relative_path)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "linked child_relative_path `{child_relative_path}` must be tracked before reconciling parent `{}`",
+                    parent.relative_path
+                )
+            })?;
         validate_direct_child_relationship(
             &child.relative_path,
             Some(&parent.relative_path),
