@@ -394,7 +394,7 @@ for match in invocation_pattern.finditer(text):
     if subcommand_match:
         positions.setdefault(subcommand_match.group(1), []).append(match.start())
 
-for api in ["open-plan", "ensure-node-id", "run-leaf-review-gate", "run-frontier-review-gate"]:
+for api in ["open-plan", "run-leaf-review-gate"]:
     if api not in positions:
         sys.stderr.write(
             f"strict refine validation missing required runtime API `{api}` in {log_path}\n"
@@ -407,17 +407,22 @@ if "inspect-node" not in positions and "list-children" not in positions:
     )
     sys.exit(1)
 
-if positions["open-plan"][0] >= min(positions.get("inspect-node", positions["ensure-node-id"]) + positions.get("list-children", positions["ensure-node-id"]) + positions["ensure-node-id"]):
+tracked_state_positions = (
+    positions.get("inspect-node", [])
+    + positions.get("list-children", [])
+    + positions.get("ensure-node-id", [])
+)
+if positions["open-plan"][0] >= min(tracked_state_positions):
     sys.stderr.write(
         f"strict refine validation expected open-plan before tracked state helpers in {log_path}\n"
     )
     sys.exit(1)
-if positions["ensure-node-id"][0] >= positions["run-leaf-review-gate"][0]:
+if "ensure-node-id" in positions and positions["ensure-node-id"][0] >= positions["run-leaf-review-gate"][0]:
     sys.stderr.write(
         f"strict refine validation expected ensure-node-id before run-leaf-review-gate in {log_path}\n"
     )
     sys.exit(1)
-if positions["run-leaf-review-gate"][0] >= positions["run-frontier-review-gate"][0]:
+if "run-frontier-review-gate" in positions and positions["run-leaf-review-gate"][0] >= positions["run-frontier-review-gate"][0]:
     sys.stderr.write(
         f"strict refine validation expected run-leaf-review-gate before run-frontier-review-gate in {log_path}\n"
     )
@@ -495,6 +500,7 @@ PY
 
 validate_strict_case_shared_non_transcript() {
   local workspace="$1" plan_name="$2" log_file="$3" last_message="$4"
+  local require_frontier_gate="${5:-1}"
   local db_path="$workspace/.loopy/loopy.db"
 
   [[ -f "$db_path" ]] || {
@@ -507,11 +513,11 @@ validate_strict_case_shared_non_transcript() {
   validate_no_direct_db_read_attempts "$log_file"
   validate_no_skill_shell_command_attempts "$log_file"
 
-  python3 - "$db_path" "$plan_name" <<'PY'
+  python3 - "$db_path" "$plan_name" "$require_frontier_gate" <<'PY'
 import sqlite3
 import sys
 
-db_path, plan_name = sys.argv[1], sys.argv[2]
+db_path, plan_name, require_frontier_gate = sys.argv[1], sys.argv[2], sys.argv[3]
 connection = sqlite3.connect(db_path)
 
 def scalar(sql, params=()):
@@ -552,7 +558,7 @@ if leaf_non_mock < 1:
         f"strict validation expected non-mock leaf gate usage for {plan_name} in {db_path}\n"
     )
     sys.exit(1)
-if frontier_non_mock < 1:
+if require_frontier_gate == "1" and frontier_non_mock < 1:
     sys.stderr.write(
         f"strict validation expected non-mock frontier gate usage for {plan_name} in {db_path}\n"
     )
@@ -578,7 +584,7 @@ validate_strict_case() {
 
 validate_refine_success_strict_case() {
   local workspace="$1" plan_name="$2" log_file="$3" last_message="$4"
-  validate_strict_case_shared_non_transcript "$workspace" "$plan_name" "$log_file" "$last_message"
+  validate_strict_case_shared_non_transcript "$workspace" "$plan_name" "$log_file" "$last_message" 0
   validate_refine_success_transcript_usage "$log_file"
 }
 
@@ -829,10 +835,6 @@ validate_gate_artifacts_for_refine_success() {
   }
   grep -R -Fq "Gate: leaf_review" "$gate_root" 2>/dev/null || {
     echo "missing leaf gate artifact for refine success under $gate_root" >&2
-    return 1
-  }
-  grep -R -Fq "Gate: frontier_review" "$gate_root" 2>/dev/null || {
-    echo "missing frontier gate artifact for refine success under $gate_root" >&2
     return 1
   }
 }

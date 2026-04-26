@@ -146,23 +146,117 @@ pub fn apply_refine_rewrite(
     // Fixed order; stop on the first error before later mutation steps.
     ensure_rewrite_application_confirmed(&request)?;
     validate_refine_rewrite_request(&request)?;
-    let sanitized_payloads = cleanup_processed_comment_blocks(&request)?;
+    let rollback = RewriteRollback::capture(&request)?;
+    let result = apply_refine_rewrite_mutating(&request);
+    if result.is_err() {
+        rollback.restore()?;
+    }
+    result
+}
+
+fn apply_refine_rewrite_mutating(
+    request: &RefineRewriteRequest,
+) -> Result<RefineRewriteResult, RefineRewriteError> {
+    let sanitized_payloads = cleanup_processed_comment_blocks(request)?;
     let mut reports = MutationReports::default();
-    apply_in_place_node_rewrites(&request, &sanitized_payloads, &mut reports)?;
-    create_new_node_files(&request, &sanitized_payloads, &mut reports)?;
-    apply_explicit_removals(&request, &mut reports)?;
-    let stale_report = mark_stale_nodes(&request, &sanitized_payloads)?;
+    apply_in_place_node_rewrites(request, &sanitized_payloads, &mut reports)?;
+    create_new_node_files(request, &sanitized_payloads, &mut reports)?;
+    apply_explicit_removals(request, &mut reports)?;
+    let stale_report = mark_stale_nodes(request, &sanitized_payloads)?;
     reports.changed_files.extend(stale_report.changed_files);
     reports.stale_nodes.extend(stale_report.stale_nodes);
-    let link_report = apply_rewrite_link_updates(&request, &sanitized_payloads)?;
+    let link_report = apply_rewrite_link_updates(request, &sanitized_payloads)?;
     reports
         .changed_files
         .extend(link_report.changed_parent_files);
     reports
         .structural_changes
         .extend(link_report.structural_changes);
-    run_post_write_structural_checks(&request)?;
-    assemble_refine_rewrite_result(&request, reports)
+    run_post_write_structural_checks(request)?;
+    assemble_refine_rewrite_result(request, reports)
+}
+
+struct RewriteRollback {
+    plan_root: PathBuf,
+    files: Vec<RollbackFileSnapshot>,
+}
+
+struct RollbackFileSnapshot {
+    relative_path: String,
+    content: Option<Vec<u8>>,
+}
+
+impl RewriteRollback {
+    fn capture(request: &RefineRewriteRequest) -> Result<Self, RefineRewriteError> {
+        let mut files = Vec::new();
+        for relative_path in rollback_paths(request) {
+            let path = request.plan_root.join(&relative_path);
+            let content = if path.is_file() {
+                Some(fs::read(&path).map_err(|source| RefineRewriteError::Io {
+                    path: path.display().to_string(),
+                    source: source.to_string(),
+                })?)
+            } else {
+                None
+            };
+            files.push(RollbackFileSnapshot {
+                relative_path,
+                content,
+            });
+        }
+        Ok(Self {
+            plan_root: request.plan_root.clone(),
+            files,
+        })
+    }
+
+    fn restore(&self) -> Result<(), RefineRewriteError> {
+        for snapshot in &self.files {
+            let path = self.plan_root.join(&snapshot.relative_path);
+            match &snapshot.content {
+                Some(content) => {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent).map_err(|source| RefineRewriteError::Io {
+                            path: parent.display().to_string(),
+                            source: source.to_string(),
+                        })?;
+                    }
+                    fs::write(&path, content).map_err(|source| RefineRewriteError::Io {
+                        path: path.display().to_string(),
+                        source: source.to_string(),
+                    })?;
+                }
+                None if path.exists() => {
+                    fs::remove_file(&path).map_err(|source| RefineRewriteError::Io {
+                        path: path.display().to_string(),
+                        source: source.to_string(),
+                    })?;
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+fn rollback_paths(request: &RefineRewriteRequest) -> Vec<String> {
+    let mut paths = comment_cleanup_paths(request);
+    for target in &request.rewrite_scope.rewrite_targets {
+        push_unique_path(&mut paths, &target.relative_path);
+    }
+    for creation in &request.rewrite_scope.node_creations {
+        push_unique_path(&mut paths, &creation.relative_path);
+    }
+    for removal in &request.rewrite_scope.node_removals {
+        push_unique_path(&mut paths, &removal.relative_path);
+    }
+    for stale in &request.rewrite_scope.stale_descendants {
+        push_unique_path(&mut paths, &stale.relative_path);
+    }
+    for change in &request.rewrite_scope.link_changes {
+        push_unique_path(&mut paths, &change.parent_relative_path);
+    }
+    paths
 }
 
 fn ensure_rewrite_application_confirmed(
@@ -1760,6 +1854,48 @@ mod tests {
         assert!(!updated.contains("BEGIN_COMMENT"));
         assert!(!updated.contains("processed feedback"));
         assert!(updated.contains("Updated\n"));
+    }
+
+    #[test]
+    fn refine_rewrite_restores_files_when_post_write_checks_fail() {
+        let plan_root = temp_plan_root();
+        fs::write(plan_root.join("api.md"), "# API\n\nOriginal\n").unwrap();
+
+        let error = apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![confirmed_decision(
+                Vec::new(),
+                vec![RefineRewriteAction {
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                    target_relative_path: Some("api.md".to_owned()),
+                    parent_relative_path: None,
+                    node_kind: Some("leaf".to_owned()),
+                    link_change: None,
+                    replacement_markdown: Some("body without heading\n".to_owned()),
+                    rationale: None,
+                }],
+            )],
+            rewrite_scope: RefineRewriteScope {
+                rewrite_targets: vec![RefineRewriteTarget {
+                    relative_path: "api.md".to_owned(),
+                    node_id: Some("leaf-1".to_owned()),
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect_err("post-write structural check should reject missing heading");
+
+        assert!(matches!(
+            error,
+            RefineRewriteError::PostWriteStructureViolation { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(plan_root.join("api.md")).unwrap(),
+            "# API\n\nOriginal\n"
+        );
     }
 
     #[test]

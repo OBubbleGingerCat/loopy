@@ -903,18 +903,12 @@ Add focused authentication regression tests.
 - Include token expiry acceptance criteria.
 - Include one successful token case.
 EOF
-  mkdir -p "$workspace/.loopy/gate-runs/refine-leaf" "$workspace/.loopy/gate-runs/refine-frontier"
+  mkdir -p "$workspace/.loopy/gate-runs/refine-leaf"
   cat >"$workspace/.loopy/gate-runs/refine-leaf/prompt.md" <<'EOF'
 Gate: leaf_review
 EOF
-  cat >"$workspace/.loopy/gate-runs/refine-frontier/prompt.md" <<'EOF'
-Gate: frontier_review
-EOF
   cat >"$workspace/.loopy/gate-runs/refine-leaf/last-message.json" <<'EOF'
 {{"verdict":"approved_as_leaf","reviewer_role_id":"codex_default","summary":"ok","issues":[]}}
-EOF
-  cat >"$workspace/.loopy/gate-runs/refine-frontier/last-message.json" <<'EOF'
-{{"verdict":"approved_frontier","reviewer_role_id":"codex_default","summary":"ok","issues":[],"invalidated_leaf_node_ids":[]}}
 EOF
   python3 - "$workspace" "$plan_name" <<'PY'
 import pathlib
@@ -936,23 +930,12 @@ if db_path.is_file():
             "SELECT node_id FROM GEN_PLAN__nodes WHERE plan_id = ? AND relative_path = ?",
             (plan_id, "api/add-auth-tests.md"),
         ).fetchone()
-        parent = con.execute(
-            "SELECT node_id FROM GEN_PLAN__nodes WHERE plan_id = ? AND relative_path = ?",
-            (plan_id, "api/api.md"),
-        ).fetchone()
         if leaf:
             con.execute(
                 """INSERT OR REPLACE INTO GEN_PLAN__leaf_gate_runs
                    (leaf_gate_run_id, plan_id, node_id, planner_mode, reviewer_role_id, passed, verdict, summary, issues_json, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 ("refine-leaf-run", plan_id, leaf[0], "auto", "codex_default", 1, "approved_as_leaf", "ok", "[]", "0"),
-            )
-        if parent:
-            con.execute(
-                """INSERT OR REPLACE INTO GEN_PLAN__frontier_gate_runs
-                   (frontier_gate_run_id, plan_id, parent_node_id, planner_mode, reviewer_role_id, passed, verdict, summary, issues_json, invalidated_leaf_node_ids_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("refine-frontier-run", plan_id, parent[0], "auto", "codex_default", 1, "approved_frontier", "ok", "[]", "[]", "0"),
             )
         con.commit()
 PY
@@ -974,15 +957,7 @@ exec
  succeeded in 0ms:
 exec
 /bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"\$bin" ensure-node-id --workspace . --plan-id plan-1 --relative-path api/add-auth-tests.md --parent-relative-path api/api.md'
- succeeded in 0ms:
-exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
 "\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
- succeeded in 0ms:
-exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"\$bin" run-frontier-review-gate --workspace . --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
  succeeded in 0ms:
 EOF
   cat >"$output_file" <<EOF

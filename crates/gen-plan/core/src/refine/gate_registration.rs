@@ -206,6 +206,18 @@ pub fn register_refine_gate_targets(
     }
 
     let mut reconciled_frontiers = HashMap::<String, HashSet<String>>::new();
+    let mut frontier_parent_node_ids = HashMap::<String, String>::new();
+    for candidate in &frontier_candidates {
+        let parent =
+            inspect_parent(runtime, &plan_id, &candidate.parent_relative_path).map_err(|_| {
+                RefineGatePreparationError::MissingParentRegistration {
+                    child_relative_path: candidate.parent_relative_path.clone(),
+                    parent_relative_path: candidate.parent_relative_path.clone(),
+                }
+            })?;
+        frontier_parent_node_ids.insert(candidate.parent_relative_path.clone(), parent.node_id);
+    }
+
     for candidate in &frontier_candidates {
         if !frontier_needs_child_link_reconciliation(candidate)
             || reconciled_frontiers.contains_key(&candidate.parent_relative_path)
@@ -237,17 +249,17 @@ pub fn register_refine_gate_targets(
     }
 
     for candidate in frontier_candidates {
-        let parent =
-            inspect_parent(runtime, &plan_id, &candidate.parent_relative_path).map_err(|_| {
-                RefineGatePreparationError::MissingParentRegistration {
-                    child_relative_path: candidate.parent_relative_path.clone(),
-                    parent_relative_path: candidate.parent_relative_path.clone(),
-                }
+        let parent_node_id = frontier_parent_node_ids
+            .get(&candidate.parent_relative_path)
+            .cloned()
+            .ok_or_else(|| RefineGatePreparationError::MissingParentRegistration {
+                child_relative_path: candidate.parent_relative_path.clone(),
+                parent_relative_path: candidate.parent_relative_path.clone(),
             })?;
         let children = runtime
             .list_children(ListChildrenRequest {
                 plan_id: plan_id.clone(),
-                parent_node_id: Some(parent.node_id.clone()),
+                parent_node_id: Some(parent_node_id.clone()),
                 parent_relative_path: None,
             })
             .map_err(|source| RefineGatePreparationError::RegistrationFailed {
@@ -280,7 +292,7 @@ pub fn register_refine_gate_targets(
         registered
             .frontier_targets
             .push(RegisteredRefineFrontierTarget {
-                parent_node_id: parent.node_id,
+                parent_node_id,
                 parent_relative_path: candidate.parent_relative_path,
                 changed_child_relative_paths: stable_dedup_strings(
                     candidate.changed_child_relative_paths,
