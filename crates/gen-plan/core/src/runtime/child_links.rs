@@ -36,7 +36,7 @@ fn parse_markdown_child_link_url(line: &str) -> Option<String> {
     Some(rest[..url_end].to_owned())
 }
 
-fn balanced_markdown_url_end(value: &str) -> Option<usize> {
+pub(crate) fn balanced_markdown_url_end(value: &str) -> Option<usize> {
     let mut depth = 0usize;
     for (index, character) in value.char_indices() {
         match character {

@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::child_links::balanced_markdown_url_end;
 use crate::runtime::comments::{
     CommentBlock, CommentDiscoveryError, parse_comment_blocks_for_file,
 };
@@ -640,9 +641,29 @@ struct ParentLinkMutation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ChildLinkRow {
-    canonical_path: String,
-    rendered_line: String,
+enum ChildNodesRow {
+    PlanLink {
+        canonical_path: String,
+        rendered_line: String,
+    },
+    Other {
+        rendered_line: String,
+    },
+}
+
+impl ChildNodesRow {
+    fn canonical_path(&self) -> Option<&str> {
+        match self {
+            Self::PlanLink { canonical_path, .. } => Some(canonical_path),
+            Self::Other { .. } => None,
+        }
+    }
+
+    fn rendered_line(self) -> String {
+        match self {
+            Self::PlanLink { rendered_line, .. } | Self::Other { rendered_line } => rendered_line,
+        }
+    }
 }
 
 fn deduplicate_stale_descendants(
@@ -829,7 +850,7 @@ fn apply_single_link_update(
     let existing_rows = parse_existing_child_links(&change.parent_relative_path, &markdown)?;
     let existing_paths = existing_rows
         .iter()
-        .map(|row| row.canonical_path.as_str())
+        .filter_map(ChildNodesRow::canonical_path)
         .collect::<HashSet<_>>();
 
     let removed_child_relative_paths = change
@@ -845,10 +866,15 @@ fn apply_single_link_update(
     let mut remaining_rows = Vec::new();
     let mut remaining_paths = HashSet::new();
     for row in existing_rows {
-        if remove_set.contains(row.canonical_path.as_str()) {
+        if row
+            .canonical_path()
+            .is_some_and(|path| remove_set.contains(path))
+        {
             continue;
         }
-        remaining_paths.insert(row.canonical_path.clone());
+        if let Some(canonical_path) = row.canonical_path() {
+            remaining_paths.insert(canonical_path.to_owned());
+        }
         remaining_rows.push(row);
     }
 
@@ -880,7 +906,7 @@ fn apply_single_link_update(
 
     let mut rendered_rows = remaining_rows
         .into_iter()
-        .map(|row| row.rendered_line)
+        .map(ChildNodesRow::rendered_line)
         .collect::<Vec<_>>();
     for child in &added_child_relative_paths {
         let title = first_heading_title(&request.plan_root.join(child))?;
@@ -903,24 +929,28 @@ fn apply_single_link_update(
 fn parse_existing_child_links(
     parent_relative_path: &str,
     markdown: &str,
-) -> Result<Vec<ChildLinkRow>, RefineRewriteError> {
+) -> Result<Vec<ChildNodesRow>, RefineRewriteError> {
     let Some((_, body_start, section_end)) = child_nodes_section_offsets(markdown) else {
         return Ok(Vec::new());
     };
     let body = &markdown[body_start..section_end];
     let mut rows = Vec::new();
     for line in body.lines() {
-        let Some((label, url)) = parse_markdown_child_link(line) else {
+        if line.trim().is_empty() && rows.is_empty() {
             continue;
         };
-        let Some(canonical_path) = canonical_child_path_from_url(parent_relative_path, &url)?
-        else {
+        let rendered_line = line.to_owned();
+        let Some((_, url)) = parse_markdown_child_link(line) else {
+            rows.push(ChildNodesRow::Other { rendered_line });
             continue;
         };
-        rows.push(ChildLinkRow {
-            canonical_path,
-            rendered_line: format!("- [{label}]({url})"),
-        });
+        match canonical_child_path_from_url(parent_relative_path, &url)? {
+            Some(canonical_path) => rows.push(ChildNodesRow::PlanLink {
+                canonical_path,
+                rendered_line,
+            }),
+            None => rows.push(ChildNodesRow::Other { rendered_line }),
+        }
     }
     Ok(rows)
 }
@@ -931,7 +961,7 @@ fn parse_markdown_child_link(line: &str) -> Option<(String, String)> {
     let label_end = link_start.find("](")?;
     let label = &link_start[..label_end];
     let rest = &link_start[label_end + 2..];
-    let url_end = rest.find(')')?;
+    let url_end = balanced_markdown_url_end(rest)?;
     Some((label.to_owned(), rest[..url_end].to_owned()))
 }
 
@@ -1153,10 +1183,13 @@ fn run_post_write_structural_checks(
             source: source.to_string(),
         })?;
         for row in parse_existing_child_links(parent, &markdown)? {
-            if !request.plan_root.join(&row.canonical_path).is_file() {
+            let Some(canonical_path) = row.canonical_path() else {
+                continue;
+            };
+            if !request.plan_root.join(canonical_path).is_file() {
                 return Err(RefineRewriteError::PostWriteStructureViolation {
                     relative_path: parent.to_owned(),
-                    reason: format!("broken child link: {}", row.canonical_path),
+                    reason: format!("broken child link: {canonical_path}"),
                 });
             }
         }
@@ -2232,6 +2265,81 @@ mod tests {
         })
         .expect_err("missing add target should fail during link update");
         assert_eq!(missing_add_error, RefineRewriteError::InvalidRewriteScope);
+    }
+
+    #[test]
+    fn refine_link_updates_parse_balanced_child_link_urls() {
+        let plan_root = temp_plan_root();
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(
+            plan_root.join("api/api.md"),
+            "# API\n\n## Child Nodes\n\n- [Notes](./notes(v2).md)\n- [Remove](./remove.md)\n",
+        )
+        .unwrap();
+        fs::write(plan_root.join("api/notes(v2).md"), "# Notes\n").unwrap();
+        fs::write(plan_root.join("api/remove.md"), "# Remove\n").unwrap();
+        fs::write(plan_root.join("api/add.md"), "# Add\n").unwrap();
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![confirmed_decision(Vec::new(), Vec::new())],
+            rewrite_scope: RefineRewriteScope {
+                link_changes: vec![crate::refine::RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: vec!["api/add.md".to_owned()],
+                    remove_child_relative_paths: vec!["api/remove.md".to_owned()],
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect("balanced child link URLs should not fail link updates");
+
+        let api_markdown = fs::read_to_string(plan_root.join("api/api.md")).unwrap();
+        assert!(api_markdown.contains("- [Notes](./notes(v2).md)"));
+        assert!(api_markdown.contains("- [Add](./add.md)"));
+        assert!(!api_markdown.contains("remove.md"));
+    }
+
+    #[test]
+    fn refine_link_updates_preserve_non_link_child_nodes_rows() {
+        let plan_root = temp_plan_root();
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(
+            plan_root.join("api/api.md"),
+            "# API\n\n## Child Nodes\n\nKeep these rows.\n- [Keep](./keep.md)\n- [Anchor](#local-anchor)\n- [External](https://example.com/reference)\n<!-- child note -->\n- [Remove](./remove.md)\n\n## Notes\n\nDo not edit.\n",
+        )
+        .unwrap();
+        fs::write(plan_root.join("api/keep.md"), "# Keep\n").unwrap();
+        fs::write(plan_root.join("api/remove.md"), "# Remove\n").unwrap();
+        fs::write(plan_root.join("api/add.md"), "# Add\n").unwrap();
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![confirmed_decision(Vec::new(), Vec::new())],
+            rewrite_scope: RefineRewriteScope {
+                link_changes: vec![crate::refine::RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: vec!["api/add.md".to_owned()],
+                    remove_child_relative_paths: vec!["api/remove.md".to_owned()],
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect("non-link child node rows should not block link updates");
+
+        let api_markdown = fs::read_to_string(plan_root.join("api/api.md")).unwrap();
+        assert!(api_markdown.contains("Keep these rows."));
+        assert!(api_markdown.contains("- [Anchor](#local-anchor)"));
+        assert!(api_markdown.contains("- [External](https://example.com/reference)"));
+        assert!(api_markdown.contains("<!-- child note -->"));
+        assert!(api_markdown.contains("- [Keep](./keep.md)"));
+        assert!(api_markdown.contains("- [Add](./add.md)"));
+        assert!(api_markdown.contains("## Notes\n\nDo not edit."));
+        assert!(!api_markdown.contains("remove.md"));
     }
 
     #[test]
