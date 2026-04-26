@@ -638,6 +638,101 @@ fn smoke_script_strict_validation_accepts_single_quoted_helper_paths() -> Result
 }
 
 #[test]
+fn smoke_script_strict_validation_checks_refine_helper_contract() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let fake_bin_dir = temp.path().join("bin-success");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_refine_success")?;
+    let success_run_root = temp.path().join("run-strict-refine-success");
+    let success_path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let success = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &success_run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "refine-api-plan")
+        .env("PATH", success_path)
+        .output()
+        .context("failed to run strict refine helper smoke")?;
+    if !success.status.success() {
+        bail!(
+            "strict refine helper smoke failed\n{}",
+            combined_output(&success)
+        );
+    }
+
+    let malformed_run_root = temp.path().join("run-strict-refine-malformed");
+    let malformed = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &malformed_run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "refine-malformed-comments")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake_bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .context("failed to run strict malformed refine smoke")?;
+    if !malformed.status.success() {
+        bail!(
+            "strict malformed refine smoke failed\n{}",
+            combined_output(&malformed)
+        );
+    }
+
+    let bad_fake_bin_dir = temp.path().join("bin-shell-command");
+    fs::create_dir_all(&bad_fake_bin_dir)?;
+    write_fake_codex(
+        &bad_fake_bin_dir.join("codex"),
+        "strict_refine_shell_command",
+    )?;
+    let failure_run_root = temp.path().join("run-strict-refine-shell-command");
+    let failure_path = format!(
+        "{}:{}",
+        bad_fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let failure = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &failure_run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "refine-api-plan")
+        .env("PATH", failure_path)
+        .output()
+        .context("failed to run strict refine shell-command smoke")?;
+
+    assert!(
+        !failure.status.success(),
+        "strict validation should reject shell execution of loopy:gen-plan\n{}",
+        combined_output(&failure)
+    );
+    assert!(
+        combined_output(&failure).contains("detected shell execution attempt for loopy:gen-plan"),
+        "expected shell-command rejection in output:\n{}",
+        combined_output(&failure)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn smoke_script_rejects_direct_db_write_attempts_from_exec_transcript() -> Result<()> {
     let repo_root = repo_root();
     let temp = support::workspace()?;
@@ -778,6 +873,123 @@ plan_name="$(printf '%s\n' "$prompt" | grep -m1 '^- Desired plan name: `' | cut 
 
 if [[ -z "$plan_name" ]]; then
   plan_name="$(printf '%s' "$prompt" | grep -oE -- '--plan-name [^` ]+' | head -n1 | awk '{{print $2}}')"
+fi
+
+if [[ "$prompt" == *"--refine <plan-name>"* ]]; then
+  if [[ "$plan_name" == "refine-malformed-comments" ]]; then
+    cat <<EOF
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"\$bin" open-plan --workspace . --plan-name $plan_name'
+ succeeded in 0ms:
+malformed nested BEGIN_COMMENT in api/add-auth-tests.md at line 6; fail closed before rewrite or gates
+EOF
+    cat >"$output_file" <<EOF
+{{"plan_name":"$plan_name","status":"rejected","error":"malformed nested BEGIN_COMMENT in api/add-auth-tests.md at line 6"}}
+EOF
+    echo "malformed nested BEGIN_COMMENT in api/add-auth-tests.md at line 6" >&2
+    exit 0
+  fi
+
+  leaf="$workspace/.loopy/plans/$plan_name/api/add-auth-tests.md"
+  mkdir -p "$(dirname "$leaf")"
+  cat >"$leaf" <<'EOF'
+# Add Auth Tests
+
+## Goal
+Add focused authentication regression tests.
+
+## Acceptance Criteria
+- Include token expiry acceptance criteria.
+- Include one successful token case.
+EOF
+  mkdir -p "$workspace/.loopy/gate-runs/refine-leaf" "$workspace/.loopy/gate-runs/refine-frontier"
+  cat >"$workspace/.loopy/gate-runs/refine-leaf/prompt.md" <<'EOF'
+Gate: leaf_review
+EOF
+  cat >"$workspace/.loopy/gate-runs/refine-frontier/prompt.md" <<'EOF'
+Gate: frontier_review
+EOF
+  cat >"$workspace/.loopy/gate-runs/refine-leaf/last-message.json" <<'EOF'
+{{"verdict":"approved_as_leaf","reviewer_role_id":"codex_default","summary":"ok","issues":[]}}
+EOF
+  cat >"$workspace/.loopy/gate-runs/refine-frontier/last-message.json" <<'EOF'
+{{"verdict":"approved_frontier","reviewer_role_id":"codex_default","summary":"ok","issues":[],"invalidated_leaf_node_ids":[]}}
+EOF
+  python3 - "$workspace" "$plan_name" <<'PY'
+import pathlib
+import sqlite3
+import sys
+
+workspace = pathlib.Path(sys.argv[1])
+plan_name = sys.argv[2]
+db_path = workspace / ".loopy" / "loopy.db"
+if db_path.is_file():
+    con = sqlite3.connect(db_path)
+    row = con.execute(
+        "SELECT plan_id FROM GEN_PLAN__plans WHERE plan_name = ?",
+        (plan_name,),
+    ).fetchone()
+    if row:
+        plan_id = row[0]
+        leaf = con.execute(
+            "SELECT node_id FROM GEN_PLAN__nodes WHERE plan_id = ? AND relative_path = ?",
+            (plan_id, "api/add-auth-tests.md"),
+        ).fetchone()
+        parent = con.execute(
+            "SELECT node_id FROM GEN_PLAN__nodes WHERE plan_id = ? AND relative_path = ?",
+            (plan_id, "api/api.md"),
+        ).fetchone()
+        if leaf:
+            con.execute(
+                """INSERT OR REPLACE INTO GEN_PLAN__leaf_gate_runs
+                   (leaf_gate_run_id, plan_id, node_id, planner_mode, reviewer_role_id, passed, verdict, summary, issues_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("refine-leaf-run", plan_id, leaf[0], "auto", "codex_default", 1, "approved_as_leaf", "ok", "[]", "0"),
+            )
+        if parent:
+            con.execute(
+                """INSERT OR REPLACE INTO GEN_PLAN__frontier_gate_runs
+                   (frontier_gate_run_id, plan_id, parent_node_id, planner_mode, reviewer_role_id, passed, verdict, summary, issues_json, invalidated_leaf_node_ids_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("refine-frontier-run", plan_id, parent[0], "auto", "codex_default", 1, "approved_frontier", "ok", "[]", "[]", "0"),
+            )
+        con.commit()
+PY
+  if [[ "$mode" == "strict_refine_shell_command" ]]; then
+    cat <<EOF
+exec
+/bin/bash -lc 'loopy:gen-plan --refine $plan_name'
+ failed in 0ms:
+EOF
+  fi
+  cat <<EOF
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"\$bin" open-plan --workspace . --plan-name $plan_name'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"\$bin" inspect-node --workspace . --plan-id plan-1 --relative-path api/api.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"\$bin" ensure-node-id --workspace . --plan-id plan-1 --relative-path api/add-auth-tests.md --parent-relative-path api/api.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+"\$bin" run-frontier-review-gate --workspace . --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
+ succeeded in 0ms:
+EOF
+  cat >"$output_file" <<EOF
+{{"plan_name":"$plan_name","status":"ok"}}
+EOF
+  echo "fake-codex-refine"
+  exit 0
 fi
 
     if [[ "$mode" == "success" || "$mode" == "strict_success" || "$mode" == "strict_success_direct_path" || "$mode" == "strict_success_single_quoted_helper" || "$mode" == "strict_direct_db_write" || "$mode" == "strict_direct_db_read" ]]; then

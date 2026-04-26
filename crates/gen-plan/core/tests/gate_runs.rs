@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use loopy_gen_plan::{
-    EnsureNodeIdRequest, EnsurePlanRequest, PlannerMode, RunFrontierReviewGateRequest,
-    RunLeafReviewGateRequest, Runtime,
+    EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, PlannerMode,
+    RunFrontierReviewGateRequest, RunLeafReviewGateRequest, Runtime,
 };
 use rusqlite::{Connection, params};
 
@@ -206,6 +206,76 @@ fn leaf_gate_uses_repaired_project_directory_for_existing_plan() -> Result<()> {
 }
 
 #[test]
+fn refine_gate_consumers_use_persisted_project_directory() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), &project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "refine-gate-project-dir".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let reopened = runtime.open_plan(OpenPlanRequest {
+        plan_name: "refine-gate-project-dir".to_owned(),
+    })?;
+    assert_eq!(reopened.plan_id, plan.plan_id);
+    assert_ne!(project_directory, workspace.path());
+    assert_ne!(project_directory, PathBuf::from(&reopened.plan_root));
+
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/refine-gate-project-dir");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(plan_root.join("api/api.md"), "# API\n")?;
+    fs::write(
+        plan_root.join("api/implement-endpoint.md"),
+        "# Implement endpoint\n",
+    )?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: reopened.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: reopened.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    let (leaf_result, frontier_result) = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        let leaf_result = runtime.run_leaf_review_gate(RunLeafReviewGateRequest {
+            plan_id: reopened.plan_id.clone(),
+            node_id: leaf.node_id,
+            planner_mode: PlannerMode::Auto,
+        })?;
+        let frontier_result = runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
+            plan_id: reopened.plan_id,
+            parent_node_id: parent.node_id,
+            planner_mode: PlannerMode::Auto,
+        })?;
+        (leaf_result, frontier_result)
+    };
+
+    assert!(leaf_result.passed);
+    assert_eq!(leaf_result.summary, REAL_LEAF_SUMMARY);
+    assert!(frontier_result.passed);
+    assert_eq!(frontier_result.summary, REAL_FRONTIER_SUMMARY);
+
+    Ok(())
+}
+
+#[test]
 fn leaf_gate_rejects_non_leaf_nodes() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -262,7 +332,11 @@ fn leaf_gate_preflight_rejects_missing_target_markdown_before_dispatch() -> Resu
         task_type: "coding-task".to_owned(),
         project_directory: workspace.path().to_path_buf(),
     })?;
-    fs::create_dir_all(workspace.path().join(".loopy/plans/leaf-preflight-missing/api"))?;
+    fs::create_dir_all(
+        workspace
+            .path()
+            .join(".loopy/plans/leaf-preflight-missing/api"),
+    )?;
     fs::write(
         workspace
             .path()
@@ -288,8 +362,7 @@ fn leaf_gate_preflight_rejects_missing_target_markdown_before_dispatch() -> Resu
         })
         .expect_err("missing leaf markdown should fail locally before reviewer dispatch");
     assert!(
-        format!("{error:#}").contains("plan markdown")
-            || format!("{error:#}").contains("missing"),
+        format!("{error:#}").contains("plan markdown") || format!("{error:#}").contains("missing"),
         "unexpected error: {error:#}"
     );
 
@@ -321,7 +394,9 @@ fn leaf_gate_fails_closed_on_malformed_reviewer_json() -> Result<()> {
     })?;
     fs::create_dir_all(workspace.path().join(".loopy/plans/malformed-leaf/api"))?;
     fs::write(
-        workspace.path().join(".loopy/plans/malformed-leaf/api/api.md"),
+        workspace
+            .path()
+            .join(".loopy/plans/malformed-leaf/api/api.md"),
         "# API\n",
     )?;
     let leaf_path = workspace
@@ -381,7 +456,11 @@ fn leaf_gate_fails_closed_when_required_fields_are_missing() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: project_directory,
     })?;
-    fs::create_dir_all(workspace.path().join(".loopy/plans/missing-fields-leaf/api"))?;
+    fs::create_dir_all(
+        workspace
+            .path()
+            .join(".loopy/plans/missing-fields-leaf/api"),
+    )?;
     fs::write(
         workspace
             .path()
@@ -508,7 +587,11 @@ fn leaf_gate_fails_closed_when_issue_payload_has_unknown_fields() -> Result<()> 
         task_type: "coding-task".to_owned(),
         project_directory,
     })?;
-    fs::create_dir_all(workspace.path().join(".loopy/plans/unknown-issue-field-leaf/api"))?;
+    fs::create_dir_all(
+        workspace
+            .path()
+            .join(".loopy/plans/unknown-issue-field-leaf/api"),
+    )?;
     fs::write(
         workspace
             .path()
@@ -715,7 +798,9 @@ fn frontier_gate_preflight_rejects_leaf_nodes_before_dispatch() -> Result<()> {
         task_type: "coding-task".to_owned(),
         project_directory: workspace.path().to_path_buf(),
     })?;
-    let plan_root = workspace.path().join(".loopy/plans/frontier-preflight-leaf");
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/frontier-preflight-leaf");
     fs::create_dir_all(plan_root.join("backend"))?;
     fs::write(plan_root.join("backend/backend.md"), "# Backend\n")?;
     fs::write(
@@ -741,8 +826,7 @@ fn frontier_gate_preflight_rejects_leaf_nodes_before_dispatch() -> Result<()> {
         })
         .expect_err("frontier gate should reject leaf targets locally");
     assert!(
-        format!("{error:#}").contains("frontier review")
-            || format!("{error:#}").contains("parent"),
+        format!("{error:#}").contains("frontier review") || format!("{error:#}").contains("parent"),
         "unexpected error: {error:#}"
     );
 

@@ -35,9 +35,10 @@ pub use impact::{
     RefineImpactMappingIssue, analyze_refine_comment_impact,
 };
 pub use rewrite::{
-    RefineChangedFile, RefineChangedFileKind, RefineContextInvalidation, RefineRewriteError,
-    RefineRewriteRequest, RefineRewriteResult, RefineStaleNode, RefineStructuralChange,
-    RefineStructuralChangeKind, RefineUnchangedNode, apply_refine_rewrite,
+    RefineChangedFile, RefineChangedFileKind, RefineContextInvalidation, RefineLinkUpdateReport,
+    RefineRewriteError, RefineRewriteRequest, RefineRewriteResult, RefineStaleMarkReport,
+    RefineStaleNode, RefineStructuralChange, RefineStructuralChangeKind, RefineUnchangedNode,
+    apply_refine_rewrite,
 };
 pub use runtime_state::{
     BuildRefineGateSelectionInputsRequest, RefineGateSelectionInputs,

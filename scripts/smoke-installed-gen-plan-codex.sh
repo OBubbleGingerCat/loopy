@@ -330,7 +330,170 @@ for earlier, later in zip(ordering, ordering[1:]):
 PY
 }
 
-validate_strict_case() {
+validate_no_skill_shell_command_attempts() {
+  local log_file="$1"
+  python3 - "$log_file" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+command_blocks = re.findall(
+    r"(?ms)^exec\s*\n(.*?)(?=^\s*(?:succeeded|exited \d+|failed) in\b|^exec\s*$|\Z)",
+    text,
+)
+pattern = re.compile(r"(?<![\w/.-])loopy:gen-plan(?:\s|$)")
+
+for block in command_blocks:
+    match = pattern.search(block)
+    if match:
+        snippet = block[max(0, match.start() - 120):match.end() + 120].strip()
+        sys.stderr.write(
+            f"detected shell execution attempt for loopy:gen-plan in {log_path}:\n{snippet}\n"
+        )
+        sys.exit(1)
+PY
+}
+
+validate_refine_success_transcript_usage() {
+  local log_file="$1"
+  python3 - "$log_file" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+
+helper_pattern = (
+    r'(?:'
+    r'"\$bin"'
+    r'|'
+    r'"[^"\n]*/loopy-gen-plan"'
+    r'|'
+    r"'[^'\n]*/loopy-gen-plan'"
+    r'|'
+    r"[^'\"\s\n]*/loopy-gen-plan"
+    r')'
+)
+subcommand_pattern = re.compile(
+    helper_pattern
+    + r"""(?:\s+--[A-Za-z0-9_-]+(?:\s+(?:"[^"\n]*"|'[^'\n]*'|[^\s"'\n]+))?)*"""
+    + r'\s+'
+    + r'(ensure-plan|open-plan|inspect-node|list-children|ensure-node-id|run-leaf-review-gate|run-frontier-review-gate)'
+    + r'\b(?!\s+--help)'
+)
+invocation_pattern = re.compile(
+    r'(?ms)^exec\s*\n(?P<command>.+?)(?=^exec\s*$|^\s*(?:succeeded|exited \d+|failed) in\b|\Z)'
+)
+
+positions = {}
+for match in invocation_pattern.finditer(text):
+    subcommand_match = subcommand_pattern.search(match.group("command"))
+    if subcommand_match:
+        positions.setdefault(subcommand_match.group(1), []).append(match.start())
+
+for api in ["open-plan", "ensure-node-id", "run-leaf-review-gate", "run-frontier-review-gate"]:
+    if api not in positions:
+        sys.stderr.write(
+            f"strict refine validation missing required runtime API `{api}` in {log_path}\n"
+        )
+        sys.exit(1)
+
+if "inspect-node" not in positions and "list-children" not in positions:
+    sys.stderr.write(
+        f"strict refine validation missing inspect-node or list-children in {log_path}\n"
+    )
+    sys.exit(1)
+
+if positions["open-plan"][0] >= min(positions.get("inspect-node", positions["ensure-node-id"]) + positions.get("list-children", positions["ensure-node-id"]) + positions["ensure-node-id"]):
+    sys.stderr.write(
+        f"strict refine validation expected open-plan before tracked state helpers in {log_path}\n"
+    )
+    sys.exit(1)
+if positions["ensure-node-id"][0] >= positions["run-leaf-review-gate"][0]:
+    sys.stderr.write(
+        f"strict refine validation expected ensure-node-id before run-leaf-review-gate in {log_path}\n"
+    )
+    sys.exit(1)
+if positions["run-leaf-review-gate"][0] >= positions["run-frontier-review-gate"][0]:
+    sys.stderr.write(
+        f"strict refine validation expected run-leaf-review-gate before run-frontier-review-gate in {log_path}\n"
+    )
+    sys.exit(1)
+PY
+}
+
+validate_refine_malformed_transcript_usage() {
+  local log_file="$1"
+  python3 - "$log_file" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+
+helper_pattern = (
+    r'(?:'
+    r'"\$bin"'
+    r'|'
+    r'"[^"\n]*/loopy-gen-plan"'
+    r'|'
+    r"'[^'\n]*/loopy-gen-plan'"
+    r'|'
+    r"[^'\"\s\n]*/loopy-gen-plan"
+    r')'
+)
+subcommand_pattern = re.compile(
+    helper_pattern
+    + r"""(?:\s+--[A-Za-z0-9_-]+(?:\s+(?:"[^"\n]*"|'[^'\n]*'|[^\s"'\n]+))?)*"""
+    + r'\s+'
+    + r'(open-plan|inspect-node|list-children|ensure-node-id|run-leaf-review-gate|run-frontier-review-gate)'
+    + r'\b(?!\s+--help)'
+)
+invocation_pattern = re.compile(
+    r'(?ms)^exec\s*\n(?P<command>.+?)(?=^exec\s*$|^\s*(?:succeeded|exited \d+|failed) in\b|\Z)'
+)
+
+positions = {}
+for match in invocation_pattern.finditer(text):
+    subcommand_match = subcommand_pattern.search(match.group("command"))
+    if subcommand_match:
+        positions.setdefault(subcommand_match.group(1), []).append(match.start())
+
+if "open-plan" not in positions:
+    sys.stderr.write(
+        f"strict malformed refine validation missing open-plan in {log_path}\n"
+    )
+    sys.exit(1)
+
+diagnostic = re.search(
+    r"(?is)(malformed|nested|orphan|unclosed).{0,240}api/add-auth-tests\.md.{0,120}line",
+    text,
+) or re.search(
+    r"(?is)api/add-auth-tests\.md.{0,240}(malformed|nested|orphan|unclosed).{0,120}line",
+    text,
+)
+if not diagnostic:
+    sys.stderr.write(
+        f"strict malformed refine validation missing path-aware marker diagnostic in {log_path}\n"
+    )
+    sys.exit(1)
+
+diagnostic_pos = diagnostic.start()
+for api in ["run-leaf-review-gate", "run-frontier-review-gate"]:
+    later = [position for position in positions.get(api, []) if position > diagnostic_pos]
+    if later:
+        sys.stderr.write(
+            f"strict malformed refine validation saw `{api}` after malformed marker diagnostic in {log_path}\n"
+        )
+        sys.exit(1)
+PY
+}
+
+validate_strict_case_shared_non_transcript() {
   local workspace="$1" plan_name="$2" log_file="$3" last_message="$4"
   local db_path="$workspace/.loopy/loopy.db"
 
@@ -342,7 +505,7 @@ validate_strict_case() {
   validate_no_mock_gate_artifacts "$workspace" "$last_message"
   validate_no_direct_db_mutation_attempts "$log_file"
   validate_no_direct_db_read_attempts "$log_file"
-  validate_runtime_api_transcript_usage "$log_file"
+  validate_no_skill_shell_command_attempts "$log_file"
 
   python3 - "$db_path" "$plan_name" <<'PY'
 import sqlite3
@@ -405,6 +568,26 @@ if leaf_mock or frontier_mock:
     )
     sys.exit(1)
 PY
+}
+
+validate_strict_case() {
+  local workspace="$1" plan_name="$2" log_file="$3" last_message="$4"
+  validate_strict_case_shared_non_transcript "$workspace" "$plan_name" "$log_file" "$last_message"
+  validate_runtime_api_transcript_usage "$log_file"
+}
+
+validate_refine_success_strict_case() {
+  local workspace="$1" plan_name="$2" log_file="$3" last_message="$4"
+  validate_strict_case_shared_non_transcript "$workspace" "$plan_name" "$log_file" "$last_message"
+  validate_refine_success_transcript_usage "$log_file"
+}
+
+validate_refine_malformed_strict_case() {
+  local workspace="$1" log_file="$2"
+  validate_no_direct_db_mutation_attempts "$log_file"
+  validate_no_direct_db_read_attempts "$log_file"
+  validate_no_skill_shell_command_attempts "$log_file"
+  validate_refine_malformed_transcript_usage "$log_file"
 }
 
 should_run_case() {
@@ -630,6 +813,127 @@ PY
     --plan-id "$plan_id" \
     --relative-path "api/add-auth-tests.md" \
     --parent-relative-path "api/api.md" >"$state_dir/ensure-node-leaf.json"
+
+  cp "$plan_root/$plan_name.md" "$state_dir/before-root.md"
+  cp "$plan_root/api/api.md" "$state_dir/before-api.md"
+  cp "$plan_root/api/add-auth-tests.md" "$state_dir/before-leaf.md"
+}
+
+validate_gate_artifacts_for_refine_success() {
+  local workspace="$1"
+  local gate_root="$workspace/.loopy/gate-runs"
+
+  [[ -d "$gate_root" ]] || {
+    echo "missing gate artifact root for refine success: $gate_root" >&2
+    return 1
+  }
+  grep -R -Fq "Gate: leaf_review" "$gate_root" 2>/dev/null || {
+    echo "missing leaf gate artifact for refine success under $gate_root" >&2
+    return 1
+  }
+  grep -R -Fq "Gate: frontier_review" "$gate_root" 2>/dev/null || {
+    echo "missing frontier gate artifact for refine success under $gate_root" >&2
+    return 1
+  }
+}
+
+validate_no_gate_artifacts_for_refine_failure() {
+  local workspace="$1"
+  local gate_root="$workspace/.loopy/gate-runs"
+  if [[ -d "$gate_root" ]] && find "$gate_root" -mindepth 1 -print -quit | grep -q .; then
+    echo "malformed refine case produced gate artifacts under $gate_root" >&2
+    return 1
+  fi
+}
+
+validate_refine_success_case() {
+  local workspace="$1" case_name="$2" plan_name="$3" log_file="$4" last_message="$5"
+  local plan_root="$workspace/.loopy/plans/$plan_name"
+  local state_dir="$RUN_ROOT/fixture-state/$case_name"
+  local leaf="$plan_root/api/add-auth-tests.md"
+
+  python3 - "$state_dir/ensure-plan.json" "$plan_root" <<'PY'
+import json
+import pathlib
+import sys
+
+expected = pathlib.Path(json.load(open(sys.argv[1]))["plan_root"]).resolve()
+actual = pathlib.Path(sys.argv[2]).resolve()
+if expected != actual:
+    sys.stderr.write(f"refine plan root changed: expected {expected}, saw {actual}\n")
+    sys.exit(1)
+PY
+
+  [[ -f "$leaf" ]] || {
+    echo "missing refined leaf: $leaf" >&2
+    return 1
+  }
+  ! grep -Eq '^(BEGIN_COMMENT|END_COMMENT)$' "$leaf" || {
+    echo "processed comment markers remain in $leaf" >&2
+    return 1
+  }
+  grep -Fq "token expiry acceptance criteria" "$leaf" || {
+    echo "missing stable refine snippet in $leaf" >&2
+    return 1
+  }
+  validate_plan_tree "$workspace" "$plan_name"
+  validate_gate_artifacts_for_refine_success "$workspace"
+
+  if [[ "$STRICT_VALIDATION" != "0" ]]; then
+    validate_refine_success_strict_case "$workspace" "$plan_name" "$log_file" "$last_message"
+  fi
+}
+
+validate_refine_malformed_case() {
+  local workspace="$1" case_name="$2" plan_name="$3" log_file="$4" last_message="$5" prompt_status="$6"
+  local plan_root="$workspace/.loopy/plans/$plan_name"
+  local state_dir="$RUN_ROOT/fixture-state/$case_name"
+
+  cmp -s "$state_dir/before-root.md" "$plan_root/$plan_name.md" || {
+    echo "malformed refine mutated root markdown: $plan_root/$plan_name.md" >&2
+    return 1
+  }
+  cmp -s "$state_dir/before-api.md" "$plan_root/api/api.md" || {
+    echo "malformed refine mutated api parent markdown: $plan_root/api/api.md" >&2
+    return 1
+  }
+  cmp -s "$state_dir/before-leaf.md" "$plan_root/api/add-auth-tests.md" || {
+    echo "malformed refine mutated leaf markdown: $plan_root/api/add-auth-tests.md" >&2
+    return 1
+  }
+  validate_no_gate_artifacts_for_refine_failure "$workspace"
+  python3 - "$log_file" "$last_message" "$prompt_status" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+last_message = pathlib.Path(sys.argv[2])
+prompt_status = int(sys.argv[3])
+texts = [log_path.read_text(encoding="utf-8", errors="ignore")]
+if last_message.is_file():
+    texts.append(last_message.read_text(encoding="utf-8", errors="ignore"))
+combined = "\n".join(texts)
+diagnostic = re.search(
+    r"(?is)(malformed|nested|orphan|unclosed).{0,240}api/add-auth-tests\.md.{0,120}line",
+    combined,
+) or re.search(
+    r"(?is)api/add-auth-tests\.md.{0,240}(malformed|nested|orphan|unclosed).{0,120}line",
+    combined,
+)
+if not diagnostic:
+    sys.stderr.write(
+        "malformed refine case did not report marker diagnostics with api/add-auth-tests.md and line context\n"
+    )
+    sys.exit(1)
+if prompt_status == 0 and not re.search(r"(?is)(failed|rejected|fail closed|malformed|nested|unclosed|orphan)", combined):
+    sys.stderr.write("malformed refine case exited 0 without an explicit rejected/fail-closed diagnostic\n")
+    sys.exit(1)
+PY
+
+  if [[ "$STRICT_VALIDATION" != "0" ]]; then
+    validate_refine_malformed_strict_case "$workspace" "$log_file"
+  fi
 }
 
 run_refine_case() {
@@ -638,6 +942,7 @@ run_refine_case() {
   local prompt_file="$PROMPT_DIR/$case_name.prompt.md"
   local last_message="$LAST_MESSAGE_DIR/$case_name.json"
   local log_file="$LOG_DIR/$case_name.log"
+  local prompt_status=0
 
   workspace="$(make_workspace "$case_name")"
   setup_refine_fixture "$workspace" "$case_name" "$plan_name" "$malformed"
@@ -675,14 +980,18 @@ Use the \`loopy:gen-plan --refine <plan-name>\` skill invocation contract for pl
 EOF
   fi
 
-  if ! run_prompt "$workspace" "$prompt_file" "$last_message" "$log_file"; then
+  set +e
+  run_prompt "$workspace" "$prompt_file" "$last_message" "$log_file"
+  prompt_status=$?
+  set -e
+
+  if [[ "$malformed" == "1" ]]; then
+    validate_refine_malformed_case "$workspace" "$case_name" "$plan_name" "$log_file" "$last_message" "$prompt_status"
+  elif [[ "$prompt_status" -ne 0 ]]; then
     echo "gen-plan refine smoke case $case_name failed; see $log_file" >&2
     return 1
-  fi
-
-  validate_plan_tree "$workspace" "$plan_name"
-  if [[ "$STRICT_VALIDATION" != "0" && "$malformed" != "1" ]]; then
-    validate_strict_case "$workspace" "$plan_name" "$log_file" "$last_message"
+  else
+    validate_refine_success_case "$workspace" "$case_name" "$plan_name" "$log_file" "$last_message"
   fi
 
   RAN_CASE_COUNT=$((RAN_CASE_COUNT + 1))

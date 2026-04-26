@@ -37,6 +37,81 @@ fn ensure_plan_creates_fixed_plan_root_and_persists_metadata() -> Result<()> {
 }
 
 #[test]
+fn refine_entry_opens_existing_plan_metadata() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+
+    let ensured = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "refine-entry".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory,
+    })?;
+
+    let reopened = runtime.open_plan(OpenPlanRequest {
+        plan_name: "refine-entry".to_owned(),
+    })?;
+
+    assert_eq!(reopened.plan_id, ensured.plan_id);
+    assert_eq!(reopened.plan_root, ensured.plan_root);
+    assert_eq!(reopened.plan_status, "active");
+    assert_eq!(reopened.task_type, "coding-task");
+
+    Ok(())
+}
+
+#[test]
+fn refine_entry_rejects_missing_plan_target() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let missing_root = workspace.path().join(".loopy/plans/missing-refine");
+
+    let error = runtime
+        .open_plan(OpenPlanRequest {
+            plan_name: "missing-refine".to_owned(),
+        })
+        .expect_err("missing refine target should not be created by open_plan");
+
+    assert!(
+        format!("{error:#}").contains("does not exist"),
+        "unexpected missing-target error: {error:#}"
+    );
+    assert!(
+        !missing_root.exists(),
+        "open_plan must not fall back to ensure_plan for refine targets"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn refine_entry_rejects_invalid_plan_name() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+
+    for plan_name in [
+        "/tmp/outside-plan",
+        "../outside-plan",
+        "nested/plan",
+        "nested/../../escape",
+    ] {
+        let error = runtime
+            .open_plan(OpenPlanRequest {
+                plan_name: plan_name.to_owned(),
+            })
+            .expect_err("invalid refine plan_name should be rejected");
+        let error_text = format!("{error:#}");
+        assert!(
+            error_text.contains("plan_name"),
+            "unexpected error for `{plan_name}`: {error_text}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn ensure_plan_repairs_existing_project_directory_for_reopened_plan() -> Result<()> {
     let workspace = support::workspace()?;
     let loopy_dir = workspace.path().join(".loopy");
@@ -609,6 +684,98 @@ fn list_children_can_lookup_by_parent_id_and_path() -> Result<()> {
         parent_relative_path: None,
     })?;
     assert_eq!(by_id.children.len(), 2);
+
+    Ok(())
+}
+
+#[test]
+fn refine_reuses_tracked_node_identity() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "refine-identity".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+
+    let reopened = runtime.open_plan(OpenPlanRequest {
+        plan_name: "refine-identity".to_owned(),
+    })?;
+    assert_eq!(reopened.plan_id, plan.plan_id);
+
+    let inspected_parent = runtime.inspect_node(InspectNodeRequest {
+        plan_id: reopened.plan_id.clone(),
+        node_id: Some(parent.node_id.clone()),
+        relative_path: None,
+    })?;
+    assert_eq!(inspected_parent.node_id, parent.node_id);
+    assert_eq!(inspected_parent.relative_path, "docs/docs.md");
+    assert_eq!(inspected_parent.children.len(), 1);
+    assert_eq!(inspected_parent.children[0].node_id, leaf.node_id);
+    assert_eq!(inspected_parent.children[0].relative_path, "docs/spec.md");
+
+    let children_by_id = runtime.list_children(ListChildrenRequest {
+        plan_id: reopened.plan_id.clone(),
+        parent_node_id: Some(parent.node_id.clone()),
+        parent_relative_path: None,
+    })?;
+    let children_by_path = runtime.list_children(ListChildrenRequest {
+        plan_id: reopened.plan_id.clone(),
+        parent_node_id: None,
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    assert_eq!(children_by_id.children, children_by_path.children);
+    assert_eq!(children_by_id.children[0].node_id, leaf.node_id);
+
+    let plan_root = workspace.path().join(".loopy/plans/refine-identity");
+    fs::create_dir_all(plan_root.join("docs"))?;
+    fs::write(plan_root.join("docs/unregistered.md"), "# Unregistered\n")?;
+    let after_filesystem_only = runtime.list_children(ListChildrenRequest {
+        plan_id: reopened.plan_id.clone(),
+        parent_node_id: Some(parent.node_id.clone()),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(after_filesystem_only.children.len(), 1);
+    let error = runtime
+        .inspect_node(InspectNodeRequest {
+            plan_id: reopened.plan_id.clone(),
+            node_id: None,
+            relative_path: Some("docs/unregistered.md".to_owned()),
+        })
+        .expect_err("filesystem-only markdown must not have runtime identity");
+    assert!(
+        format!("{error:#}").contains("does not exist"),
+        "unexpected untracked-node error: {error:#}"
+    );
+
+    let unregistered = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: reopened.plan_id.clone(),
+        relative_path: "docs/unregistered.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    let after_registration = runtime.list_children(ListChildrenRequest {
+        plan_id: reopened.plan_id,
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(after_registration.children.len(), 2);
+    assert!(
+        after_registration
+            .children
+            .iter()
+            .any(|child| child.node_id == unregistered.node_id)
+    );
 
     Ok(())
 }
