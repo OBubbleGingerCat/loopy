@@ -473,6 +473,7 @@ fn frontier_needs_child_link_reconciliation(
     candidate: &RefineFrontierRegistrationCandidate,
 ) -> bool {
     !candidate.changed_child_relative_paths.is_empty()
+        || !candidate.removed_child_relative_paths.is_empty()
         || candidate
             .reasons
             .contains(&RefineGateTargetReason::ChangedChildSet)
@@ -531,6 +532,7 @@ fn dispatchable_changed_child_relative_paths(
     candidate
         .changed_child_relative_paths
         .iter()
+        .chain(candidate.removed_child_relative_paths.iter())
         .filter(|child| {
             if !removed_child_paths.contains(child.as_str()) {
                 return true;

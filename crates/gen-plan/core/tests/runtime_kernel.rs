@@ -770,30 +770,33 @@ fn ensure_node_id_accepts_root_plan_parent_for_scoped_children() -> Result<()> {
 }
 
 #[test]
-fn ensure_node_id_rejects_sibling_leaf_under_root_plan_parent() -> Result<()> {
+fn ensure_node_id_accepts_root_plan_parent_for_first_layer_leaves() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
     let plan = runtime.ensure_plan(EnsurePlanRequest {
-        plan_name: "root-parent-sibling".to_owned(),
+        plan_name: "root-parent-first-layer".to_owned(),
         task_type: "coding-task".to_owned(),
         project_directory: workspace.path().to_path_buf(),
     })?;
 
     runtime.ensure_node_id(EnsureNodeIdRequest {
         plan_id: plan.plan_id.clone(),
-        relative_path: "root-parent-sibling.md".to_owned(),
+        relative_path: "root-parent-first-layer.md".to_owned(),
         parent_relative_path: None,
     })?;
-    let error = runtime
-        .ensure_node_id(EnsureNodeIdRequest {
-            plan_id: plan.plan_id,
-            relative_path: "guide.md".to_owned(),
-            parent_relative_path: Some("root-parent-sibling.md".to_owned()),
-        })
-        .expect_err("root plan parent must not accept top-level sibling leaves");
-    assert!(
-        format!("{error:#}").contains("direct child"),
-        "unexpected error: {error:#}"
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "guide.md".to_owned(),
+        parent_relative_path: Some("root-parent-first-layer.md".to_owned()),
+    })?;
+    let inspected = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(leaf.node_id),
+        relative_path: None,
+    })?;
+    assert_eq!(
+        inspected.parent_relative_path.as_deref(),
+        Some("root-parent-first-layer.md")
     );
 
     Ok(())

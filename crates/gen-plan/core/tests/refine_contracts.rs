@@ -1030,6 +1030,73 @@ fn refine_gate_registration_reconciles_removed_child_links_before_frontier() -> 
 }
 
 #[test]
+fn refine_gate_registration_reconciles_removed_only_frontier_children() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Removed](./removed.md)\n",
+    )?;
+    fs::write(plan_root.join("api/removed.md"), "# Removed\n")?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/removed.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n")?;
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_candidates: vec![],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "api/api.md".to_owned(),
+                changed_child_relative_paths: Vec::new(),
+                removed_child_relative_paths: vec!["api/removed.md".to_owned()],
+                reasons: vec![RefineGateTargetReason::ParentContractChanged],
+            }],
+        },
+    )
+    .expect("removed-only frontier paths should trigger reconciliation");
+
+    assert_eq!(registered.frontier_targets.len(), 1);
+    assert_eq!(
+        registered.frontier_targets[0].changed_child_relative_paths,
+        vec!["api/removed.md"]
+    );
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert!(children.children.is_empty());
+    let child = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(child.node_id),
+        relative_path: None,
+    })?;
+    assert_eq!(child.parent_node_id, None);
+    assert_eq!(child.parent_relative_path, None);
+    Ok(())
+}
+
+#[test]
 fn refine_gate_registration_validates_frontier_children_before_reconciling() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -2067,12 +2134,11 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         project_directory: workspace.path().to_path_buf(),
     })?;
     let plan_root = workspace.path().join(".loopy/plans/demo");
-    fs::create_dir_all(plan_root.join("demo"))?;
     fs::write(
         plan_root.join("demo.md"),
-        "# Demo\n\n## Child Nodes\n\n- [Intro](./demo/intro.md)\n",
+        "# Demo\n\n## Child Nodes\n\n- [Intro](./intro.md)\n",
     )?;
-    fs::write(plan_root.join("demo/intro.md"), "# Intro\n")?;
+    fs::write(plan_root.join("intro.md"), "# Intro\n")?;
     let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
     connection.execute(
         "INSERT INTO GEN_PLAN__nodes (
@@ -2084,7 +2150,7 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         "INSERT INTO GEN_PLAN__nodes (
             plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
-        params![plan.plan_id, "leaf-1", "demo/intro.md", "intro", "leaf", Option::<String>::None],
+        params![plan.plan_id, "leaf-1", "intro.md", "intro", "leaf", Option::<String>::None],
     )?;
 
     let reconciled = runtime.reconcile_parent_child_links(ReconcileParentChildLinksRequest {
@@ -2092,14 +2158,8 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         parent_relative_path: "demo.md".to_owned(),
     })?;
     assert_eq!(reconciled.parent_node_id, "root-1");
-    assert_eq!(
-        reconciled.linked_child_relative_paths,
-        vec!["demo/intro.md"]
-    );
-    assert_eq!(
-        reconciled.attached_child_relative_paths,
-        vec!["demo/intro.md"]
-    );
+    assert_eq!(reconciled.linked_child_relative_paths, vec!["intro.md"]);
+    assert_eq!(reconciled.attached_child_relative_paths, vec!["intro.md"]);
 
     let children = runtime.list_children(ListChildrenRequest {
         plan_id: plan.plan_id,
@@ -2108,6 +2168,7 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
     })?;
     assert_eq!(children.children.len(), 1);
     assert_eq!(children.children[0].node_id, "leaf-1");
+    assert_eq!(children.children[0].relative_path, "intro.md");
     Ok(())
 }
 
