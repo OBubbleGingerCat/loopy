@@ -662,27 +662,7 @@ fn root_parent_paths(request: &SelectRefineGateTargetsRequest) -> HashSet<String
 fn parent_self_path(root_parent_paths: &HashSet<String>, relative_path: &str) -> Option<String> {
     root_scope_direct_parent_path(relative_path, 1)
         .filter(|candidate| root_parent_paths.contains(candidate))
-        .or_else(|| top_level_root_parent_path(root_parent_paths, relative_path))
         .or_else(|| scoped_parent_self_path(relative_path))
-}
-
-fn top_level_root_parent_path(
-    root_parent_paths: &HashSet<String>,
-    relative_path: &str,
-) -> Option<String> {
-    if Path::new(relative_path).components().count() != 1 {
-        return None;
-    }
-    let matching_paths = root_parent_paths
-        .iter()
-        .filter(|path| path.as_str() != relative_path)
-        .cloned()
-        .collect::<Vec<_>>();
-    if matching_paths.len() == 1 {
-        matching_paths.into_iter().next()
-    } else {
-        None
-    }
 }
 
 fn scoped_parent_self_path(relative_path: &str) -> Option<String> {

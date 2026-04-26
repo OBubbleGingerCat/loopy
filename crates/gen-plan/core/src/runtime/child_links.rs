@@ -32,8 +32,21 @@ fn parse_markdown_child_link_url(line: &str) -> Option<String> {
     let link_start = trimmed.strip_prefix("- [")?;
     let label_end = link_start.find("](")?;
     let rest = &link_start[label_end + 2..];
-    let url_end = rest.find(')')?;
+    let url_end = balanced_markdown_url_end(rest)?;
     Some(rest[..url_end].to_owned())
+}
+
+fn balanced_markdown_url_end(value: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, character) in value.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(index),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 fn canonical_child_path_from_url(parent_relative_path: &str, url: &str) -> Result<Option<String>> {
@@ -129,4 +142,20 @@ fn validate_canonical_markdown_path(relative_path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_link_parser_preserves_balanced_parentheses_in_destinations() {
+        let paths = parse_child_node_link_paths(
+            "docs/docs.md",
+            "# Docs\n\n## Child Nodes\n\n- [Notes](./notes(v2).md)\n",
+        )
+        .expect("balanced parentheses in markdown destinations should parse");
+
+        assert_eq!(paths, vec!["docs/notes(v2).md"]);
+    }
 }

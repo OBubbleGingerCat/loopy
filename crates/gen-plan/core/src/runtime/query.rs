@@ -915,10 +915,17 @@ fn validate_direct_child_relationship(
         NodeKind::Leaf => 1,
         NodeKind::Parent => 2,
     };
-    if child_components.len() == expected_components
-        || root_plan_parent_child_component_count(relative_path, parent_relative_path)
+    if is_root_plan_parent_path(parent_relative_path) {
+        if root_plan_parent_child_component_count(relative_path, parent_relative_path)
             == Some(expected_components)
-    {
+        {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "relative_path `{relative_path}` must be a direct child of parent_relative_path `{parent_relative_path}`"
+        ));
+    }
+    if child_components.len() == expected_components {
         return Ok(());
     }
     Err(anyhow!(

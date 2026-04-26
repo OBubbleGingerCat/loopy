@@ -767,7 +767,7 @@ fn root_scope_new_leaf_targets_use_root_plan_parent() {
 }
 
 #[test]
-fn root_scope_top_level_new_leaf_targets_use_root_plan_parent() {
+fn root_scope_top_level_new_leaf_targets_remain_root_level() {
     let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
         plan_id: "plan-1".to_owned(),
         rewrite_result: RefineRewriteResult {
@@ -803,14 +803,9 @@ fn root_scope_top_level_new_leaf_targets_use_root_plan_parent() {
         .iter()
         .find(|target| target.relative_path == "intro.md")
         .expect("new top-level root-scope leaf should be selected");
-    assert_eq!(leaf.parent_relative_path.as_deref(), Some("demo.md"));
+    assert_eq!(leaf.parent_relative_path, None);
     let registration = selection.to_registration_request("plan-1".to_owned());
-    assert_eq!(
-        registration.leaf_candidates[0]
-            .parent_relative_path
-            .as_deref(),
-        Some("demo.md")
-    );
+    assert_eq!(registration.leaf_candidates[0].parent_relative_path, None);
 }
 
 #[test]
@@ -818,23 +813,16 @@ fn root_scope_new_leaf_targets_use_untracked_root_plan_parent_from_structural_ch
     let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
         plan_id: "plan-1".to_owned(),
         rewrite_result: RefineRewriteResult {
-            changed_files: vec![
-                RefineChangedFile {
-                    relative_path: "demo/leaf.md".to_owned(),
-                    node_id: None,
-                    change_kind: RefineChangedFileKind::Created,
-                },
-                RefineChangedFile {
-                    relative_path: "intro.md".to_owned(),
-                    node_id: None,
-                    change_kind: RefineChangedFileKind::Created,
-                },
-            ],
+            changed_files: vec![RefineChangedFile {
+                relative_path: "demo/leaf.md".to_owned(),
+                node_id: None,
+                change_kind: RefineChangedFileKind::Created,
+            }],
             structural_changes: vec![RefineStructuralChange {
                 parent_relative_path: "demo.md".to_owned(),
                 parent_node_id: None,
                 change_kind: RefineStructuralChangeKind::ChangedChildSet,
-                added_child_relative_paths: vec!["demo/leaf.md".to_owned(), "intro.md".to_owned()],
+                added_child_relative_paths: vec!["demo/leaf.md".to_owned()],
                 removed_child_relative_paths: vec![],
             }],
             stale_nodes: vec![],
@@ -849,14 +837,12 @@ fn root_scope_new_leaf_targets_use_untracked_root_plan_parent_from_structural_ch
         stale_result_handoff: vec![],
     });
 
-    for relative_path in ["demo/leaf.md", "intro.md"] {
-        let leaf = selection
-            .leaf_targets
-            .iter()
-            .find(|target| target.relative_path == relative_path)
-            .expect("new root-scope leaf should be selected");
-        assert_eq!(leaf.parent_relative_path.as_deref(), Some("demo.md"));
-    }
+    let leaf = selection
+        .leaf_targets
+        .iter()
+        .find(|target| target.relative_path == "demo/leaf.md")
+        .expect("new root-scope leaf should be selected");
+    assert_eq!(leaf.parent_relative_path.as_deref(), Some("demo.md"));
 }
 
 #[test]
@@ -2081,12 +2067,12 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         project_directory: workspace.path().to_path_buf(),
     })?;
     let plan_root = workspace.path().join(".loopy/plans/demo");
-    fs::create_dir_all(&plan_root)?;
+    fs::create_dir_all(plan_root.join("demo"))?;
     fs::write(
         plan_root.join("demo.md"),
-        "# Demo\n\n## Child Nodes\n\n- [Intro](./intro.md)\n",
+        "# Demo\n\n## Child Nodes\n\n- [Intro](./demo/intro.md)\n",
     )?;
-    fs::write(plan_root.join("intro.md"), "# Intro\n")?;
+    fs::write(plan_root.join("demo/intro.md"), "# Intro\n")?;
     let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
     connection.execute(
         "INSERT INTO GEN_PLAN__nodes (
@@ -2098,7 +2084,7 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         "INSERT INTO GEN_PLAN__nodes (
             plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
-        params![plan.plan_id, "leaf-1", "intro.md", "intro", "leaf", Option::<String>::None],
+        params![plan.plan_id, "leaf-1", "demo/intro.md", "intro", "leaf", Option::<String>::None],
     )?;
 
     let reconciled = runtime.reconcile_parent_child_links(ReconcileParentChildLinksRequest {
@@ -2106,8 +2092,14 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         parent_relative_path: "demo.md".to_owned(),
     })?;
     assert_eq!(reconciled.parent_node_id, "root-1");
-    assert_eq!(reconciled.linked_child_relative_paths, vec!["intro.md"]);
-    assert_eq!(reconciled.attached_child_relative_paths, vec!["intro.md"]);
+    assert_eq!(
+        reconciled.linked_child_relative_paths,
+        vec!["demo/intro.md"]
+    );
+    assert_eq!(
+        reconciled.attached_child_relative_paths,
+        vec!["demo/intro.md"]
+    );
 
     let children = runtime.list_children(ListChildrenRequest {
         plan_id: plan.plan_id,
