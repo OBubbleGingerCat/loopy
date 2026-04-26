@@ -1252,6 +1252,112 @@ fn frontier_gate_refine_context_rejects_unrelated_leaf_invalidation() -> Result<
 }
 
 #[test]
+fn frontier_gate_refine_context_does_not_match_invalidations_by_path_suffix() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "frontier-path-suffix-invalidation".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/frontier-path-suffix-invalidation");
+    fs::create_dir_all(plan_root.join("backend"))?;
+    fs::create_dir_all(plan_root.join("docs"))?;
+    fs::write(
+        plan_root.join("backend/backend.md"),
+        "# Backend\n\n## Child Nodes\n\n- [Current](./current.md)\n",
+    )?;
+    fs::write(plan_root.join("backend/current.md"), "# Current\n")?;
+    fs::write(
+        plan_root.join("docs/docs.md"),
+        "# Docs\n\n## Child Nodes\n\n- [Guide](./guide.md)\n",
+    )?;
+    fs::write(plan_root.join("docs/guide.md"), "# Docs Guide\n")?;
+    fs::write(plan_root.join("guide.md"), "# Root Guide\n")?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/backend.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/current.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+    let docs_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/guide.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    let root_guide = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "guide.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    let root_guide_node_id = root_guide.node_id.clone();
+    let frontier_output = serde_json::json!({
+        "verdict": "revise_frontier",
+        "summary": "Backend needs revision.",
+        "issues": [{
+            "issue_kind": "suffix_invalidation",
+            "target_node_id": root_guide_node_id,
+            "target_parent_node_id": docs_parent.node_id,
+            "target_node_ids": null,
+            "summary": "Invalidates the wrong guide leaf.",
+            "rationale": "A mention of docs/guide.md must not authorize guide.md.",
+            "expected_revision": "Match refine context paths exactly.",
+            "question_for_user": null,
+            "decision_impact": null
+        }],
+        "invalidated_leaf_node_ids": [root_guide_node_id]
+    })
+    .to_string();
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        r#"{"verdict":"approved_as_leaf","summary":"unused","issues":[]}"#,
+        &frontier_output,
+    )?;
+
+    let error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_frontier_review_gate(RunFrontierReviewGateRequest {
+                plan_id: plan.plan_id,
+                parent_node_id: parent.node_id,
+                planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: Some("Changed docs/guide.md during refine".to_owned()),
+                refine_invalidatable_leaf_node_ids: None,
+            })
+            .expect_err("context path suffixes must not authorize unrelated leaf invalidations")
+    };
+    assert!(
+        format!("{error:#}").contains("invalidated unknown leaf child"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn frontier_gate_invalidated_leaf_approval_is_not_latest_summary() -> Result<()> {
     let workspace = support::workspace()?;
     write_dev_registry(

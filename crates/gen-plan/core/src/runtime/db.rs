@@ -127,7 +127,12 @@ fn backfill_node_kinds(connection: &Connection) -> Result<()> {
             "SELECT nodes.plan_id, nodes.node_id, nodes.relative_path, plans.plan_name
              FROM GEN_PLAN__nodes nodes
              JOIN GEN_PLAN__plans plans ON plans.plan_id = nodes.plan_id
-             WHERE nodes.node_kind = '' OR nodes.node_kind NOT IN ('parent', 'leaf')",
+             WHERE nodes.node_kind = ''
+                OR nodes.node_kind NOT IN ('parent', 'leaf')
+                OR (
+                    nodes.node_kind = 'leaf'
+                    AND nodes.relative_path = plans.plan_name || '.md'
+                )",
         )
         .context("failed to prepare node_kind backfill query")?;
     let rows = statement

@@ -676,7 +676,7 @@ fn select_context_mentioned_leaf_node_ids(
 
     let mut node_ids = Vec::new();
     for (node_id, relative_path, node_kind) in nodes {
-        if !refine_context.contains(&relative_path) {
+        if !refine_context_mentions_path(refine_context, &relative_path) {
             continue;
         }
         match node_kind.as_str() {
@@ -688,6 +688,22 @@ fn select_context_mentioned_leaf_node_ids(
         }
     }
     Ok(node_ids)
+}
+
+fn refine_context_mentions_path(refine_context: &str, relative_path: &str) -> bool {
+    refine_context
+        .match_indices(relative_path)
+        .any(|(start, _)| {
+            let before = refine_context[..start].chars().next_back();
+            let after = refine_context[start + relative_path.len()..].chars().next();
+            is_refine_context_path_boundary(before) && is_refine_context_path_boundary(after)
+        })
+}
+
+fn is_refine_context_path_boundary(character: Option<char>) -> bool {
+    character.is_none_or(|character| {
+        !character.is_ascii_alphanumeric() && !matches!(character, '/' | '\\' | '.' | '-' | '_')
+    })
 }
 
 fn validate_refine_invalidatable_leaf_node_ids(
