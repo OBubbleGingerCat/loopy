@@ -564,10 +564,19 @@ pub(crate) fn load_latest_passed_leaf_gate_summary(
 ) -> Result<Option<LeafGateSummary>> {
     connection
         .query_row(
-            "SELECT leaf_gate_run_id, reviewer_role_id, summary
-             FROM GEN_PLAN__leaf_gate_runs
-             WHERE plan_id = ?1 AND node_id = ?2 AND passed = 1
-             ORDER BY CAST(created_at AS INTEGER) DESC, leaf_gate_run_id DESC
+            "SELECT leaf.leaf_gate_run_id, leaf.reviewer_role_id, leaf.summary
+             FROM GEN_PLAN__leaf_gate_runs AS leaf
+             WHERE leaf.plan_id = ?1
+               AND leaf.node_id = ?2
+               AND leaf.passed = 1
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM GEN_PLAN__frontier_gate_runs AS frontier
+                   WHERE frontier.plan_id = leaf.plan_id
+                     AND CAST(frontier.created_at AS INTEGER) > CAST(leaf.created_at AS INTEGER)
+                     AND frontier.invalidated_leaf_node_ids_json LIKE '%' || leaf.node_id || '%'
+               )
+             ORDER BY CAST(leaf.created_at AS INTEGER) DESC, leaf.leaf_gate_run_id DESC
              LIMIT 1",
             params![plan_id, node_id],
             |row| {
@@ -653,7 +662,33 @@ pub(crate) fn ensure_parent_child_runtime_coherence(
     parent: &NodeRecord,
 ) -> Result<()> {
     require_parent_node_record(parent)?;
-    for child in load_child_nodes(connection, plan_id, Some(&parent.node_id))? {
+    let plan = load_gate_plan_context(connection, plan_id)?;
+    ensure_plan_markdown_file_exists(&plan.plan_root, &parent.relative_path)?;
+    let parent_markdown = std::fs::read_to_string(plan.plan_root.join(&parent.relative_path))
+        .with_context(|| {
+            format!(
+                "failed to read plan markdown {}",
+                plan.plan_root.join(&parent.relative_path).display()
+            )
+        })?;
+    let linked_child_relative_paths =
+        parse_child_node_link_paths(&parent.relative_path, &parent_markdown)?;
+    let linked_child_set = linked_child_relative_paths
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let runtime_children = load_child_nodes(connection, plan_id, Some(&parent.node_id))?;
+    let runtime_child_set = runtime_children
+        .iter()
+        .map(|child| child.relative_path.clone())
+        .collect::<HashSet<_>>();
+    if linked_child_set != runtime_child_set {
+        return Err(anyhow!(
+            "parent child links are out of sync with runtime for `{}`; run reconcile-parent-child-links before frontier review",
+            parent.relative_path
+        ));
+    }
+    for child in runtime_children {
         validate_direct_child_relationship(
             &child.relative_path,
             Some(&parent.relative_path),

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{Runtime, query};
 use crate::{
-    ReviewIssue, RunFrontierReviewGateRequest, RunFrontierReviewGateResponse,
+    NodeKind, ReviewIssue, RunFrontierReviewGateRequest, RunFrontierReviewGateResponse,
     RunLeafReviewGateRequest, RunLeafReviewGateResponse,
 };
 
@@ -243,6 +243,12 @@ pub(crate) fn run_frontier_review_gate(
         (true, Some(node_ids)) => {
             validate_refine_invalidatable_leaf_node_ids(connection, &plan_id, node_ids)?
         }
+        (true, None) => select_refine_context_invalidatable_leaf_node_ids(
+            connection,
+            &plan_id,
+            &parent_node_id,
+            refine_revalidation_context.as_deref().unwrap_or_default(),
+        )?,
         _ => select_leaf_child_node_ids(connection, &plan_id, &parent_node_id)?,
     };
     for invalidated_node_id in &output.invalidated_leaf_node_ids {
@@ -595,6 +601,87 @@ fn select_plan_leaf_node_ids(connection: &Connection, plan_id: &str) -> Result<V
         .context("failed to read plan leaf nodes for frontier gate")
 }
 
+fn select_refine_context_invalidatable_leaf_node_ids(
+    connection: &Connection,
+    plan_id: &str,
+    parent_node_id: &str,
+    refine_context: &str,
+) -> Result<Vec<String>> {
+    let mut node_ids = select_descendant_leaf_node_ids(connection, plan_id, parent_node_id)?;
+    for node_id in select_context_mentioned_leaf_node_ids(connection, plan_id, refine_context)? {
+        push_unique(&mut node_ids, node_id);
+    }
+    Ok(node_ids)
+}
+
+fn select_descendant_leaf_node_ids(
+    connection: &Connection,
+    plan_id: &str,
+    parent_node_id: &str,
+) -> Result<Vec<String>> {
+    let mut node_ids = Vec::new();
+    collect_descendant_leaf_node_ids(connection, plan_id, parent_node_id, &mut node_ids)?;
+    Ok(node_ids)
+}
+
+fn collect_descendant_leaf_node_ids(
+    connection: &Connection,
+    plan_id: &str,
+    parent_node_id: &str,
+    node_ids: &mut Vec<String>,
+) -> Result<()> {
+    for child in query::load_child_nodes(connection, plan_id, Some(parent_node_id))? {
+        match child.node_kind {
+            NodeKind::Leaf => push_unique(node_ids, child.node_id),
+            NodeKind::Parent => {
+                collect_descendant_leaf_node_ids(connection, plan_id, &child.node_id, node_ids)?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn select_context_mentioned_leaf_node_ids(
+    connection: &Connection,
+    plan_id: &str,
+    refine_context: &str,
+) -> Result<Vec<String>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT node_id, relative_path, node_kind
+             FROM GEN_PLAN__nodes
+             WHERE plan_id = ?1
+             ORDER BY relative_path, node_id",
+        )
+        .context("failed to prepare refine context node lookup")?;
+    let nodes = statement
+        .query_map(params![plan_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .context("failed to query refine context nodes")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read refine context nodes")?;
+
+    let mut node_ids = Vec::new();
+    for (node_id, relative_path, node_kind) in nodes {
+        if !refine_context.contains(&relative_path) {
+            continue;
+        }
+        match node_kind.as_str() {
+            "leaf" => push_unique(&mut node_ids, node_id),
+            "parent" => {
+                collect_descendant_leaf_node_ids(connection, plan_id, &node_id, &mut node_ids)?
+            }
+            _ => {}
+        }
+    }
+    Ok(node_ids)
+}
+
 fn validate_refine_invalidatable_leaf_node_ids(
     connection: &Connection,
     plan_id: &str,
@@ -616,6 +703,12 @@ fn validate_refine_invalidatable_leaf_node_ids(
     Ok(valid)
 }
 
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
 fn has_refine_revalidation_context(context: &Option<String>) -> bool {
     context
         .as_deref()
@@ -627,6 +720,6 @@ fn current_timestamp() -> Result<String> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the unix epoch")?
-        .as_secs()
+        .as_nanos()
         .to_string())
 }
