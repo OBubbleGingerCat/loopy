@@ -66,6 +66,7 @@ At minimum, the Agent must treat the following installed runtime helpers as auth
 - `ensure-plan`
 - `open-plan`
 - `ensure-node-id`
+- `reconcile-parent-child-links`
 - `run-leaf-review-gate`
 - `run-frontier-review-gate`
 

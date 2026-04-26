@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 use std::{fs, path::Path};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest,
-    OpenPlanRequest, PlannerMode, RunFrontierReviewGateRequest, RunLeafReviewGateRequest, Runtime,
+    OpenPlanRequest, PlannerMode, ReconcileParentChildLinksRequest, RunFrontierReviewGateRequest,
+    RunLeafReviewGateRequest, Runtime,
 };
 
 #[derive(Debug, Parser)]
@@ -56,6 +57,12 @@ enum Commands {
         #[arg(long)]
         parent_relative_path: Option<String>,
     },
+    ReconcileParentChildLinks {
+        #[arg(long)]
+        plan_id: String,
+        #[arg(long)]
+        parent_relative_path: String,
+    },
     RunLeafReviewGate {
         #[arg(long)]
         plan_id: String,
@@ -63,6 +70,8 @@ enum Commands {
         node_id: String,
         #[arg(long)]
         planner_mode: String,
+        #[arg(long)]
+        refine_revalidation_context_file: Option<PathBuf>,
     },
     RunFrontierReviewGate {
         #[arg(long)]
@@ -71,6 +80,8 @@ enum Commands {
         parent_node_id: String,
         #[arg(long)]
         planner_mode: String,
+        #[arg(long)]
+        refine_revalidation_context_file: Option<PathBuf>,
     },
     MockLeafReviewer {
         #[arg(long = "output-last-message")]
@@ -150,18 +161,34 @@ fn main() -> Result<()> {
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
+        Commands::ReconcileParentChildLinks {
+            plan_id,
+            parent_relative_path,
+        } => {
+            let workspace = cli.workspace.clone().unwrap_or(std::env::current_dir()?);
+            let runtime = Runtime::new(workspace)?;
+            let response =
+                runtime.reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+                    plan_id,
+                    parent_relative_path,
+                })?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
         Commands::RunLeafReviewGate {
             plan_id,
             node_id,
             planner_mode,
+            refine_revalidation_context_file,
         } => {
             let workspace = cli.workspace.clone().unwrap_or(std::env::current_dir()?);
             let runtime = Runtime::new(workspace)?;
+            let refine_revalidation_context =
+                read_optional_context_file(refine_revalidation_context_file.as_deref())?;
             let response = runtime.run_leaf_review_gate(RunLeafReviewGateRequest {
                 plan_id,
                 node_id,
                 planner_mode: parse_planner_mode(&planner_mode)?,
-                refine_revalidation_context: None,
+                refine_revalidation_context,
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
@@ -169,14 +196,17 @@ fn main() -> Result<()> {
             plan_id,
             parent_node_id,
             planner_mode,
+            refine_revalidation_context_file,
         } => {
             let workspace = cli.workspace.clone().unwrap_or(std::env::current_dir()?);
             let runtime = Runtime::new(workspace)?;
+            let refine_revalidation_context =
+                read_optional_context_file(refine_revalidation_context_file.as_deref())?;
             let response = runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
                 plan_id,
                 parent_node_id,
                 planner_mode: parse_planner_mode(&planner_mode)?,
-                refine_revalidation_context: None,
+                refine_revalidation_context,
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
@@ -199,6 +229,18 @@ fn parse_planner_mode(value: &str) -> Result<PlannerMode> {
         "auto" => Ok(PlannerMode::Auto),
         _ => bail!("invalid planner_mode `{value}`: expected `manual` or `auto`"),
     }
+}
+
+fn read_optional_context_file(path: Option<&Path>) -> Result<Option<String>> {
+    path.map(|path| {
+        fs::read_to_string(path).with_context(|| {
+            format!(
+                "failed to read refine revalidation context {}",
+                path.display()
+            )
+        })
+    })
+    .transpose()
 }
 
 fn write_mock_leaf_reviewer_output(

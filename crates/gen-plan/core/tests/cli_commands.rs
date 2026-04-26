@@ -10,6 +10,7 @@ use loopy_gen_plan::{EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, Ru
 use serde_json::Value;
 
 const REAL_LEAF_SUMMARY: &str = "Leaf review passed through fake codex.";
+const REAL_FRONTIER_SUMMARY: &str = "Frontier review passed through fake codex.";
 
 fn cargo_binary() -> Result<std::ffi::OsString> {
     std::env::var_os("CARGO").context("CARGO should be set by cargo test")
@@ -52,6 +53,7 @@ fn help_lists_plan_and_gate_commands() -> Result<()> {
         "ensure-node-id",
         "inspect-node",
         "list-children",
+        "reconcile-parent-child-links",
         "run-leaf-review-gate",
         "run-frontier-review-gate",
         "mock-leaf-reviewer",
@@ -353,6 +355,91 @@ fn list_children_command_prints_pretty_json() -> Result<()> {
 }
 
 #[test]
+fn reconcile_parent_child_links_command_prints_pretty_json() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-reconcile-children".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/cli-reconcile-children");
+    fs::create_dir_all(plan_root.join("docs"))?;
+    fs::write(
+        plan_root.join("docs/docs.md"),
+        "# Docs\n\n## Child Nodes\n\n- [Spec](./spec.md)\n",
+    )?;
+    fs::write(plan_root.join("docs/spec.md"), "# Spec\n")?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/docs.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "docs/spec.md".to_owned(),
+        parent_relative_path: Some("docs/docs.md".to_owned()),
+    })?;
+    fs::write(
+        plan_root.join("docs/docs.md"),
+        "# Docs\n\n## Child Nodes\n\n",
+    )?;
+
+    let output = run_cli(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "reconcile-parent-child-links",
+            "--plan-id",
+            &plan.plan_id,
+            "--parent-relative-path",
+            "docs/docs.md",
+        ],
+        Some("failed to run loopy-gen-plan reconcile-parent-child-links"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected reconcile-parent-child-links command to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("\n  \"detached_child_relative_paths\""),
+        "expected pretty-printed JSON output, stdout was:\n{stdout}"
+    );
+    let value: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(
+        value["parent_node_id"],
+        Value::String(parent.node_id.to_owned())
+    );
+    assert_eq!(
+        value["detached_child_relative_paths"][0],
+        Value::String("docs/spec.md".to_owned())
+    );
+    let children = runtime.list_children(loopy_gen_plan::ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert!(children.children.is_empty());
+    let child = runtime.inspect_node(loopy_gen_plan::InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(child.node_id),
+        relative_path: None,
+    })?;
+    assert_eq!(child.parent_node_id, None);
+    assert_eq!(child.parent_relative_path, None);
+
+    Ok(())
+}
+
+#[test]
 fn leaf_gate_command_prints_pretty_json() -> Result<()> {
     let workspace = support::workspace()?;
     support::assert_dir_exists(workspace.path());
@@ -451,6 +538,199 @@ fn leaf_gate_command_prints_pretty_json() -> Result<()> {
     assert_eq!(
         value["reviewer_role_id"],
         Value::String("codex_default".to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn leaf_gate_command_accepts_refine_revalidation_context_file() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    write_dev_registry(
+        workspace.path(),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../skills/gen-plan")
+            .canonicalize()
+            .context("checked-in skills/gen-plan root should resolve")?,
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex_expecting_prompt(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        "Gate: leaf_review",
+        Some("processed-comment-context-sentinel"),
+        r#"{"verdict":"approved_as_leaf","summary":"Leaf review passed through fake codex.","issues":[]}"#,
+    )?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-leaf-gate-refine-context".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/cli-leaf-gate-refine-context");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(plan_root.join("api/api.md"), "# API\n")?;
+    fs::write(plan_root.join("api/implement-endpoint.md"), "# Implement\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let node = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    let context_file = workspace.path().join("refine-context.md");
+    fs::write(&context_file, "processed-comment-context-sentinel\n")?;
+
+    let output = run_cli_with_env(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "run-leaf-review-gate",
+            "--plan-id",
+            &plan.plan_id,
+            "--node-id",
+            &node.node_id,
+            "--planner-mode",
+            "auto",
+            "--refine-revalidation-context-file",
+            context_file
+                .to_str()
+                .context("context path must be utf-8")?,
+        ],
+        &[(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(fake_bin_dir.clone()).chain(
+                    std::env::var_os("PATH")
+                        .iter()
+                        .flat_map(std::env::split_paths),
+                ),
+            )
+            .expect("PATH should remain joinable"),
+        )],
+        Some("failed to run loopy-gen-plan run-leaf-review-gate"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected gate command to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value["summary"],
+        Value::String(REAL_LEAF_SUMMARY.to_owned())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn frontier_gate_command_accepts_refine_revalidation_context_file() -> Result<()> {
+    let workspace = support::workspace()?;
+    support::assert_dir_exists(workspace.path());
+    write_dev_registry(
+        workspace.path(),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../skills/gen-plan")
+            .canonicalize()
+            .context("checked-in skills/gen-plan root should resolve")?,
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex_expecting_prompt(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        "Gate: frontier_review",
+        Some("frontier-context-sentinel"),
+        r#"{"verdict":"approved_frontier","summary":"Frontier review passed through fake codex.","issues":[],"invalidated_leaf_node_ids":[]}"#,
+    )?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "cli-frontier-gate-refine-context".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/cli-frontier-gate-refine-context");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Implement](./implement.md)\n",
+    )?;
+    fs::write(plan_root.join("api/implement.md"), "# Implement\n")?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    let context_file = workspace.path().join("frontier-refine-context.md");
+    fs::write(&context_file, "frontier-context-sentinel\n")?;
+
+    let output = run_cli_with_env(
+        &[
+            "--workspace",
+            workspace
+                .path()
+                .to_str()
+                .context("workspace path must be utf-8")?,
+            "run-frontier-review-gate",
+            "--plan-id",
+            &plan.plan_id,
+            "--parent-node-id",
+            &parent.node_id,
+            "--planner-mode",
+            "auto",
+            "--refine-revalidation-context-file",
+            context_file
+                .to_str()
+                .context("context path must be utf-8")?,
+        ],
+        &[(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(fake_bin_dir.clone()).chain(
+                    std::env::var_os("PATH")
+                        .iter()
+                        .flat_map(std::env::split_paths),
+                ),
+            )
+            .expect("PATH should remain joinable"),
+        )],
+        Some("failed to run loopy-gen-plan run-frontier-review-gate"),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "expected frontier gate command to succeed, stderr was:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value["summary"],
+        Value::String(REAL_FRONTIER_SUMMARY.to_owned())
     );
 
     Ok(())
@@ -633,11 +913,29 @@ fn write_fake_codex(
     bin_path: &std::path::Path,
     expected_project_directory: &std::path::Path,
 ) -> Result<()> {
+    write_fake_codex_expecting_prompt(
+        bin_path,
+        expected_project_directory,
+        "Gate: leaf_review",
+        None,
+        r#"{"verdict":"approved_as_leaf","summary":"Leaf review passed through fake codex.","issues":[]}"#,
+    )
+}
+
+fn write_fake_codex_expecting_prompt(
+    bin_path: &std::path::Path,
+    expected_project_directory: &std::path::Path,
+    expected_gate: &str,
+    expected_prompt_fragment: Option<&str>,
+    output_json: &str,
+) -> Result<()> {
     let script = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
 
 expected_project_directory="{expected_project_directory}"
+expected_gate="{expected_gate}"
+expected_prompt_fragment="{expected_prompt_fragment}"
 workspace_arg=""
 output_file=""
 
@@ -681,18 +979,26 @@ if [[ "$PWD" != "$expected_project_directory" ]]; then
   exit 1
 fi
 
-if [[ "$prompt" != *"Gate: leaf_review"* ]]; then
+if [[ "$prompt" != *"$expected_gate"* ]]; then
   echo "unexpected prompt payload" >&2
+  exit 1
+fi
+
+if [[ -n "$expected_prompt_fragment" && "$prompt" != *"$expected_prompt_fragment"* ]]; then
+  echo "expected prompt to contain $expected_prompt_fragment" >&2
   exit 1
 fi
 
 mkdir -p "$(dirname "$output_file")"
 cat >"$output_file" <<'EOF'
-{{"verdict":"approved_as_leaf","summary":"Leaf review passed through fake codex.","issues":[]}}
+{output_json}
 EOF
 echo "stdout is not the machine-readable result"
 "#,
         expected_project_directory = expected_project_directory.display(),
+        expected_gate = expected_gate,
+        expected_prompt_fragment = expected_prompt_fragment.unwrap_or_default(),
+        output_json = output_json,
     );
     fs::write(bin_path, script)?;
     let mut permissions = fs::metadata(bin_path)?.permissions();

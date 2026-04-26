@@ -52,10 +52,12 @@ After every post-write checkpoint, preserve the normal mode choice: continue man
 
 ## Runtime And Gate Rules
 
-Runtime state must come from installed helpers such as `open-plan`, `inspect-node`, `list-children`, `ensure-node-id`, `run-leaf-review-gate`, and `run-frontier-review-gate`. Do not inspect `.loopy/loopy.db` directly.
+Runtime state must come from installed helpers such as `open-plan`, `inspect-node`, `list-children`, `ensure-node-id`, `reconcile-parent-child-links`, `run-leaf-review-gate`, and `run-frontier-review-gate`. Do not inspect `.loopy/loopy.db` directly.
 
 New or affected nodes must be registered or inspected through runtime helpers before gates consume them. Historical approvals are stale when node content, parent contracts, descendant context, regenerated nodes, or newly created nodes change.
 
+After structural rewrites update a parent's child links in markdown, call `reconcile-parent-child-links` for that parent before frontier revalidation so runtime child state matches the edited markdown.
+
 Selected leaf gates run globally before any selected frontier gate. Frontier gates must not run while selected leaf gates still have unresolved review issues. Invocation failures may be retried with identical content and arguments; substantive reviewer issues require plan changes, not blind retries.
 
-Leaf and frontier reviewer prompts receive refine-specific context by treating stale approvals, changed contracts, and invalidated descendants as first-class review evidence rather than current approvals.
+Leaf and frontier reviewer prompts receive refine-specific context by treating stale approvals, changed contracts, and invalidated descendants as first-class review evidence rather than current approvals. During refine gate revalidation, write that rendered context to a file and pass it to `run-leaf-review-gate` or `run-frontier-review-gate` with `--refine-revalidation-context-file`.

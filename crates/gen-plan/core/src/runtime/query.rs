@@ -1165,7 +1165,31 @@ fn normalize_project_directory(workspace_root: &Path, project_directory: &Path) 
     } else {
         workspace_root.join(project_directory)
     };
+    let project_directory = normalize_path_components(&project_directory)?;
     Ok(path_string(&project_directory))
+}
+
+fn normalize_path_components(path: &Path) -> Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(anyhow!(
+                        "project_directory must not escape the filesystem root"
+                    ));
+                }
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(anyhow!("project_directory must not be empty"));
+    }
+    Ok(normalized)
 }
 
 fn path_string(path: &Path) -> String {

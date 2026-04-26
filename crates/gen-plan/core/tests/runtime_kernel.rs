@@ -1,6 +1,7 @@
 mod support;
 
 use std::fs;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use loopy_gen_plan::{
@@ -357,6 +358,38 @@ fn ensure_plan_rejects_project_directory_redirect_for_existing_non_legacy_plan()
     assert_eq!(
         persisted_project_directory,
         original_project_directory.display().to_string()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ensure_plan_normalizes_equivalent_project_directory_spellings() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    fs::create_dir_all(workspace.path().join("project"))?;
+
+    let first = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "project-dir-spelling".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: PathBuf::from("./project"),
+    })?;
+    let second = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "project-dir-spelling".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: PathBuf::from("project"),
+    })?;
+
+    assert_eq!(second.plan_id, first.plan_id);
+    let persisted_project_directory: String =
+        Connection::open(workspace.path().join(".loopy/loopy.db"))?.query_row(
+            "SELECT project_directory FROM GEN_PLAN__plans WHERE plan_id = ?1",
+            params![first.plan_id],
+            |row| row.get(0),
+        )?;
+    assert_eq!(
+        persisted_project_directory,
+        workspace.path().join("project").display().to_string()
     );
 
     Ok(())
