@@ -152,12 +152,6 @@ pub fn register_refine_gate_targets(
                 }
                 existing.node_id
             } else {
-                if is_root_parent_path(&candidate.relative_path) {
-                    return Err(RefineGatePreparationError::MissingParentRegistration {
-                        child_relative_path: candidate.relative_path.clone(),
-                        parent_relative_path: candidate.relative_path.clone(),
-                    });
-                }
                 runtime
                     .ensure_node_id(EnsureNodeIdRequest {
                         plan_id: plan_id.clone(),

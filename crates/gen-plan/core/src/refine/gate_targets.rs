@@ -375,12 +375,24 @@ fn is_link_only_parent_text_update(
                 && file.change_kind == RefineChangedFileKind::TextUpdated
         })
         .count();
-    text_update_count == 1
-        && request
+    let has_child_set_change = request
+        .rewrite_result
+        .structural_changes
+        .iter()
+        .any(|change| {
+            change.parent_relative_path == parent_relative_path
+                && change.change_kind == RefineStructuralChangeKind::ChangedChildSet
+        });
+    let has_parent_contract_change =
+        request
             .rewrite_result
             .structural_changes
             .iter()
-            .any(|change| change.parent_relative_path == parent_relative_path)
+            .any(|change| {
+                change.parent_relative_path == parent_relative_path
+                    && change.change_kind == RefineStructuralChangeKind::ParentContractChanged
+            });
+    text_update_count == 1 && has_child_set_change && !has_parent_contract_change
 }
 
 fn upsert_descendant_leaf_targets(

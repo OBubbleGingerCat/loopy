@@ -527,6 +527,40 @@ fn ensure_node_id_accepts_root_plan_parent_for_scoped_children() -> Result<()> {
 }
 
 #[test]
+fn ensure_node_id_records_plan_root_markdown_as_parent() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    let root = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "demo.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let inspected = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id.clone(),
+        node_id: Some(root.node_id.clone()),
+        relative_path: None,
+    })?;
+    assert_eq!(inspected.relative_path, "demo.md");
+    assert_eq!(inspected.node_kind, NodeKind::Parent);
+    assert_eq!(inspected.parent_relative_path, None);
+
+    let reopened = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id,
+        relative_path: "demo.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(reopened.node_id, root.node_id);
+
+    Ok(())
+}
+
+#[test]
 fn ensure_node_id_rejects_noncanonical_node_shapes_and_missing_parents() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;

@@ -687,7 +687,13 @@ fn ensure_node_id_for_path(
     relative_path: &str,
     parent_relative_path: Option<&str>,
 ) -> Result<String> {
-    let requested_node_kind = validate_registration_request(relative_path, parent_relative_path)?;
+    let mut requested_node_kind =
+        validate_registration_request(relative_path, parent_relative_path)?;
+    if parent_relative_path.is_none()
+        && is_plan_root_parent_markdown_path(connection, plan_id, relative_path)?
+    {
+        requested_node_kind = NodeKind::Parent;
+    }
     let requested_parent = match parent_relative_path {
         Some(parent_relative_path) if parent_relative_path == relative_path => {
             return Err(anyhow!(
@@ -890,6 +896,31 @@ fn root_plan_parent_child_component_count(
     let child_relative = Path::new(relative_path).strip_prefix(root_stem).ok()?;
     let component_count = child_relative.components().count();
     (component_count > 0).then_some(component_count)
+}
+
+fn is_plan_root_parent_markdown_path(
+    connection: &Connection,
+    plan_id: &str,
+    relative_path: &str,
+) -> Result<bool> {
+    if !is_root_plan_parent_path(relative_path) {
+        return Ok(false);
+    }
+    let Some(stem) = Path::new(relative_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+    else {
+        return Ok(false);
+    };
+    let plan_name = connection
+        .query_row(
+            "SELECT plan_name FROM GEN_PLAN__plans WHERE plan_id = ?1",
+            params![plan_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to read plan name for root parent registration")?;
+    Ok(plan_name.as_deref() == Some(stem))
 }
 
 fn repair_plan_project_directory(

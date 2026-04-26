@@ -165,7 +165,14 @@ fn apply_refine_rewrite_mutating(
     let stale_report = mark_stale_nodes(request, &sanitized_payloads)?;
     reports.changed_files.extend(stale_report.changed_files);
     reports.stale_nodes.extend(stale_report.stale_nodes);
-    let link_report = apply_rewrite_link_updates(request, &sanitized_payloads)?;
+    let contract_updated_parent_paths = reports
+        .changed_files
+        .iter()
+        .filter(|file| file.change_kind == RefineChangedFileKind::TextUpdated)
+        .map(|file| file.relative_path.clone())
+        .collect::<HashSet<_>>();
+    let link_report =
+        apply_rewrite_link_updates(request, &sanitized_payloads, &contract_updated_parent_paths)?;
     reports
         .changed_files
         .extend(link_report.changed_parent_files);
@@ -558,6 +565,7 @@ fn mark_stale_nodes(
 fn apply_rewrite_link_updates(
     request: &RefineRewriteRequest,
     sanitized_payloads: &[(String, String)],
+    contract_updated_parent_paths: &HashSet<String>,
 ) -> Result<RefineLinkUpdateReport, RefineRewriteError> {
     // rewrite link update rules: request.rewrite_scope.link_changes are merged in stable first-seen parent order.
     // This helper owns all parent Child Nodes section mutations. Add-link targets must exist as canonical markdown files,
@@ -587,14 +595,18 @@ fn apply_rewrite_link_updates(
                 change_kind: RefineChangedFileKind::TextUpdated,
             });
         }
-        for change_kind in [
-            RefineStructuralChangeKind::ChangedChildSet,
-            RefineStructuralChangeKind::ParentContractChanged,
-        ] {
+        report.structural_changes.push(RefineStructuralChange {
+            parent_relative_path: mutation.parent_relative_path.clone(),
+            parent_node_id: mutation.parent_node_id.clone(),
+            change_kind: RefineStructuralChangeKind::ChangedChildSet,
+            added_child_relative_paths: mutation.added_child_relative_paths.clone(),
+            removed_child_relative_paths: mutation.removed_child_relative_paths.clone(),
+        });
+        if contract_updated_parent_paths.contains(&mutation.parent_relative_path) {
             report.structural_changes.push(RefineStructuralChange {
                 parent_relative_path: mutation.parent_relative_path.clone(),
                 parent_node_id: mutation.parent_node_id.clone(),
-                change_kind,
+                change_kind: RefineStructuralChangeKind::ParentContractChanged,
                 added_child_relative_paths: mutation.added_child_relative_paths.clone(),
                 removed_child_relative_paths: mutation.removed_child_relative_paths.clone(),
             });
@@ -2154,10 +2166,7 @@ mod tests {
                 .filter(|change| change.parent_relative_path == "api/api.md")
                 .map(|change| &change.change_kind)
                 .collect::<Vec<_>>(),
-            vec![
-                &RefineStructuralChangeKind::ChangedChildSet,
-                &RefineStructuralChangeKind::ParentContractChanged,
-            ]
+            vec![&RefineStructuralChangeKind::ChangedChildSet]
         );
         let api_change = result
             .structural_changes
