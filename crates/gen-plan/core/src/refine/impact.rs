@@ -56,8 +56,9 @@ pub fn analyze_refine_comment_impact(request: RefineImpactAnalysisRequest) -> Re
                     .to_owned(),
             });
         }
+        let structural = is_structural_category(&category);
         let user_owned = category == RefineImpactCategory::UserOwnedDecision;
-        let status = if ambiguous || user_owned {
+        let status = if ambiguous || user_owned || structural {
             RefineDecisionStatus::AwaitingManualConfirmation
         } else {
             RefineDecisionStatus::AutoContinuationCandidate
@@ -75,8 +76,8 @@ pub fn analyze_refine_comment_impact(request: RefineImpactAnalysisRequest) -> Re
             confirmation: RefineDecisionConfirmation {
                 status,
                 rationale: format!("mapped natural-language comment to {category:?}"),
-                question_for_user: question_for_user(ambiguous, user_owned),
-                decision_impact: decision_impact(ambiguous, user_owned),
+                question_for_user: question_for_user(ambiguous, user_owned, structural),
+                decision_impact: decision_impact(ambiguous, user_owned, structural),
             },
             rewrite_actions: Vec::new(),
             expected_gate_revalidation: Vec::new(),
@@ -110,21 +111,38 @@ fn classify_comment(comment: &RefineCommentSource) -> RefineImpactCategory {
     }
 }
 
-fn question_for_user(ambiguous: bool, user_owned: bool) -> Option<String> {
+fn is_structural_category(category: &RefineImpactCategory) -> bool {
+    matches!(
+        category,
+        RefineImpactCategory::ParentContractChange
+            | RefineImpactCategory::ChildSetChange
+            | RefineImpactCategory::NewNodeRequest
+            | RefineImpactCategory::NodeRemovalRequest
+    )
+}
+
+fn question_for_user(ambiguous: bool, user_owned: bool, structural: bool) -> Option<String> {
     if ambiguous {
         Some("Which tracked plan node should this refine comment modify?".to_owned())
     } else if user_owned {
         Some("How should this user-owned refine decision proceed?".to_owned())
+    } else if structural {
+        Some("Confirm the requested structural refine change before rewrite planning.".to_owned())
     } else {
         None
     }
 }
 
-fn decision_impact(ambiguous: bool, user_owned: bool) -> Option<String> {
+fn decision_impact(ambiguous: bool, user_owned: bool, structural: bool) -> Option<String> {
     if ambiguous {
         Some("Rewrite scope and gate targets cannot be selected safely.".to_owned())
     } else if user_owned {
         Some("Rewrite scope and gate targets must wait for explicit user direction.".to_owned())
+    } else if structural {
+        Some(
+            "Structural refine changes can create, remove, reparent, or relink plan nodes."
+                .to_owned(),
+        )
     } else {
         None
     }
@@ -207,5 +225,50 @@ mod tests {
                 .is_some()
         );
         assert!(analysis.decisions[0].confirmation.decision_impact.is_some());
+    }
+
+    #[test]
+    fn impact_analysis_pauses_structural_changes_on_known_paths() {
+        let analysis = analyze_refine_comment_impact(RefineImpactAnalysisRequest {
+            plan_id: "plan-1".to_owned(),
+            comments: vec![
+                RefineCommentSource {
+                    source_path: "api/api.md".to_owned(),
+                    begin_comment_line: 2,
+                    end_comment_line: 4,
+                    comment_text: Some("add node for OAuth setup".to_owned()),
+                },
+                RefineCommentSource {
+                    source_path: "api/api.md".to_owned(),
+                    begin_comment_line: 6,
+                    end_comment_line: 8,
+                    comment_text: Some("change child links for auth".to_owned()),
+                },
+                RefineCommentSource {
+                    source_path: "api/api.md".to_owned(),
+                    begin_comment_line: 10,
+                    end_comment_line: 12,
+                    comment_text: Some("change parent contract".to_owned()),
+                },
+                RefineCommentSource {
+                    source_path: "api/api.md".to_owned(),
+                    begin_comment_line: 14,
+                    end_comment_line: 16,
+                    comment_text: Some("remove node after migration".to_owned()),
+                },
+            ],
+            known_node_paths: vec!["api/api.md".to_owned()],
+        });
+
+        assert!(analysis.mapping_issues.is_empty());
+        assert_eq!(analysis.decisions.len(), 4);
+        for decision in &analysis.decisions {
+            assert_eq!(
+                decision.confirmation.status,
+                RefineDecisionStatus::AwaitingManualConfirmation
+            );
+            assert!(decision.confirmation.question_for_user.is_some());
+            assert!(decision.confirmation.decision_impact.is_some());
+        }
     }
 }

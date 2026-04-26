@@ -57,6 +57,10 @@ fn refine_entry_opens_existing_plan_metadata() -> Result<()> {
     assert_eq!(reopened.plan_root, ensured.plan_root);
     assert_eq!(reopened.plan_status, "active");
     assert_eq!(reopened.task_type, "coding-task");
+    assert_eq!(
+        reopened.project_directory,
+        workspace.path().join("project").display().to_string()
+    );
 
     Ok(())
 }

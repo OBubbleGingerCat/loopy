@@ -139,6 +139,7 @@ pub(crate) fn open_plan(
         plan_root: plan.plan_root,
         plan_status: plan.plan_status,
         task_type: plan.task_type,
+        project_directory: plan.project_directory,
     })
 }
 

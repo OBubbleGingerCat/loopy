@@ -59,6 +59,7 @@ pub struct OpenPlanResponse {
     pub plan_root: String,
     pub plan_status: String,
     pub task_type: String,
+    pub project_directory: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

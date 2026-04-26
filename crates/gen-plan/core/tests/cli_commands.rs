@@ -121,10 +121,12 @@ fn open_plan_command_prints_pretty_json() -> Result<()> {
     let workspace = support::workspace()?;
     support::assert_dir_exists(workspace.path());
     let runtime = Runtime::new(workspace.path())?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
     let plan = runtime.ensure_plan(EnsurePlanRequest {
         plan_name: "cli-open-plan".to_owned(),
         task_type: "coding-task".to_owned(),
-        project_directory: workspace.path().to_path_buf(),
+        project_directory: project_directory.clone(),
     })?;
 
     let output = run_cli(
@@ -157,6 +159,10 @@ fn open_plan_command_prints_pretty_json() -> Result<()> {
     assert_eq!(value["plan_root"], Value::String(plan.plan_root));
     assert_eq!(value["plan_status"], Value::String(plan.plan_status));
     assert_eq!(value["task_type"], Value::String("coding-task".to_owned()));
+    assert_eq!(
+        value["project_directory"],
+        Value::String(project_directory.display().to_string())
+    );
 
     Ok(())
 }
@@ -370,7 +376,9 @@ fn leaf_gate_command_prints_pretty_json() -> Result<()> {
     })?;
     fs::create_dir_all(workspace.path().join(".loopy/plans/cli-leaf-gate/api"))?;
     fs::write(
-        workspace.path().join(".loopy/plans/cli-leaf-gate/api/api.md"),
+        workspace
+            .path()
+            .join(".loopy/plans/cli-leaf-gate/api/api.md"),
         "# API\n",
     )?;
     fs::write(
