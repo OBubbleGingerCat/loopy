@@ -543,6 +543,18 @@ fn validate_registered_targets(
     if !request.plan_root.is_dir() {
         return invalid("plan_root must exist and be a directory");
     }
+    let persisted_plan_root = runtime
+        .persisted_plan_root(&request.plan_id)
+        .map_err(
+            |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                reason: source.to_string(),
+            },
+        )?;
+    let request_plan_root = canonicalize_plan_root(&request.plan_root)?;
+    let persisted_plan_root = canonicalize_plan_root(&persisted_plan_root)?;
+    if request_plan_root != persisted_plan_root {
+        return invalid("plan_root must match persisted plan_root");
+    }
     let mut leaf_ids = HashSet::new();
     let mut leaf_paths = HashSet::new();
     for target in &request.registered_targets.leaf_targets {
@@ -817,6 +829,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn invalid<T>(reason: &str) -> Result<T, RefineGateExecutionError> {
     Err(RefineGateExecutionError::InvalidRegisteredTargets {
         reason: reason.to_owned(),
+    })
+}
+
+fn canonicalize_plan_root(plan_root: &Path) -> Result<PathBuf, RefineGateExecutionError> {
+    fs::canonicalize(plan_root).map_err(|source| {
+        RefineGateExecutionError::InvalidRegisteredTargets {
+            reason: format!("plan_root must be canonicalizable: {source}"),
+        }
     })
 }
 

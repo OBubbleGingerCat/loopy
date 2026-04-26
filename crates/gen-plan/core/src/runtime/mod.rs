@@ -49,6 +49,11 @@ impl Runtime {
         &self.workspace_root
     }
 
+    pub(crate) fn persisted_plan_root(&self, plan_id: &str) -> Result<PathBuf> {
+        let connection = self.open_connection()?;
+        Ok(query::load_gate_plan_context(&connection, plan_id)?.plan_root)
+    }
+
     pub fn ensure_plan(&self, request: EnsurePlanRequest) -> Result<EnsurePlanResponse> {
         let plan_name = validate_plan_name(&request.plan_name)?;
         let plan_root = self.plan_root(plan_name);

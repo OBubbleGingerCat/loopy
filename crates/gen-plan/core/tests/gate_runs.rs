@@ -288,6 +288,34 @@ fn refine_gate_consumers_use_persisted_project_directory() -> Result<()> {
 }
 
 #[test]
+fn refine_gate_revalidation_rejects_mismatched_plan_root() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "plan-root-mismatch".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let stale_plan_root = workspace.path().join("stale-plan-root");
+    fs::create_dir_all(&stale_plan_root)?;
+
+    let error = run_refine_gate_revalidation(
+        &runtime,
+        RunRefineGateRevalidationRequest {
+            plan_id: plan.plan_id,
+            plan_root: stale_plan_root,
+            planner_mode: PlannerMode::Auto,
+            registered_targets: RegisteredRefineGateTargets::default(),
+            retry_policy: RefineGateRetryPolicy::default(),
+            refine_context: RefineGateRevalidationContext::default(),
+        },
+    )
+    .expect_err("revalidation must use the persisted plan root");
+    assert!(format!("{error:?}").contains("plan_root"));
+    Ok(())
+}
+
+#[test]
 fn refine_gate_revalidation_passes_context_to_reviewer_prompts() -> Result<()> {
     let workspace = support::workspace()?;
     write_dev_registry(

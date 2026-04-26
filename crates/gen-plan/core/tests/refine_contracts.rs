@@ -1269,6 +1269,98 @@ fn refine_gate_registration_creates_root_parent_through_public_runtime() -> Resu
 }
 
 #[test]
+fn refine_gate_registration_validates_all_targets_before_parent_mutation() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api/new"))?;
+    fs::write(plan_root.join("api/api.md"), "# API\n")?;
+    fs::write(plan_root.join("api/new/new.md"), "# New\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let error = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_candidates: vec![RefineParentRegistrationCandidate {
+                relative_path: "api/new/new.md".to_owned(),
+                parent_relative_path: Some("api/api.md".to_owned()),
+                reasons: vec![RefineGateTargetReason::NewParent],
+            }],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "api/api.md".to_owned(),
+                changed_child_relative_paths: vec!["api/typo.md".to_owned()],
+                reasons: vec![RefineGateTargetReason::ChangedChildSet],
+            }],
+        },
+    )
+    .expect_err("invalid frontier child should fail before registering new parents");
+    assert!(matches!(
+        error,
+        loopy_gen_plan::refine::RefineGatePreparationError::IncoherentFrontierChildren { .. }
+    ));
+    let missing_parent = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: None,
+        relative_path: Some("api/new/new.md".to_owned()),
+    });
+    assert!(missing_parent.is_err(), "new parent must not be persisted");
+    Ok(())
+}
+
+#[test]
+fn refine_gate_registration_rejects_non_root_top_level_parent_candidate() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::write(plan_root.join("overview.md"), "# Overview\n")?;
+
+    let error = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_candidates: vec![RefineParentRegistrationCandidate {
+                relative_path: "overview.md".to_owned(),
+                parent_relative_path: None,
+                reasons: vec![RefineGateTargetReason::NewParent],
+            }],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![],
+        },
+    )
+    .expect_err("only the actual root plan markdown may be a top-level parent");
+    assert!(matches!(
+        error,
+        loopy_gen_plan::refine::RefineGatePreparationError::InvalidCanonicalPath { .. }
+    ));
+    let missing_parent = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: None,
+        relative_path: Some("overview.md".to_owned()),
+    });
+    assert!(
+        missing_parent.is_err(),
+        "invalid parent must not be persisted"
+    );
+    Ok(())
+}
+
+#[test]
 fn refine_gate_registration_validates_all_frontiers_before_reconciling_links() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -1805,12 +1897,16 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
 fn refine_gate_execution_empty_selection_passes_without_running_gates() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
     let plan_root = workspace.path().join(".loopy/plans/demo");
-    fs::create_dir_all(&plan_root)?;
     let report = run_refine_gate_revalidation(
         &runtime,
         RunRefineGateRevalidationRequest {
-            plan_id: "plan-1".to_owned(),
+            plan_id: plan.plan_id,
             plan_root,
             planner_mode: loopy_gen_plan::PlannerMode::Auto,
             registered_targets: Default::default(),

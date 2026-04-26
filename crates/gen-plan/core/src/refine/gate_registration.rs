@@ -5,7 +5,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EnsureNodeIdRequest, InspectNodeRequest, ListChildrenRequest, NodeKind,
+    EnsureNodeIdRequest, InspectNodeRequest, ListChildrenRequest, NodeKind, OpenPlanRequest,
     ReconcileParentChildLinksRequest, Runtime,
 };
 
@@ -117,22 +117,35 @@ pub fn register_refine_gate_targets(
     runtime: &Runtime,
     request: RegisterRefineGateTargetsRequest,
 ) -> Result<RegisteredRefineGateTargets, RefineGatePreparationError> {
-    // Uses only public Runtime::ensure_node_id, Runtime::inspect_node, and Runtime::list_children;
-    // must not edit crates/gen-plan/core/src/runtime/mod.rs or private runtime query modules.
+    // Validate the whole request before any ensure/reconcile calls so rejected refine targets do
+    // not leave partially registered runtime nodes behind.
     let RegisterRefineGateTargetsRequest {
         plan_id,
         parent_candidates,
         leaf_candidates,
         frontier_candidates,
     } = request;
+    let parent_candidates = ordered_parent_candidates(parent_candidates);
+    prevalidate_registration_request(
+        runtime,
+        &plan_id,
+        &parent_candidates,
+        &leaf_candidates,
+        &frontier_candidates,
+    )?;
     let mut registered = RegisteredRefineGateTargets::default();
     let mut tracked_parents = HashSet::<String>::new();
 
-    for candidate in ordered_parent_candidates(parent_candidates) {
+    for candidate in parent_candidates {
         validate_non_empty_reasons("parent", &candidate.relative_path, &candidate.reasons)?;
-        validate_parent_path("relative_path", &candidate.relative_path)?;
+        validate_parent_path(runtime, &plan_id, "relative_path", &candidate.relative_path)?;
         if let Some(parent_relative_path) = &candidate.parent_relative_path {
-            validate_parent_path("parent_relative_path", parent_relative_path)?;
+            validate_parent_path(
+                runtime,
+                &plan_id,
+                "parent_relative_path",
+                parent_relative_path,
+            )?;
             if !tracked_parents.contains(parent_relative_path)
                 && inspect_parent(runtime, &plan_id, parent_relative_path).is_err()
             {
@@ -176,7 +189,7 @@ pub fn register_refine_gate_targets(
     }
 
     for candidate in &frontier_candidates {
-        validate_frontier_candidate(candidate)?;
+        validate_frontier_candidate(runtime, &plan_id, candidate)?;
     }
 
     let mut deferred_leaf_candidates = Vec::new();
@@ -303,6 +316,8 @@ pub fn register_refine_gate_targets(
 }
 
 fn validate_frontier_candidate(
+    runtime: &Runtime,
+    plan_id: &str,
     candidate: &RefineFrontierRegistrationCandidate,
 ) -> Result<(), RefineGatePreparationError> {
     validate_non_empty_reasons(
@@ -310,7 +325,84 @@ fn validate_frontier_candidate(
         &candidate.parent_relative_path,
         &candidate.reasons,
     )?;
-    validate_parent_path("parent_relative_path", &candidate.parent_relative_path)
+    validate_parent_path(
+        runtime,
+        plan_id,
+        "parent_relative_path",
+        &candidate.parent_relative_path,
+    )
+}
+
+fn prevalidate_registration_request(
+    runtime: &Runtime,
+    plan_id: &str,
+    parent_candidates: &[RefineParentRegistrationCandidate],
+    leaf_candidates: &[RefineLeafRegistrationCandidate],
+    frontier_candidates: &[RefineFrontierRegistrationCandidate],
+) -> Result<(), RefineGatePreparationError> {
+    let candidate_parent_paths = parent_candidates
+        .iter()
+        .map(|candidate| candidate.relative_path.clone())
+        .collect::<HashSet<_>>();
+    let mut candidate_node_paths = candidate_parent_paths.clone();
+    candidate_node_paths.extend(
+        leaf_candidates
+            .iter()
+            .map(|candidate| candidate.relative_path.clone()),
+    );
+
+    for candidate in parent_candidates {
+        validate_non_empty_reasons("parent", &candidate.relative_path, &candidate.reasons)?;
+        validate_parent_path(runtime, plan_id, "relative_path", &candidate.relative_path)?;
+        if let Some(parent_relative_path) = &candidate.parent_relative_path {
+            validate_parent_path(
+                runtime,
+                plan_id,
+                "parent_relative_path",
+                parent_relative_path,
+            )?;
+            if !candidate_parent_paths.contains(parent_relative_path)
+                && inspect_parent(runtime, plan_id, parent_relative_path).is_err()
+            {
+                return Err(RefineGatePreparationError::MissingParentRegistration {
+                    child_relative_path: candidate.relative_path.clone(),
+                    parent_relative_path: parent_relative_path.clone(),
+                });
+            }
+        }
+    }
+
+    for candidate in leaf_candidates {
+        validate_non_empty_reasons("leaf", &candidate.relative_path, &candidate.reasons)?;
+        validate_leaf_path("relative_path", &candidate.relative_path)?;
+        validate_leaf_parent_candidate(
+            runtime,
+            plan_id,
+            &candidate.relative_path,
+            candidate.parent_relative_path.as_deref(),
+            &candidate_parent_paths,
+        )?;
+    }
+
+    for candidate in frontier_candidates {
+        validate_frontier_candidate(runtime, plan_id, candidate)?;
+        if !candidate_parent_paths.contains(&candidate.parent_relative_path)
+            && inspect_parent(runtime, plan_id, &candidate.parent_relative_path).is_err()
+        {
+            return Err(RefineGatePreparationError::MissingParentRegistration {
+                child_relative_path: candidate.parent_relative_path.clone(),
+                parent_relative_path: candidate.parent_relative_path.clone(),
+            });
+        }
+        validate_frontier_changed_child_paths_before_mutation(
+            runtime,
+            plan_id,
+            candidate,
+            &candidate_node_paths,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn register_leaf_candidate(
@@ -436,8 +528,37 @@ fn validate_leaf_parent(
             parent_relative_path: parent_self_path(relative_path).unwrap_or_default(),
         }),
         Some(parent) => {
-            validate_parent_path("parent_relative_path", parent)?;
+            validate_parent_path(runtime, plan_id, "parent_relative_path", parent)?;
             if tracked_parents.contains(parent) || inspect_parent(runtime, plan_id, parent).is_ok()
+            {
+                Ok(())
+            } else {
+                Err(RefineGatePreparationError::MissingParentRegistration {
+                    child_relative_path: relative_path.to_owned(),
+                    parent_relative_path: parent.to_owned(),
+                })
+            }
+        }
+    }
+}
+
+fn validate_leaf_parent_candidate(
+    runtime: &Runtime,
+    plan_id: &str,
+    relative_path: &str,
+    parent_relative_path: Option<&str>,
+    candidate_parent_paths: &HashSet<String>,
+) -> Result<(), RefineGatePreparationError> {
+    match parent_relative_path {
+        None if !relative_path.contains('/') => Ok(()),
+        None => Err(RefineGatePreparationError::MissingParentRegistration {
+            child_relative_path: relative_path.to_owned(),
+            parent_relative_path: parent_self_path(relative_path).unwrap_or_default(),
+        }),
+        Some(parent) => {
+            validate_parent_path(runtime, plan_id, "parent_relative_path", parent)?;
+            if candidate_parent_paths.contains(parent)
+                || inspect_parent(runtime, plan_id, parent).is_ok()
             {
                 Ok(())
             } else {
@@ -497,7 +618,42 @@ fn validate_leaf_path(field: &str, relative_path: &str) -> Result<(), RefineGate
     Ok(())
 }
 
+fn validate_frontier_changed_child_paths_before_mutation(
+    runtime: &Runtime,
+    plan_id: &str,
+    candidate: &RefineFrontierRegistrationCandidate,
+    candidate_node_paths: &HashSet<String>,
+) -> Result<(), RefineGatePreparationError> {
+    let mut missing_child_relative_paths = Vec::new();
+    for child in &candidate.changed_child_relative_paths {
+        validate_markdown_path("changed_child_relative_paths", child)?;
+        if candidate_node_paths.contains(child) {
+            continue;
+        }
+        if runtime
+            .inspect_node(InspectNodeRequest {
+                plan_id: plan_id.to_owned(),
+                node_id: None,
+                relative_path: Some(child.clone()),
+            })
+            .is_err()
+        {
+            missing_child_relative_paths.push(child.clone());
+        }
+    }
+    if missing_child_relative_paths.is_empty() {
+        Ok(())
+    } else {
+        Err(RefineGatePreparationError::IncoherentFrontierChildren {
+            parent_relative_path: candidate.parent_relative_path.clone(),
+            missing_child_relative_paths,
+        })
+    }
+}
+
 fn validate_parent_path(
+    runtime: &Runtime,
+    plan_id: &str,
     field: &str,
     relative_path: &str,
 ) -> Result<(), RefineGatePreparationError> {
@@ -509,7 +665,9 @@ fn validate_parent_path(
         .and_then(|parent| parent.file_name())
         .and_then(|name| name.to_str());
     let is_scoped_parent_path = stem.is_some() && parent_dir == stem;
-    let is_root_plan_parent_path = stem.is_some() && is_root_parent_path(relative_path);
+    let is_root_plan_parent_path = stem.is_some()
+        && is_root_parent_path(relative_path)
+        && is_actual_root_plan_parent_path(runtime, plan_id, relative_path);
     if !is_scoped_parent_path && !is_root_plan_parent_path {
         return Err(RefineGatePreparationError::InvalidCanonicalPath {
             field: field.to_owned(),
@@ -517,6 +675,21 @@ fn validate_parent_path(
         });
     }
     Ok(())
+}
+
+fn is_actual_root_plan_parent_path(runtime: &Runtime, plan_id: &str, relative_path: &str) -> bool {
+    let Some(plan_name) = Path::new(relative_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+    else {
+        return false;
+    };
+    runtime
+        .open_plan(OpenPlanRequest {
+            plan_name: plan_name.to_owned(),
+        })
+        .map(|plan| plan.plan_id == plan_id)
+        .unwrap_or(false)
 }
 
 fn is_root_parent_path(relative_path: &str) -> bool {
