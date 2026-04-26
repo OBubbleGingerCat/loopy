@@ -286,7 +286,7 @@ pub(crate) fn reconcile_parent_child_links(
     } = request;
     let parent_relative_path =
         validate_plan_local_path("parent_relative_path", &parent_relative_path)?;
-    require_parent_node_path("parent_relative_path", &parent_relative_path)?;
+    require_reconcilable_parent_node_path("parent_relative_path", &parent_relative_path)?;
     let plan = load_gate_plan_context(connection, &plan_id)?;
     let parent = load_node_record_by_relative_path(connection, &plan_id, &parent_relative_path)?
         .ok_or_else(|| {
@@ -619,7 +619,7 @@ pub(crate) fn require_leaf_node_record(node: &NodeRecord) -> Result<()> {
 }
 
 pub(crate) fn require_parent_node_record(node: &NodeRecord) -> Result<()> {
-    require_parent_node_path("relative_path", &node.relative_path)?;
+    require_reconcilable_parent_node_path("relative_path", &node.relative_path)?;
     if node.node_kind != NodeKind::Parent {
         return Err(anyhow!(
             "frontier review requires a parent node target, but `{}` is `{}`",
@@ -1079,6 +1079,21 @@ pub(crate) fn require_parent_node_path(label: &str, relative_path: &str) -> Resu
         ));
     }
     Ok(())
+}
+
+fn require_reconcilable_parent_node_path(label: &str, relative_path: &str) -> Result<()> {
+    if validate_registered_node_path(label, relative_path)? == NodeKind::Parent
+        || is_root_plan_parent_path(relative_path)
+    {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "{label} must point to a canonical parent markdown path such as `scope/scope.md` or a root plan parent markdown file"
+    ))
+}
+
+fn is_root_plan_parent_path(relative_path: &str) -> bool {
+    Path::new(relative_path).components().count() == 1
 }
 
 fn current_timestamp() -> Result<String> {

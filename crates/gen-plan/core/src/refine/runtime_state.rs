@@ -263,11 +263,13 @@ fn collect_structural_change(
             change.parent_node_id.clone(),
         );
     }
-    for child in change
-        .added_child_relative_paths
-        .iter()
-        .chain(change.removed_child_relative_paths.iter())
-    {
+    for child in &change.added_child_relative_paths {
+        validate_path(child)?;
+        if !created_paths.contains(child) {
+            load_targets.entry(child.clone()).or_insert(None);
+        }
+    }
+    for child in &change.removed_child_relative_paths {
         validate_path(child)?;
     }
     Ok(())

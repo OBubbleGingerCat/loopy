@@ -954,6 +954,93 @@ fn refine_runtime_state_builds_selection_inputs_from_public_runtime() -> Result<
 }
 
 #[test]
+fn refine_runtime_state_loads_structurally_added_tracked_leaf_for_revalidation() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Attached](./attached.md)\n",
+    )?;
+    fs::write(plan_root.join("api/attached.md"), "# Attached\n")?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/attached.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "UPDATE GEN_PLAN__nodes
+         SET parent_node_id = NULL
+         WHERE plan_id = ?1 AND node_id = ?2",
+        params![plan.plan_id, leaf.node_id],
+    )?;
+
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![],
+        structural_changes: vec![RefineStructuralChange {
+            parent_relative_path: "api/api.md".to_owned(),
+            parent_node_id: Some(parent.node_id.clone()),
+            change_kind: RefineStructuralChangeKind::ChangedChildSet,
+            added_child_relative_paths: vec!["api/attached.md".to_owned()],
+            removed_child_relative_paths: vec![],
+        }],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let inputs = loopy_gen_plan::refine::build_refine_gate_selection_inputs(
+        &runtime,
+        loopy_gen_plan::refine::BuildRefineGateSelectionInputsRequest {
+            plan_id: plan.plan_id,
+            rewrite_result,
+            stale_result_handoff: vec![],
+        },
+    )?;
+    assert!(
+        inputs.runtime_snapshot.nodes.iter().any(|node| {
+            node.node_id == leaf.node_id && node.relative_path == "api/attached.md"
+        }),
+        "structurally added tracked leaf should be loaded for target selection"
+    );
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result: inputs.rewrite_result,
+        runtime_snapshot: inputs.runtime_snapshot,
+        prior_gate_summaries: inputs.prior_gate_summaries,
+        stale_result_handoff: inputs.stale_result_handoff,
+    });
+    let target = selection
+        .leaf_targets
+        .iter()
+        .find(|target| target.relative_path == "api/attached.md")
+        .expect("added tracked leaf should be revalidated");
+    assert_eq!(target.node_id.as_deref(), Some(leaf.node_id.as_str()));
+    assert!(
+        target
+            .reasons
+            .contains(&RefineGateTargetReason::ChangedChildSet)
+    );
+    Ok(())
+}
+
+#[test]
 fn refine_runtime_state_loads_descendants_for_parent_only_revalidation() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -1201,6 +1288,54 @@ fn reconcile_parent_child_links_rejects_stealing_still_linked_child() -> Result<
         child_after.parent_node_id.as_deref(),
         Some(nested_parent.node_id.as_str())
     );
+    Ok(())
+}
+
+#[test]
+fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(&plan_root)?;
+    fs::write(
+        plan_root.join("demo.md"),
+        "# Demo\n\n## Child Nodes\n\n- [Intro](./intro.md)\n",
+    )?;
+    fs::write(plan_root.join("intro.md"), "# Intro\n")?;
+    let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
+        params![plan.plan_id, "root-1", "demo.md", "demo", "parent", Option::<String>::None],
+    )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
+        params![plan.plan_id, "leaf-1", "intro.md", "intro", "leaf", Option::<String>::None],
+    )?;
+
+    let reconciled = runtime.reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_relative_path: "demo.md".to_owned(),
+    })?;
+    assert_eq!(reconciled.parent_node_id, "root-1");
+    assert_eq!(reconciled.linked_child_relative_paths, vec!["intro.md"]);
+    assert_eq!(reconciled.attached_child_relative_paths, vec!["intro.md"]);
+
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id,
+        parent_node_id: Some("root-1".to_owned()),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(children.children.len(), 1);
+    assert_eq!(children.children[0].node_id, "leaf-1");
     Ok(())
 }
 
