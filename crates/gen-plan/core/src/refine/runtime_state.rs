@@ -126,22 +126,24 @@ pub fn build_refine_gate_selection_inputs(
 
     let mut snapshot = RefineRuntimeNodeSnapshot::default();
     let mut prior = RefinePriorGateSummaries::default();
+    let mut loaded_paths = BTreeSet::<String>::new();
 
-    for (relative_path, node_id) in load_targets {
+    while let Some((relative_path, node_id)) = load_targets.pop_first() {
+        if !loaded_paths.insert(relative_path.clone()) {
+            continue;
+        }
         let inspected = runtime
             .inspect_node(InspectNodeRequest {
                 plan_id: request.plan_id.clone(),
                 node_id: node_id.clone(),
-                relative_path: node_id
-                    .is_none()
-                    .then(|| relative_path.clone()),
+                relative_path: node_id.is_none().then(|| relative_path.clone()),
             })
             .map_err(|source| RefineRuntimeStateLoadError::MissingTrackedNode {
                 relative_path: relative_path.clone(),
                 source: source.to_string(),
             })?;
         let child_relative_paths = if inspected.node_kind == NodeKind::Parent {
-            runtime
+            let children = runtime
                 .list_children(ListChildrenRequest {
                     plan_id: request.plan_id.clone(),
                     parent_node_id: Some(inspected.node_id.clone()),
@@ -153,7 +155,15 @@ pub fn build_refine_gate_selection_inputs(
                         source: source.to_string(),
                     },
                 )?
-                .children
+                .children;
+            for child in &children {
+                if !loaded_paths.contains(&child.relative_path) {
+                    load_targets
+                        .entry(child.relative_path.clone())
+                        .or_insert_with(|| Some(child.node_id.clone()));
+                }
+            }
+            children
                 .into_iter()
                 .map(|child| child.relative_path)
                 .collect()

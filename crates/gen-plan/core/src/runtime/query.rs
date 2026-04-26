@@ -309,6 +309,29 @@ pub(crate) fn reconcile_parent_child_links(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
+
+    let mut validated_linked_children = Vec::new();
+    for child_relative_path in &linked_child_relative_paths {
+        let child_kind = validate_registered_node_path("child_relative_path", child_relative_path)?;
+        validate_direct_child_relationship(
+            child_relative_path,
+            Some(&parent.relative_path),
+            child_kind,
+        )?;
+        ensure_plan_markdown_file_exists(&plan.plan_root, child_relative_path)?;
+        let Some(child) =
+            load_node_record_by_relative_path(connection, &plan_id, child_relative_path)?
+        else {
+            continue;
+        };
+        validate_direct_child_relationship(
+            &child.relative_path,
+            Some(&parent.relative_path),
+            child.node_kind,
+        )?;
+        validated_linked_children.push(child);
+    }
+
     let timestamp = current_timestamp()?;
 
     let current_children = load_child_nodes(connection, &plan_id, Some(&parent.node_id))?;
@@ -328,24 +351,7 @@ pub(crate) fn reconcile_parent_child_links(
     }
 
     let mut attached_child_relative_paths = Vec::new();
-    for child_relative_path in &linked_child_relative_paths {
-        let child_kind = validate_registered_node_path("child_relative_path", child_relative_path)?;
-        validate_direct_child_relationship(
-            child_relative_path,
-            Some(&parent.relative_path),
-            child_kind,
-        )?;
-        ensure_plan_markdown_file_exists(&plan.plan_root, child_relative_path)?;
-        let Some(child) =
-            load_node_record_by_relative_path(connection, &plan_id, child_relative_path)?
-        else {
-            continue;
-        };
-        validate_direct_child_relationship(
-            &child.relative_path,
-            Some(&parent.relative_path),
-            child.node_kind,
-        )?;
+    for child in validated_linked_children {
         if child.parent_node_id.as_deref() == Some(parent.node_id.as_str()) {
             continue;
         }

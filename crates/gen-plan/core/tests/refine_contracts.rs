@@ -18,7 +18,7 @@ use loopy_gen_plan::runtime::comments::{
 };
 use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, GateSummary, InspectNodeRequest, ListChildrenRequest,
-    NodeKind, Runtime,
+    NodeKind, ReconcileParentChildLinksRequest, Runtime,
 };
 
 #[test]
@@ -532,6 +532,138 @@ fn refine_runtime_state_builds_selection_inputs_from_public_runtime() -> Result<
             .iter()
             .any(|node| node.relative_path == "new-leaf.md")
     );
+    Ok(())
+}
+
+#[test]
+fn refine_runtime_state_loads_descendants_for_parent_only_revalidation() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/direct.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    let nested_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/auth/auth.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/auth/check.md".to_owned(),
+        parent_relative_path: Some("api/auth/auth.md".to_owned()),
+    })?;
+
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![RefineChangedFile {
+            relative_path: "api/api.md".to_owned(),
+            node_id: Some(parent.node_id),
+            change_kind: RefineChangedFileKind::TextUpdated,
+        }],
+        structural_changes: vec![],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let inputs = loopy_gen_plan::refine::build_refine_gate_selection_inputs(
+        &runtime,
+        loopy_gen_plan::refine::BuildRefineGateSelectionInputsRequest {
+            plan_id: plan.plan_id.clone(),
+            rewrite_result,
+            stale_result_handoff: vec![],
+        },
+    )?;
+
+    assert!(inputs.runtime_snapshot.nodes.iter().any(|node| {
+        node.relative_path == "api/auth/auth.md" && node.node_id == nested_parent.node_id
+    }));
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: plan.plan_id,
+        rewrite_result: inputs.rewrite_result,
+        runtime_snapshot: inputs.runtime_snapshot,
+        prior_gate_summaries: inputs.prior_gate_summaries,
+        stale_result_handoff: inputs.stale_result_handoff,
+    });
+
+    for relative_path in ["api/direct.md", "api/auth/check.md"] {
+        assert!(
+            selection
+                .leaf_targets
+                .iter()
+                .any(|target| target.relative_path == relative_path),
+            "missing descendant leaf target {relative_path}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn reconcile_parent_child_links_validates_before_detaching_children() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Old](./old.md)\n",
+    )?;
+    fs::write(plan_root.join("api/old.md"), "# Old\n")?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let old_child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/old.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Missing](./missing.md)\n",
+    )?;
+
+    let error = runtime
+        .reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_relative_path: "api/api.md".to_owned(),
+        })
+        .expect_err("missing linked child should reject reconciliation");
+    assert!(
+        format!("{error:#}").contains("missing.md"),
+        "unexpected reconcile error: {error:#}"
+    );
+
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(children.children.len(), 1);
+    assert_eq!(children.children[0].node_id, old_child.node_id);
+    assert_eq!(children.children[0].relative_path, "api/old.md");
     Ok(())
 }
 

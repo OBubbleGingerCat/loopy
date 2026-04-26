@@ -1065,12 +1065,19 @@ fn assemble_refine_rewrite_result(
 }
 
 fn replacement_for_path(request: &RefineRewriteRequest, relative_path: &str) -> Option<String> {
-    request
+    let mut replacement = None;
+    for action in request
         .decisions
         .iter()
         .flat_map(|decision| decision.rewrite_actions.iter())
-        .find(|action| action.target_relative_path.as_deref() == Some(relative_path))
-        .and_then(|action| action.replacement_markdown.clone())
+    {
+        if action.target_relative_path.as_deref() == Some(relative_path)
+            && let Some(markdown) = &action.replacement_markdown
+        {
+            replacement = Some(markdown.clone());
+        }
+    }
+    replacement
 }
 
 fn sanitized_replacement_for_path(
@@ -1572,6 +1579,58 @@ mod tests {
         assert!(!updated.contains("BEGIN_COMMENT"));
         assert!(!updated.contains("processed feedback"));
         assert!(updated.contains("Updated\n"));
+    }
+
+    #[test]
+    fn refine_rewrite_uses_later_explicit_replacement_for_duplicate_target_actions() {
+        let plan_root = temp_plan_root();
+        fs::write(plan_root.join("api.md"), "# API\n\nOriginal\n").unwrap();
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![
+                confirmed_decision(
+                    Vec::new(),
+                    vec![RefineRewriteAction {
+                        action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                        target_relative_path: Some("api.md".to_owned()),
+                        parent_relative_path: None,
+                        node_kind: Some("leaf".to_owned()),
+                        link_change: None,
+                        replacement_markdown: None,
+                        rationale: Some("first comment only marks the path".to_owned()),
+                    }],
+                ),
+                confirmed_decision(
+                    Vec::new(),
+                    vec![RefineRewriteAction {
+                        action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                        target_relative_path: Some("api.md".to_owned()),
+                        parent_relative_path: None,
+                        node_kind: Some("leaf".to_owned()),
+                        link_change: None,
+                        replacement_markdown: Some("# API\n\nSecond replacement\n".to_owned()),
+                        rationale: Some("later comment provides the merged rewrite".to_owned()),
+                    }],
+                ),
+            ],
+            rewrite_scope: RefineRewriteScope {
+                rewrite_targets: vec![RefineRewriteTarget {
+                    relative_path: "api.md".to_owned(),
+                    node_id: Some("leaf-1".to_owned()),
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect("duplicate target rewrite should pass");
+
+        assert_eq!(
+            fs::read_to_string(plan_root.join("api.md")).unwrap(),
+            "# API\n\nSecond replacement\n"
+        );
     }
 
     #[test]
