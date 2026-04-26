@@ -2,13 +2,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use loopy_common_invocation::run_local_command;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::{query, Runtime};
+use super::{Runtime, query};
 use crate::{
     ReviewIssue, RunFrontierReviewGateRequest, RunFrontierReviewGateResponse,
     RunLeafReviewGateRequest, RunLeafReviewGateResponse,
@@ -44,6 +44,7 @@ pub(crate) fn run_leaf_review_gate(
         plan_id,
         node_id,
         planner_mode,
+        refine_revalidation_context,
     } = request;
     let plan = query::load_gate_plan_context(connection, &plan_id)?;
     let node = query::load_node_record(connection, &plan_id, &node_id)?;
@@ -90,6 +91,10 @@ pub(crate) fn run_leaf_review_gate(
                 read_plan_markdown(&plan.plan_root, &node.relative_path)?,
             ),
             ("parent_expansion_snapshot", parent_expansion_snapshot),
+            (
+                "refine_revalidation_context",
+                render_optional_refine_context(refine_revalidation_context.as_deref()),
+            ),
         ],
     );
     let output = dispatch_reviewer(
@@ -160,6 +165,7 @@ pub(crate) fn run_frontier_review_gate(
         plan_id,
         parent_node_id,
         planner_mode,
+        refine_revalidation_context,
     } = request;
     let plan = query::load_gate_plan_context(connection, &plan_id)?;
     let parent_node = query::load_node_record(connection, &plan_id, &parent_node_id)?;
@@ -205,6 +211,10 @@ pub(crate) fn run_frontier_review_gate(
             (
                 "passed_leaf_review_summaries",
                 render_passed_leaf_review_summaries(connection, &plan_id, &parent_node_id)?,
+            ),
+            (
+                "refine_revalidation_context",
+                render_optional_refine_context(refine_revalidation_context.as_deref()),
             ),
         ],
     );
@@ -443,6 +453,13 @@ fn read_plan_markdown(plan_root: &Path, relative_path: &str) -> Result<String> {
     let full_path = plan_root.join(relative_path);
     fs::read_to_string(&full_path)
         .with_context(|| format!("failed to read plan markdown {}", full_path.display()))
+}
+
+fn render_optional_refine_context(context: Option<&str>) -> String {
+    match context.map(str::trim).filter(|context| !context.is_empty()) {
+        Some(context) => context.to_owned(),
+        None => "No refine revalidation context supplied.".to_owned(),
+    }
 }
 
 fn render_template(template: &str, replacements: &[(&str, String)]) -> String {

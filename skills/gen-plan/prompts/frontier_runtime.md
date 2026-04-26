@@ -254,4 +254,7 @@ Do not treat a decision as user-owned if it is already determined by:
 ### Passed Leaf Review Results And Resolution Summaries
 {{passed_leaf_review_summaries}}
 
+### Refine Revalidation Context
+{{refine_revalidation_context}}
+
 Return a structured result only.

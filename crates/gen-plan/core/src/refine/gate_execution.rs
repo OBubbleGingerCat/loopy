@@ -15,6 +15,8 @@ use crate::{
 use super::gate_registration::{
     RegisteredRefineFrontierTarget, RegisteredRefineGateTargets, RegisteredRefineLeafTarget,
 };
+use super::rewrite::RefineRewriteResult;
+use super::runtime_state::RefineStaleResultHandoff;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRefineGateRevalidationRequest {
@@ -23,6 +25,22 @@ pub struct RunRefineGateRevalidationRequest {
     pub planner_mode: PlannerMode,
     pub registered_targets: RegisteredRefineGateTargets,
     pub retry_policy: RefineGateRetryPolicy,
+    pub refine_context: RefineGateRevalidationContext,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefineGateRevalidationContext {
+    pub processed_comment_blocks: Vec<RefineGateProcessedCommentBlock>,
+    pub stale_result_handoff: Vec<RefineStaleResultHandoff>,
+    pub rewrite_result: Option<RefineRewriteResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefineGateProcessedCommentBlock {
+    pub relative_path: String,
+    pub begin_comment_line: usize,
+    pub end_comment_line: usize,
+    pub comment_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +204,13 @@ fn run_leaf_target(
             plan_id: request.plan_id.clone(),
             node_id: target.node_id.clone(),
             planner_mode: request.planner_mode.clone(),
+            refine_revalidation_context: Some(render_refine_revalidation_context(
+                "leaf",
+                &target.relative_path,
+                &target.node_id,
+                target.parent_relative_path.as_deref(),
+                &request.refine_context,
+            )?),
         }) {
             Ok(response) if response.passed => {
                 report.leaf_attempts.push(RefineGateAttempt {
@@ -296,6 +321,13 @@ fn run_frontier_target(
             plan_id: request.plan_id.clone(),
             parent_node_id: target.parent_node_id.clone(),
             planner_mode: request.planner_mode.clone(),
+            refine_revalidation_context: Some(render_refine_revalidation_context(
+                "frontier",
+                &target.parent_relative_path,
+                &target.parent_node_id,
+                Some(&target.parent_relative_path),
+                &request.refine_context,
+            )?),
         }) {
             Ok(response) if response.passed => {
                 validate_frontier_response_contract(&response)?;
@@ -403,6 +435,78 @@ fn status_for_review_issues(issues: &[ReviewIssue]) -> RefineGateExecutionStatus
     } else {
         RefineGateExecutionStatus::BlockedByReviewIssues
     }
+}
+
+fn render_refine_revalidation_context(
+    gate_kind: &str,
+    target_relative_path: &str,
+    target_node_id: &str,
+    target_parent_relative_path: Option<&str>,
+    refine_context: &RefineGateRevalidationContext,
+) -> Result<String, RefineGateExecutionError> {
+    let mut rendered = String::new();
+    rendered.push_str("## Target\n");
+    rendered.push_str(&format!("- Gate Kind: {gate_kind}\n"));
+    rendered.push_str(&format!("- Target Relative Path: {target_relative_path}\n"));
+    rendered.push_str(&format!("- Target Node ID: {target_node_id}\n"));
+    if let Some(parent) = target_parent_relative_path {
+        rendered.push_str(&format!("- Target Parent Relative Path: {parent}\n"));
+    }
+
+    append_json_section(
+        &mut rendered,
+        "Processed Comment Blocks",
+        &refine_context.processed_comment_blocks,
+    )?;
+    append_json_section(
+        &mut rendered,
+        "Stale Handoff",
+        &refine_context.stale_result_handoff,
+    )?;
+
+    if let Some(rewrite_result) = &refine_context.rewrite_result {
+        append_json_section(
+            &mut rendered,
+            "Changed Files",
+            &rewrite_result.changed_files,
+        )?;
+        append_json_section(
+            &mut rendered,
+            "Changed Child Links",
+            &rewrite_result.structural_changes,
+        )?;
+        append_json_section(
+            &mut rendered,
+            "Context Invalidations",
+            &rewrite_result.context_invalidations,
+        )?;
+        append_json_section(
+            &mut rendered,
+            "Expected Gate Targets",
+            &rewrite_result.expected_gate_targets,
+        )?;
+    } else {
+        rendered.push_str("\n## Changed Files\nNone\n");
+        rendered.push_str("\n## Changed Child Links\nNone\n");
+        rendered.push_str("\n## Context Invalidations\nNone\n");
+        rendered.push_str("\n## Expected Gate Targets\nNone\n");
+    }
+
+    Ok(rendered)
+}
+
+fn append_json_section<T: Serialize>(
+    rendered: &mut String,
+    title: &str,
+    value: &T,
+) -> Result<(), RefineGateExecutionError> {
+    let json = serde_json::to_string_pretty(value).map_err(|source| {
+        RefineGateExecutionError::InvalidRegisteredTargets {
+            reason: source.to_string(),
+        }
+    })?;
+    rendered.push_str(&format!("\n## {title}\n```json\n{json}\n```\n"));
+    Ok(())
 }
 
 fn validate_frontier_response_contract(
@@ -748,6 +852,7 @@ mod tests {
             planner_mode: PlannerMode::Manual,
             registered_targets: RegisteredRefineGateTargets::default(),
             retry_policy: RefineGateRetryPolicy::default(),
+            refine_context: Default::default(),
         };
         let target = RegisteredRefineFrontierTarget {
             parent_node_id: parent.node_id,
@@ -815,6 +920,7 @@ mod tests {
                     ..Default::default()
                 },
                 retry_policy: RefineGateRetryPolicy::default(),
+                refine_context: Default::default(),
             },
         )
         .expect("removed child paths should not have to remain runtime-visible");
@@ -859,6 +965,7 @@ mod tests {
                     ..Default::default()
                 },
                 retry_policy: RefineGateRetryPolicy::default(),
+                refine_context: Default::default(),
             },
         )
         .expect_err("unknown changed child paths should fail preflight");
@@ -916,6 +1023,7 @@ mod tests {
                     ..Default::default()
                 },
                 retry_policy: RefineGateRetryPolicy::default(),
+                refine_context: Default::default(),
             },
         )
         .expect_err("mismatched leaf node_id and relative_path should fail preflight");
@@ -973,6 +1081,7 @@ mod tests {
                     ..Default::default()
                 },
                 retry_policy: RefineGateRetryPolicy::default(),
+                refine_context: Default::default(),
             },
         )
         .expect_err("mismatched frontier parent_node_id and path should fail preflight");

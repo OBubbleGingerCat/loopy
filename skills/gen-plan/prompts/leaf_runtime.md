@@ -255,4 +255,7 @@ Do not treat a decision as user-owned if it is already determined by:
 {{parent_expansion_snapshot}}
 ```
 
+### Refine Revalidation Context
+{{refine_revalidation_context}}
+
 Return a structured result only.

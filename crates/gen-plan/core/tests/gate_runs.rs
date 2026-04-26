@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
+use loopy_gen_plan::refine::{
+    RefineChangedFile, RefineChangedFileKind, RefineContextInvalidation, RefineGateAttemptOutcome,
+    RefineGateProcessedCommentBlock, RefineGateRetryPolicy, RefineGateRevalidationContext,
+    RefineGateTargetReason, RefineRewriteResult, RefineStaleGateClassification,
+    RefineStaleResultHandoff, RefineStructuralChange, RefineStructuralChangeKind,
+    RegisteredRefineFrontierTarget, RegisteredRefineGateTargets, RegisteredRefineLeafTarget,
+    RunRefineGateRevalidationRequest, StaleGateTargetKind, run_refine_gate_revalidation,
+};
 use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, OpenPlanRequest, PlannerMode,
     RunFrontierReviewGateRequest, RunLeafReviewGateRequest, Runtime,
@@ -91,6 +99,7 @@ fn leaf_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Result<
             plan_id: plan.plan_id,
             node_id: node.node_id,
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })?
     };
 
@@ -184,6 +193,7 @@ fn leaf_gate_uses_repaired_project_directory_for_existing_plan() -> Result<()> {
             plan_id: plan.plan_id.clone(),
             node_id: node.node_id,
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })?
     };
     assert!(result.passed);
@@ -258,11 +268,13 @@ fn refine_gate_consumers_use_persisted_project_directory() -> Result<()> {
             plan_id: reopened.plan_id.clone(),
             node_id: leaf.node_id,
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })?;
         let frontier_result = runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
             plan_id: reopened.plan_id,
             parent_node_id: parent.node_id,
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })?;
         (leaf_result, frontier_result)
     };
@@ -272,6 +284,153 @@ fn refine_gate_consumers_use_persisted_project_directory() -> Result<()> {
     assert!(frontier_result.passed);
     assert_eq!(frontier_result.summary, REAL_FRONTIER_SUMMARY);
 
+    Ok(())
+}
+
+#[test]
+fn refine_gate_revalidation_passes_context_to_reviewer_prompts() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), &project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "refine-context-prompts".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory,
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/refine-context-prompts");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Implement endpoint](./implement-endpoint.md)\n",
+    )?;
+    fs::write(
+        plan_root.join("api/implement-endpoint.md"),
+        "# Implement endpoint\n\nAdd the endpoint.\n",
+    )?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/implement-endpoint.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    let report = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        run_refine_gate_revalidation(
+            &runtime,
+            RunRefineGateRevalidationRequest {
+                plan_id: plan.plan_id.clone(),
+                plan_root: plan_root.clone(),
+                planner_mode: PlannerMode::Auto,
+                registered_targets: RegisteredRefineGateTargets {
+                    parent_targets: vec![],
+                    leaf_targets: vec![RegisteredRefineLeafTarget {
+                        node_id: leaf.node_id.clone(),
+                        relative_path: "api/implement-endpoint.md".to_owned(),
+                        parent_relative_path: Some("api/api.md".to_owned()),
+                        reasons: vec![RefineGateTargetReason::ContextInvalidated],
+                    }],
+                    frontier_targets: vec![RegisteredRefineFrontierTarget {
+                        parent_node_id: parent.node_id.clone(),
+                        parent_relative_path: "api/api.md".to_owned(),
+                        changed_child_relative_paths: vec!["api/implement-endpoint.md".to_owned()],
+                        reasons: vec![RefineGateTargetReason::ChangedChildSet],
+                    }],
+                },
+                retry_policy: RefineGateRetryPolicy::default(),
+                refine_context: RefineGateRevalidationContext {
+                    processed_comment_blocks: vec![RefineGateProcessedCommentBlock {
+                        relative_path: "api/implement-endpoint.md".to_owned(),
+                        begin_comment_line: 3,
+                        end_comment_line: 5,
+                        comment_text: Some("processed feedback".to_owned()),
+                    }],
+                    stale_result_handoff: vec![RefineStaleResultHandoff {
+                        target_kind: StaleGateTargetKind::Leaf,
+                        node_id: Some(leaf.node_id.clone()),
+                        relative_path: "api/implement-endpoint.md".to_owned(),
+                        parent_node_id: Some(parent.node_id.clone()),
+                        parent_relative_path: Some("api/api.md".to_owned()),
+                        regenerated_child_relative_path: None,
+                        classification: RefineStaleGateClassification::Stale,
+                        invalidation_reason: "parent contract changed".to_owned(),
+                    }],
+                    rewrite_result: Some(RefineRewriteResult {
+                        changed_files: vec![RefineChangedFile {
+                            relative_path: "api/api.md".to_owned(),
+                            node_id: Some(parent.node_id.clone()),
+                            change_kind: RefineChangedFileKind::TextUpdated,
+                        }],
+                        structural_changes: vec![RefineStructuralChange {
+                            parent_relative_path: "api/api.md".to_owned(),
+                            parent_node_id: Some(parent.node_id.clone()),
+                            change_kind: RefineStructuralChangeKind::ChangedChildSet,
+                            added_child_relative_paths: vec![
+                                "api/implement-endpoint.md".to_owned(),
+                            ],
+                            removed_child_relative_paths: vec![],
+                        }],
+                        stale_nodes: vec![],
+                        context_invalidations: vec![RefineContextInvalidation {
+                            relative_path: "api/implement-endpoint.md".to_owned(),
+                            node_id: Some(leaf.node_id.clone()),
+                            reason: "parent context changed".to_owned(),
+                        }],
+                        unchanged_nodes: vec![],
+                        expected_gate_targets: vec![],
+                        unresolved_follow_ups: vec![],
+                        summary: Default::default(),
+                    }),
+                },
+            },
+        )?
+    };
+
+    let leaf_gate_run_id = match &report.leaf_attempts[0].outcome {
+        RefineGateAttemptOutcome::Passed { gate_run_id, .. } => gate_run_id,
+        other => panic!("expected passed leaf gate, got {other:?}"),
+    };
+    let frontier_gate_run_id = match &report.frontier_attempts[0].outcome {
+        RefineGateAttemptOutcome::Passed { gate_run_id, .. } => gate_run_id,
+        other => panic!("expected passed frontier gate, got {other:?}"),
+    };
+    let leaf_prompt = fs::read_to_string(
+        workspace
+            .path()
+            .join(".loopy/gate-runs")
+            .join(leaf_gate_run_id)
+            .join("prompt.md"),
+    )?;
+    let frontier_prompt = fs::read_to_string(
+        workspace
+            .path()
+            .join(".loopy/gate-runs")
+            .join(frontier_gate_run_id)
+            .join("prompt.md"),
+    )?;
+
+    for prompt in [&leaf_prompt, &frontier_prompt] {
+        assert!(prompt.contains("Refine Revalidation Context"));
+        assert!(prompt.contains("processed feedback"));
+        assert!(prompt.contains("Stale Handoff"));
+        assert!(prompt.contains("Context Invalidations"));
+        assert!(prompt.contains("api/implement-endpoint.md"));
+    }
+    assert!(frontier_prompt.contains("Changed Child Links"));
+    assert!(frontier_prompt.contains("parent context changed"));
     Ok(())
 }
 
@@ -304,6 +463,7 @@ fn leaf_gate_rejects_non_leaf_nodes() -> Result<()> {
             plan_id: plan.plan_id.clone(),
             node_id: target.node_id.clone(),
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })
         .expect_err("non-leaf node should be rejected for leaf review");
     assert!(
@@ -359,6 +519,7 @@ fn leaf_gate_preflight_rejects_missing_target_markdown_before_dispatch() -> Resu
             plan_id: plan.plan_id,
             node_id: leaf.node_id,
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })
         .expect_err("missing leaf markdown should fail locally before reviewer dispatch");
     assert!(
@@ -422,6 +583,7 @@ fn leaf_gate_fails_closed_on_malformed_reviewer_json() -> Result<()> {
                 plan_id: plan.plan_id,
                 node_id: node.node_id,
                 planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: None,
             })
             .expect_err("malformed reviewer JSON should fail closed")
     };
@@ -490,6 +652,7 @@ fn leaf_gate_fails_closed_when_required_fields_are_missing() -> Result<()> {
                 plan_id: plan.plan_id,
                 node_id: node.node_id,
                 planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: None,
             })
             .expect_err("missing required reviewer fields should fail closed")
     };
@@ -553,6 +716,7 @@ fn leaf_gate_requires_pause_for_user_decision_issues_to_include_user_question_fi
                 plan_id: plan.plan_id,
                 node_id: node.node_id,
                 planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: None,
             })
             .expect_err("pause verdict without user question fields should fail closed")
     };
@@ -621,6 +785,7 @@ fn leaf_gate_fails_closed_when_issue_payload_has_unknown_fields() -> Result<()> 
                 plan_id: plan.plan_id,
                 node_id: node.node_id,
                 planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: None,
             })
             .expect_err("unknown nested issue fields should fail closed")
     };
@@ -689,6 +854,7 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
             plan_id: plan.plan_id.clone(),
             parent_node_id: parent.node_id.clone(),
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })?
     };
 
@@ -778,6 +944,7 @@ fn frontier_gate_fails_closed_when_invalidations_field_is_missing() -> Result<()
                 plan_id: plan.plan_id,
                 parent_node_id: parent.node_id,
                 planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: None,
             })
             .expect_err("missing invalidated_leaf_node_ids should fail closed")
     };
@@ -823,6 +990,7 @@ fn frontier_gate_preflight_rejects_leaf_nodes_before_dispatch() -> Result<()> {
             plan_id: plan.plan_id,
             parent_node_id: leaf.node_id,
             planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: None,
         })
         .expect_err("frontier gate should reject leaf targets locally");
     assert!(

@@ -5,8 +5,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use loopy_gen_plan::{
     EnsureNodeIdRequest, EnsurePlanRequest, InspectNodeRequest, ListChildrenRequest,
-    OpenPlanRequest, PlannerMode,
-    RunFrontierReviewGateRequest, RunLeafReviewGateRequest, Runtime,
+    OpenPlanRequest, PlannerMode, RunFrontierReviewGateRequest, RunLeafReviewGateRequest, Runtime,
 };
 
 #[derive(Debug, Parser)]
@@ -162,6 +161,7 @@ fn main() -> Result<()> {
                 plan_id,
                 node_id,
                 planner_mode: parse_planner_mode(&planner_mode)?,
+                refine_revalidation_context: None,
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
@@ -176,6 +176,7 @@ fn main() -> Result<()> {
                 plan_id,
                 parent_node_id,
                 planner_mode: parse_planner_mode(&planner_mode)?,
+                refine_revalidation_context: None,
             })?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }

@@ -155,6 +155,8 @@ pub struct RunLeafReviewGateRequest {
     pub plan_id: String,
     pub node_id: String,
     pub planner_mode: PlannerMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refine_revalidation_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +174,8 @@ pub struct RunFrontierReviewGateRequest {
     pub plan_id: String,
     pub parent_node_id: String,
     pub planner_mode: PlannerMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refine_revalidation_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

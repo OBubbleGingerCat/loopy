@@ -16,8 +16,8 @@ pub use decision::{
 pub use gate_execution::{
     RefineGateAttempt, RefineGateAttemptOutcome, RefineGateExecutionError,
     RefineGateExecutionReport, RefineGateExecutionStatus, RefineGateInvocationFailure,
-    RefineGateKind, RefineGateRetryPolicy, RunRefineGateRevalidationRequest,
-    run_refine_gate_revalidation,
+    RefineGateKind, RefineGateProcessedCommentBlock, RefineGateRetryPolicy,
+    RefineGateRevalidationContext, RunRefineGateRevalidationRequest, run_refine_gate_revalidation,
 };
 pub use gate_registration::{
     RefineFrontierRegistrationCandidate, RefineGatePreparationError, RefineGateTargetReason,

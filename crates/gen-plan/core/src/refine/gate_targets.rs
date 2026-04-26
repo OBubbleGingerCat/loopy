@@ -137,7 +137,7 @@ pub fn select_refine_gate_targets(
     for file in &request.rewrite_result.changed_files {
         match file.change_kind {
             RefineChangedFileKind::TextUpdated => {
-                if is_parent_path(&file.relative_path) {
+                if is_parent_target_path(&request.runtime_snapshot, &file.relative_path) {
                     if is_link_only_parent_text_update(&request, &file.relative_path) {
                         continue;
                     }
@@ -166,7 +166,7 @@ pub fn select_refine_gate_targets(
                 }
             }
             RefineChangedFileKind::Created => {
-                if is_parent_path(&file.relative_path) {
+                if is_parent_target_path(&request.runtime_snapshot, &file.relative_path) {
                     upsert_frontier(
                         &mut selection.frontier_targets,
                         &request.runtime_snapshot,
@@ -226,17 +226,26 @@ pub fn select_refine_gate_targets(
             reason.clone(),
         );
         for child in &change.added_child_relative_paths {
-            if matches!(
-                find_node(&request.runtime_snapshot, child).map(|node| node.node_kind),
-                Some(NodeKind::Leaf)
-            ) {
-                upsert_leaf(
-                    &mut selection.leaf_targets,
-                    &request.runtime_snapshot,
-                    child,
-                    None,
-                    reason.clone(),
-                );
+            match find_node(&request.runtime_snapshot, child).map(|node| node.node_kind) {
+                Some(NodeKind::Leaf) => {
+                    upsert_leaf(
+                        &mut selection.leaf_targets,
+                        &request.runtime_snapshot,
+                        child,
+                        None,
+                        reason.clone(),
+                    );
+                }
+                Some(NodeKind::Parent) => {
+                    upsert_descendant_leaf_targets(
+                        &mut selection.leaf_targets,
+                        &request.runtime_snapshot,
+                        child,
+                        &[],
+                        reason.clone(),
+                    );
+                }
+                None => {}
             }
         }
     }
@@ -539,6 +548,11 @@ fn is_parent_path(relative_path: &str) -> bool {
         .and_then(|parent| parent.file_name())
         .and_then(|name| name.to_str());
     stem.is_some() && parent_dir == stem
+}
+
+fn is_parent_target_path(snapshot: &RefineRuntimeNodeSnapshot, relative_path: &str) -> bool {
+    find_node(snapshot, relative_path).is_some_and(|node| node.node_kind == NodeKind::Parent)
+        || is_parent_path(relative_path)
 }
 
 fn parent_self_path(relative_path: &str) -> Option<String> {

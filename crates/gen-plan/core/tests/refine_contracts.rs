@@ -454,6 +454,145 @@ fn added_existing_leaf_child_is_revalidated_before_frontier() {
 }
 
 #[test]
+fn attached_existing_parent_revalidates_descendant_leaves_before_frontier() {
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![],
+        structural_changes: vec![RefineStructuralChange {
+            parent_relative_path: "api/api.md".to_owned(),
+            parent_node_id: Some("parent-1".to_owned()),
+            change_kind: RefineStructuralChangeKind::ChangedChildSet,
+            added_child_relative_paths: vec!["api/auth/auth.md".to_owned()],
+            removed_child_relative_paths: Vec::new(),
+        }],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result,
+        runtime_snapshot: RefineRuntimeNodeSnapshot {
+            nodes: vec![
+                RefineRuntimeNodeSummary {
+                    node_id: "parent-1".to_owned(),
+                    relative_path: "api/api.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: None,
+                    parent_relative_path: None,
+                    child_relative_paths: vec!["api/auth/auth.md".to_owned()],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "nested-parent".to_owned(),
+                    relative_path: "api/auth/auth.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: Some("parent-1".to_owned()),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    child_relative_paths: vec!["api/auth/check.md".to_owned()],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "leaf-1".to_owned(),
+                    relative_path: "api/auth/check.md".to_owned(),
+                    node_kind: NodeKind::Leaf,
+                    parent_node_id: Some("nested-parent".to_owned()),
+                    parent_relative_path: Some("api/auth/auth.md".to_owned()),
+                    child_relative_paths: vec![],
+                },
+            ],
+        },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+
+    let leaf = selection
+        .leaf_targets
+        .iter()
+        .find(|target| target.relative_path == "api/auth/check.md")
+        .expect("attached existing subtree descendant leaf should be revalidated");
+    assert_eq!(leaf.node_id.as_deref(), Some("leaf-1"));
+    assert!(
+        leaf.reasons
+            .contains(&RefineGateTargetReason::ChangedChildSet)
+    );
+    assert_eq!(selection.frontier_targets.len(), 1);
+}
+
+#[test]
+fn root_plan_parent_contract_change_selects_frontier_and_descendant_leaves() {
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![RefineChangedFile {
+            relative_path: "demo.md".to_owned(),
+            node_id: Some("root-1".to_owned()),
+            change_kind: RefineChangedFileKind::TextUpdated,
+        }],
+        structural_changes: vec![],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result,
+        runtime_snapshot: RefineRuntimeNodeSnapshot {
+            nodes: vec![
+                RefineRuntimeNodeSummary {
+                    node_id: "root-1".to_owned(),
+                    relative_path: "demo.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: None,
+                    parent_relative_path: None,
+                    child_relative_paths: vec!["intro.md".to_owned()],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "leaf-1".to_owned(),
+                    relative_path: "intro.md".to_owned(),
+                    node_kind: NodeKind::Leaf,
+                    parent_node_id: Some("root-1".to_owned()),
+                    parent_relative_path: Some("demo.md".to_owned()),
+                    child_relative_paths: vec![],
+                },
+            ],
+        },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+
+    assert!(
+        selection
+            .leaf_targets
+            .iter()
+            .all(|target| target.relative_path != "demo.md")
+    );
+    let leaf = selection
+        .leaf_targets
+        .iter()
+        .find(|target| target.relative_path == "intro.md")
+        .expect("root contract change should revalidate descendant leaf");
+    assert!(
+        leaf.reasons
+            .contains(&RefineGateTargetReason::ParentContractChanged)
+    );
+    let frontier = selection
+        .frontier_targets
+        .iter()
+        .find(|target| target.parent_relative_path == "demo.md")
+        .expect("root contract change should schedule frontier gate");
+    assert_eq!(frontier.parent_node_id.as_deref(), Some("root-1"));
+    assert!(
+        frontier
+            .reasons
+            .contains(&RefineGateTargetReason::ParentContractChanged)
+    );
+}
+
+#[test]
 fn refine_gate_registration_prepares_targets_fail_closed() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
@@ -1355,6 +1494,7 @@ fn refine_gate_execution_empty_selection_passes_without_running_gates() -> Resul
             retry_policy: RefineGateRetryPolicy {
                 max_invocation_retries: 1,
             },
+            refine_context: Default::default(),
         },
     )?;
     assert_eq!(
