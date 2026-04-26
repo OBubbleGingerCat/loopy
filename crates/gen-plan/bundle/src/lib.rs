@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
-use loopy_common_bundle::{read_descriptor, BundleDescriptor};
+use anyhow::{Context, Result, anyhow, bail};
+use loopy_common_bundle::{BundleDescriptor, read_descriptor};
 use serde::{Deserialize, Serialize};
 
 pub const SKILL_ID: &str = "loopy:gen-plan";
@@ -12,6 +12,7 @@ pub const LOADER_ID: &str = "loopy.gen-plan.v1";
 const DOMAIN_CONTRACT_PROMPT: &str = "domain_contract";
 const LEAF_RUNTIME_PROMPT: &str = "leaf_runtime";
 const FRONTIER_RUNTIME_PROMPT: &str = "frontier_runtime";
+const REFINE_INSTRUCTIONS_PROMPT: &str = "refine_instructions";
 const LEAF_REVIEWER_ROLE_KIND: &str = "leaf_reviewer";
 const FRONTIER_REVIEWER_ROLE_KIND: &str = "frontier_reviewer";
 
@@ -234,6 +235,10 @@ pub fn load_leaf_runtime_prompt(skill_root: &Path) -> Result<String> {
 
 pub fn load_frontier_runtime_prompt(skill_root: &Path) -> Result<String> {
     load_prompt_template(skill_root, FRONTIER_RUNTIME_PROMPT)
+}
+
+pub fn load_refine_instructions_prompt(skill_root: &Path) -> Result<String> {
+    load_prompt_template(skill_root, REFINE_INSTRUCTIONS_PROMPT)
 }
 
 pub fn load_prompt_template(skill_root: &Path, template_name: &str) -> Result<String> {
@@ -758,10 +763,14 @@ mod tests {
         let domain_contract = load_domain_contract_prompt(&skill_root)?;
         let leaf_runtime = load_leaf_runtime_prompt(&skill_root)?;
         let frontier_runtime = load_frontier_runtime_prompt(&skill_root)?;
+        let refine_instructions = load_refine_instructions_prompt(&skill_root)?;
 
         assert!(domain_contract.contains("Gen-Plan Domain Contract"));
         assert!(leaf_runtime.contains("Leaf Node Review Gate"));
         assert!(frontier_runtime.contains("Frontier Review Gate"));
+        assert!(refine_instructions.contains("Refine Mode Instructions"));
+        assert!(refine_instructions.contains("BEGIN_COMMENT"));
+        assert!(refine_instructions.contains("END_COMMENT"));
 
         let (_, leaf_prompt, leaf_front_matter, leaf_executor) = load_task_type_role_definition(
             &skill_root,

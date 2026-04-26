@@ -17,6 +17,8 @@ KNOWN_CASES=(
   rust-cli-todo
   fastapi-notes-api
   csv-export-rust-report
+  refine-api-plan
+  refine-malformed-comments
 )
 RAN_CASE_COUNT=0
 CODEX_ENV_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loopy-gen-plan-codex-home.XXXXXX")"
@@ -63,6 +65,7 @@ for required in \
   "$INSTALL_ROOT/prompts/domain_contract.md" \
   "$INSTALL_ROOT/prompts/leaf_runtime.md" \
   "$INSTALL_ROOT/prompts/frontier_runtime.md" \
+  "$INSTALL_ROOT/prompts/refine_instructions.md" \
   "$INSTALL_ROOT/roles/coding-task/task-type.toml" \
   "$INSTALL_ROOT/roles/coding-task/leaf_reviewer/codex_default.md" \
   "$INSTALL_ROOT/roles/coding-task/frontier_reviewer/codex_default.md" \
@@ -550,6 +553,141 @@ EOF
   RAN_CASE_COUNT=$((RAN_CASE_COUNT + 1))
 }
 
+setup_refine_fixture() {
+  local workspace="$1" case_name="$2" plan_name="$3" malformed="$4"
+  local plan_root="$workspace/.loopy/plans/$plan_name"
+  local state_dir="$RUN_ROOT/fixture-state/$case_name"
+  local helper="$INSTALL_ROOT/bin/loopy-gen-plan"
+  mkdir -p "$plan_root/api" "$state_dir"
+
+  cat >"$plan_root/$plan_name.md" <<EOF
+# $plan_name
+
+## Scope
+Refine smoke fixture.
+
+## Child Nodes
+- [API](./api/api.md)
+EOF
+
+  cat >"$plan_root/api/api.md" <<'EOF'
+# API
+
+## Scope
+API planning scope.
+
+## Child Nodes
+- [Add Auth Tests](./add-auth-tests.md)
+EOF
+
+  if [[ "$malformed" == "1" ]]; then
+    cat >"$plan_root/api/add-auth-tests.md" <<'EOF'
+# Add Auth Tests
+
+## Goal
+Add focused authentication regression tests.
+
+BEGIN_COMMENT
+Please tighten the acceptance criteria.
+BEGIN_COMMENT
+Nested marker should fail closed.
+END_COMMENT
+EOF
+  else
+    cat >"$plan_root/api/add-auth-tests.md" <<'EOF'
+# Add Auth Tests
+
+## Goal
+Add focused authentication regression tests.
+
+BEGIN_COMMENT
+Please require one negative token case and one successful token case in the acceptance criteria.
+END_COMMENT
+
+## Acceptance Criteria
+- Existing API test coverage remains documented.
+EOF
+  fi
+
+  "$helper" --workspace "$workspace" ensure-plan \
+    --plan-name "$plan_name" \
+    --task-type coding-task \
+    --project-directory "$workspace" >"$state_dir/ensure-plan.json"
+  local plan_id
+  plan_id="$(python3 - "$state_dir/ensure-plan.json" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["plan_id"])
+PY
+)"
+  "$helper" --workspace "$workspace" ensure-node-id \
+    --plan-id "$plan_id" \
+    --relative-path "$plan_name.md" >"$state_dir/ensure-node-root.json"
+  "$helper" --workspace "$workspace" ensure-node-id \
+    --plan-id "$plan_id" \
+    --relative-path "api/api.md" >"$state_dir/ensure-node-parent.json"
+  "$helper" --workspace "$workspace" ensure-node-id \
+    --plan-id "$plan_id" \
+    --relative-path "api/add-auth-tests.md" \
+    --parent-relative-path "api/api.md" >"$state_dir/ensure-node-leaf.json"
+}
+
+run_refine_case() {
+  local case_name="$1" plan_name="$2" malformed="$3"
+  local workspace="$WORKSPACES_ROOT/$case_name"
+  local prompt_file="$PROMPT_DIR/$case_name.prompt.md"
+  local last_message="$LAST_MESSAGE_DIR/$case_name.json"
+  local log_file="$LOG_DIR/$case_name.log"
+
+  workspace="$(make_workspace "$case_name")"
+  setup_refine_fixture "$workspace" "$case_name" "$plan_name" "$malformed"
+
+  if [[ "$malformed" == "1" ]]; then
+    cat >"$prompt_file" <<EOF
+Skill name: \`loopy:gen-plan\`
+
+Use the \`loopy:gen-plan --refine <plan-name>\` skill invocation contract for plan \`$plan_name\`.
+- Desired plan name: \`$plan_name\`
+- \`loopy:gen-plan --refine <plan-name>\` is a skill invocation contract, not a shell command.
+- Do not execute \`loopy:gen-plan\` as a shell command.
+- Use installed runtime helper \`open-plan\` before comment discovery.
+- Discover literal \`BEGIN_COMMENT\` and \`END_COMMENT\` markers.
+- This case intentionally contains malformed nested comment markers.
+- Fail closed after malformed comment discovery.
+- Do not run \`run-leaf-review-gate\` or \`run-frontier-review-gate\` after malformed comment discovery.
+- Do not inspect or mutate \`.loopy/loopy.db\` directly.
+EOF
+  else
+    cat >"$prompt_file" <<EOF
+Skill name: \`loopy:gen-plan\`
+
+Use the \`loopy:gen-plan --refine <plan-name>\` skill invocation contract for plan \`$plan_name\`.
+- Desired plan name: \`$plan_name\`
+- \`loopy:gen-plan --refine <plan-name>\` is a skill invocation contract, not a shell command.
+- Do not execute \`loopy:gen-plan\` as a shell command.
+- Treat \`BEGIN_COMMENT\` and \`END_COMMENT\` blocks as natural-language feedback.
+- Use installed \`open-plan\` before comment discovery.
+- Use installed \`inspect-node\` or \`list-children\` for tracked runtime state.
+- Use installed \`ensure-node-id\` for any new refined nodes.
+- Run installed \`run-leaf-review-gate\` before any installed \`run-frontier-review-gate\`.
+- Do not inspect or mutate \`.loopy/loopy.db\` directly.
+- Refine the existing tracked plan in place.
+EOF
+  fi
+
+  if ! run_prompt "$workspace" "$prompt_file" "$last_message" "$log_file"; then
+    echo "gen-plan refine smoke case $case_name failed; see $log_file" >&2
+    return 1
+  fi
+
+  validate_plan_tree "$workspace" "$plan_name"
+  if [[ "$STRICT_VALIDATION" != "0" && "$malformed" != "1" ]]; then
+    validate_strict_case "$workspace" "$plan_name" "$log_file" "$last_message"
+  fi
+
+  RAN_CASE_COUNT=$((RAN_CASE_COUNT + 1))
+}
+
 validate_case_filter
 
 if should_run_case rust-cli-todo; then
@@ -574,6 +712,14 @@ if should_run_case csv-export-rust-report; then
     csv-export-rust-report \
     coding-task \
     'Create a plan for adding CSV export support to the existing Rust reporting crate. Assume the raw report input contract is `&str` with newline-delimited rows and comma-delimited fields. Include parser changes, reporting APIs, regression tests, and documentation.'
+fi
+
+if should_run_case refine-api-plan; then
+  run_refine_case refine-api-plan refine-api-plan 0
+fi
+
+if should_run_case refine-malformed-comments; then
+  run_refine_case refine-malformed-comments refine-malformed-comments 1
 fi
 
 if [[ "$RAN_CASE_COUNT" -eq 0 ]]; then

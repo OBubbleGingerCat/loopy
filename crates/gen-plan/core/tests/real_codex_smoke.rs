@@ -165,7 +165,8 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
     );
     assert!(
         script.contains("A node is not tracked until installed `ensure-node-id` succeeds.")
-            || script.contains("A node is not tracked until installed \\`ensure-node-id\\` succeeds."),
+            || script
+                .contains("A node is not tracked until installed \\`ensure-node-id\\` succeeds."),
         "script should require ensure-node-id before treating nodes as tracked"
     );
     assert!(
@@ -232,8 +233,11 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should explicitly forbid direct loopy.db mutation"
     );
     assert!(
-        script.contains("Never read `.loopy/loopy.db` directly as a planning aid or recovery shortcut.")
-            || script.contains("Never read \\`.loopy/loopy.db\\` directly as a planning aid or recovery shortcut."),
+        script.contains(
+            "Never read `.loopy/loopy.db` directly as a planning aid or recovery shortcut."
+        ) || script.contains(
+            "Never read \\`.loopy/loopy.db\\` directly as a planning aid or recovery shortcut."
+        ),
         "script should explicitly forbid direct loopy.db reads as runtime shortcuts"
     );
     assert!(
@@ -381,6 +385,8 @@ fn smoke_script_preserves_artifacts_for_all_auto_mode_cases() -> Result<()> {
         "rust-cli-todo",
         "fastapi-notes-api",
         "csv-export-rust-report",
+        "refine-api-plan",
+        "refine-malformed-comments",
     ] {
         let workspace = run_root.join("workspaces").join(case_name);
         let plan_root = workspace.join(".loopy/plans").join(case_name);
@@ -419,6 +425,46 @@ fn smoke_script_preserves_artifacts_for_all_auto_mode_cases() -> Result<()> {
                 .is_file(),
             "expected last-message capture for {case_name}"
         );
+
+        if case_name.starts_with("refine-") {
+            assert!(
+                plan_root.join("api/api.md").is_file(),
+                "expected refine parent fixture for {case_name}"
+            );
+            assert!(
+                plan_root.join("api/add-auth-tests.md").is_file(),
+                "expected refine leaf fixture for {case_name}"
+            );
+            let fixture_state = run_root.join("fixture-state").join(case_name);
+            for file_name in [
+                "ensure-plan.json",
+                "ensure-node-root.json",
+                "ensure-node-parent.json",
+                "ensure-node-leaf.json",
+            ] {
+                assert!(
+                    fixture_state.join(file_name).is_file(),
+                    "expected refine fixture helper output {}",
+                    fixture_state.join(file_name).display()
+                );
+            }
+            let prompt = fs::read_to_string(
+                run_root
+                    .join("prompts")
+                    .join(format!("{case_name}.prompt.md")),
+            )?;
+            for snippet in [
+                "--refine <plan-name>",
+                "BEGIN_COMMENT",
+                "END_COMMENT",
+                "open-plan",
+            ] {
+                assert!(
+                    prompt.contains(snippet),
+                    "expected refine prompt for {case_name} to contain {snippet}"
+                );
+            }
+        }
     }
 
     Ok(())
@@ -555,7 +601,10 @@ fn smoke_script_strict_validation_accepts_single_quoted_helper_paths() -> Result
     let temp = support::workspace()?;
     let fake_bin_dir = temp.path().join("bin");
     fs::create_dir_all(&fake_bin_dir)?;
-    write_fake_codex(&fake_bin_dir.join("codex"), "strict_success_single_quoted_helper")?;
+    write_fake_codex(
+        &fake_bin_dir.join("codex"),
+        "strict_success_single_quoted_helper",
+    )?;
 
     let source_codex_home = temp.path().join("source-codex-home");
     write_fake_codex_home(&source_codex_home)?;

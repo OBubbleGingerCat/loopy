@@ -45,3 +45,5 @@ Treat the following as material issues unless they are already fixed safely by e
 
 Do not review this node as if it will be implemented in a vacuum.
 Judge it as work that must be carried out by a downstream executor against this repository and this plan's explicit prerequisite structure.
+
+In refine revalidation, pay particular attention to whether natural-language comments changed the target leaf's contract, inputs, outputs, acceptance criteria, or verification commands. Stale approval summaries are useful history, but they do not prove the current refined leaf is execution-ready.

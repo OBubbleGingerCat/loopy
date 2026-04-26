@@ -80,6 +80,12 @@ Only treat the node as still leaf-ready if the missing answer can already be inf
 
 You are given the following materials. They do not have equal authority.
 
+### Refine Revalidation Context
+
+When this gate is invoked as part of refine mode, treat changed node contracts, stale prior approvals, invalidated descendants, and processed `BEGIN_COMMENT` / `END_COMMENT` feedback as review context only. The current target leaf markdown remains the primary review object. Do not treat a historical approval as current evidence when refine context says the node content, parent contract, or descendant context changed.
+
+If refine mode presents stale approval evidence, use it to understand why the target is being revalidated; do not let it satisfy leaf readiness. A refined leaf passes only when the current markdown is execution-ready under the current plan tree and repository context.
+
 ### 1. Target Leaf Node
 This is the primary review object.
 It is the authoritative description of the candidate leaf node as it currently exists in the markdown tree.

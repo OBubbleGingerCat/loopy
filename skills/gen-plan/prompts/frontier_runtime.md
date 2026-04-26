@@ -68,6 +68,12 @@ Do not add extra top-level keys.
 
 You are given the following materials. They do not have equal authority.
 
+### Refine Revalidation Context
+
+When this gate is invoked as part of refine mode, treat changed parent contracts, changed child sets, stale descendant approvals, invalidated leaf ids, and processed `BEGIN_COMMENT` / `END_COMMENT` feedback as review context. The current parent node and current expansion snapshot remain authoritative. Do not treat stale leaf or frontier approvals as current approvals when refine context says node content, parent contracts, child links, or descendant context changed.
+
+If a refined frontier changes the meaning of a previously accepted leaf, return the appropriate structural verdict and identify invalidated leaf approvals. A frontier is not approved merely because individual leaves were previously approved before the refine change.
+
 ### 1. Parent Node
 This is the decomposition source.
 It is the authoritative description of the parent that the current child set is supposed to decompose.

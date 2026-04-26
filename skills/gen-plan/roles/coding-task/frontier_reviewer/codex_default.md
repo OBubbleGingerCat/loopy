@@ -39,3 +39,5 @@ Treat the following as material issues by default:
 
 Do not accept a decomposition that looks tidy in prose but conflicts with the actual repository structure or an explicitly defined post-prerequisite ownership structure.
 Judge the frontier as an engineering decomposition, not merely as a document outline.
+
+In refine revalidation, pay particular attention to changed parent contracts, changed child links, stale descendants, and invalidated leaf approvals. A previously approved child set can become structurally unsound after refine changes, and stale approvals must not be treated as current gate results.

@@ -267,6 +267,8 @@ cp "$SOURCE_ROOT/prompts/leaf_runtime.md" \
   "$INSTALL_ROOT/prompts/leaf_runtime.md"
 cp "$SOURCE_ROOT/prompts/frontier_runtime.md" \
   "$INSTALL_ROOT/prompts/frontier_runtime.md"
+cp "$SOURCE_ROOT/prompts/refine_instructions.md" \
+  "$INSTALL_ROOT/prompts/refine_instructions.md"
 cp "$SOURCE_ROOT/roles/coding-task/task-type.toml" \
   "$INSTALL_ROOT/roles/coding-task/task-type.toml"
 cp "$SOURCE_ROOT/roles/coding-task/leaf_reviewer/codex_default.md" \

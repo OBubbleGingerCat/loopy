@@ -1,13 +1,13 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use loopy_common_bundle::{
     discover_bundle_from_binary_path, discover_installed_skill_in_default_roots,
     resolve_development_skill_if_registered,
 };
 use loopy_gen_plan_bundle::ResolvedGateRoleSelection;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
     EnsureNodeIdRequest, EnsureNodeIdResponse, EnsurePlanRequest, EnsurePlanResponse,
@@ -16,6 +16,7 @@ use crate::{
     RunLeafReviewGateRequest, RunLeafReviewGateResponse,
 };
 
+pub mod comments;
 mod db;
 mod gates;
 mod query;

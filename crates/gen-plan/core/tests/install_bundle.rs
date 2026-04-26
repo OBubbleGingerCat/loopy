@@ -48,10 +48,7 @@ fn install_script_resolves_relative_path_argument_from_caller_cwd() -> Result<()
 
     let output = run_installer(
         &caller_cwd,
-        &[
-            OsString::from("--path"),
-            OsString::from(&relative_path),
-        ],
+        &[OsString::from("--path"), OsString::from(&relative_path)],
         &[("CARGO_NET_OFFLINE", OsString::from("true"))],
         &[],
     )?;
@@ -115,7 +112,8 @@ fn install_script_defaults_to_codex_target_with_no_args() -> Result<()> {
 }
 
 #[test]
-fn install_script_defaults_to_home_codex_target_with_no_args_when_codex_home_is_unset() -> Result<()> {
+fn install_script_defaults_to_home_codex_target_with_no_args_when_codex_home_is_unset() -> Result<()>
+{
     let workspace = support::workspace()?;
     let caller_cwd = workspace.path().join("caller-home-default");
     fs::create_dir_all(&caller_cwd)?;
@@ -167,7 +165,9 @@ fn install_script_resolves_relative_codex_home_from_caller_cwd() -> Result<()> {
             .and_then(|name| name.to_str())
             .context("workspace fixture name should be utf-8")?
     );
-    let install_root = caller_cwd.join(&relative_home).join("skills/loopy-gen-plan");
+    let install_root = caller_cwd
+        .join(&relative_home)
+        .join("skills/loopy-gen-plan");
 
     let output = run_installer(
         &caller_cwd,
@@ -178,7 +178,10 @@ fn install_script_resolves_relative_codex_home_from_caller_cwd() -> Result<()> {
         ],
         &[],
     )?;
-    assert_installer_success(&output, "install-gen-plan-skill.sh --target codex with relative CODEX_HOME")?;
+    assert_installer_success(
+        &output,
+        "install-gen-plan-skill.sh --target codex with relative CODEX_HOME",
+    )?;
 
     assert_eq!(installed_root_from_output(&output)?, install_root);
     assert_installed_bundle(&install_root)?;
@@ -446,9 +449,15 @@ fn install_script_rejects_duplicate_path_flags() -> Result<()> {
         workspace.path(),
         &[
             OsString::from("--path"),
-            workspace.path().join("first/loopy-gen-plan").into_os_string(),
+            workspace
+                .path()
+                .join("first/loopy-gen-plan")
+                .into_os_string(),
             OsString::from("--path"),
-            workspace.path().join("second/loopy-gen-plan").into_os_string(),
+            workspace
+                .path()
+                .join("second/loopy-gen-plan")
+                .into_os_string(),
         ],
         &[("CARGO_NET_OFFLINE", OsString::from("true"))],
         &[],
@@ -528,7 +537,10 @@ fn install_script_resolves_relative_home_for_claude_target_from_caller_cwd() -> 
         ],
         &["CODEX_HOME"],
     )?;
-    assert_installer_success(&output, "install-gen-plan-skill.sh --target claude with relative HOME")?;
+    assert_installer_success(
+        &output,
+        "install-gen-plan-skill.sh --target claude with relative HOME",
+    )?;
 
     assert_eq!(installed_root_from_output(&output)?, install_root);
     assert_installed_bundle(&install_root)?;
@@ -542,12 +554,7 @@ fn install_script_resolves_relative_home_for_claude_target_from_caller_cwd() -> 
 #[test]
 fn install_script_rejects_unknown_flags_cleanly() -> Result<()> {
     let workspace = support::workspace()?;
-    let output = run_installer(
-        workspace.path(),
-        &[OsString::from("--bogus")],
-        &[],
-        &[],
-    )?;
+    let output = run_installer(workspace.path(), &[OsString::from("--bogus")], &[], &[])?;
 
     assert!(
         !output.status.success(),
@@ -620,7 +627,8 @@ fn assert_installer_failure_contains(
 }
 
 fn installed_root_from_output(output: &Output) -> Result<PathBuf> {
-    let stdout = String::from_utf8(output.stdout.clone()).context("installer stdout was not utf-8")?;
+    let stdout =
+        String::from_utf8(output.stdout.clone()).context("installer stdout was not utf-8")?;
     let line = stdout
         .lines()
         .last()
@@ -636,6 +644,7 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
         "prompts/domain_contract.md",
         "prompts/leaf_runtime.md",
         "prompts/frontier_runtime.md",
+        "prompts/refine_instructions.md",
         "roles/coding-task/task-type.toml",
         "roles/coding-task/leaf_reviewer/codex_default.md",
         "roles/coding-task/leaf_reviewer/mock.md",
@@ -672,6 +681,10 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
     for required_snippet in [
         "Every candidate leaf must pass `leaf review gate`",
         "Every frontier parent expansion must pass `frontier review gate`",
+        "loopy:gen-plan --refine <existing-plan-name>",
+        "`--input` must be omitted with `--refine`",
+        "`--plan-name` must be omitted with `--refine`",
+        "`--task-type` must be omitted with `--refine`",
         "send the review-driven revision back to the user",
         "If review-driven changes altered the structure, the Agent MUST ask the user to re-confirm the revised expansion before writing it or continuing.",
         "pause only for true user-owned decisions that cannot be inferred safely",
@@ -679,6 +692,21 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
         assert!(
             installed_skill.contains(required_snippet),
             "installed SKILL.md should contain `{required_snippet}`"
+        );
+    }
+
+    let refine_instructions =
+        fs::read_to_string(install_root.join("prompts/refine_instructions.md"))?;
+    for required_snippet in [
+        "BEGIN_COMMENT",
+        "END_COMMENT",
+        "Decision report",
+        "apply_refine_rewrite",
+        "Selected leaf gates run globally before any selected frontier gate",
+    ] {
+        assert!(
+            refine_instructions.contains(required_snippet),
+            "installed refine instructions should contain `{required_snippet}`"
         );
     }
 

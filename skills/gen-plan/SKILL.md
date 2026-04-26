@@ -276,6 +276,8 @@ The draft may include, but is not limited to:
 
 The input does not need to be complete and does not need to already contain hierarchy. This skill should be able to extract a plan skeleton from rough input.
 
+Refine mode is different from draft intake. When the invocation is `loopy:gen-plan --refine <existing-plan-name>`, the named plan is the input and output target. The Agent must not read a separate draft source, must not create a replacement plan, and must load the persisted task type and tracked node state from installed runtime `open-plan` before comment discovery or file mutation.
+
 ## 5. Output Definition
 
 The output of this skill is a markdown file tree.
@@ -309,6 +311,24 @@ If batch-style generation is desired, the user must explicitly request auto-gene
 - or explicitly stating in natural language that the Agent should generate the remaining layers automatically.
 
 If the surrounding workflow records an early request for auto-generation, that request records user intent only. The Agent may actually enter Auto-Generation only at the next mode-choice checkpoint after a confirmed write.
+
+### 6.1 Refine Mode Invocation
+
+Refine mode is invoked as a skill contract, not as a helper shell command:
+
+`$ loopy:gen-plan --refine <existing-plan-name>`
+
+The refine target must be the name of an existing tracked plan under `.loopy/plans/`. Refine mode is in-place unless a future feature explicitly adds separate clone/refine output behavior. The Agent must call installed runtime `open-plan` for `<existing-plan-name>` and must stop before comment discovery, rewrite planning, runtime registration, or file mutation if `open-plan` fails.
+
+Argument compatibility is fail-closed:
+- `--refine <plan-name>` is the required refine target and must reference an existing plan.
+- `--input` must be omitted with `--refine`; refine comments are discovered from the existing tracked plan tree, not from a draft source.
+- `--plan-name` must be omitted with `--refine`; the refine target itself is the plan name and no alternate output plan is allowed.
+- `--task-type` must be omitted with `--refine`; persisted task type is read from the existing plan returned by `open-plan`.
+
+If any incompatible argument is present, the Agent must report an invalid refine invocation and stop before runtime writes or filesystem mutation. Help and usage surfaces must not imply that refine mode clones a plan into a new output target.
+
+The main refine procedure is documented in `prompts/refine_instructions.md`. The Agent must apply that refine-only instruction asset when running `--refine <existing-plan-name>`.
 
 ## 7. Root Directory Naming
 

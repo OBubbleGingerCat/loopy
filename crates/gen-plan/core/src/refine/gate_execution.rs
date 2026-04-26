@@ -1,0 +1,573 @@
+use std::collections::HashSet;
+use std::fmt;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{
+    ListChildrenRequest, PlannerMode, ReviewIssue, RunFrontierReviewGateRequest,
+    RunLeafReviewGateRequest, Runtime,
+};
+
+use super::gate_registration::{
+    RegisteredRefineFrontierTarget, RegisteredRefineGateTargets, RegisteredRefineLeafTarget,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRefineGateRevalidationRequest {
+    pub plan_id: String,
+    pub plan_root: PathBuf,
+    pub planner_mode: PlannerMode,
+    pub registered_targets: RegisteredRefineGateTargets,
+    pub retry_policy: RefineGateRetryPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefineGateRetryPolicy {
+    pub max_invocation_retries: u8,
+}
+
+impl Default for RefineGateRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_invocation_retries: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefineGateExecutionReport {
+    pub status: RefineGateExecutionStatus,
+    pub leaf_attempts: Vec<RefineGateAttempt>,
+    pub frontier_attempts: Vec<RefineGateAttempt>,
+    pub exhausted_invocation_retries: Vec<RefineGateInvocationFailure>,
+    pub blocked_by_review_issues: Vec<ReviewIssue>,
+    pub paused_for_user_decision: Option<String>,
+    pub invalidated_leaf_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefineGateExecutionStatus {
+    Passed,
+    BlockedByReviewIssues,
+    PausedForUserDecision,
+    ExhaustedInvocationRetries,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefineGateKind {
+    Leaf,
+    Frontier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefineGateAttempt {
+    pub gate_kind: RefineGateKind,
+    pub target_node_id: String,
+    pub target_relative_path: String,
+    pub attempt_index: u8,
+    pub outcome: RefineGateAttemptOutcome,
+    pub content_fingerprint: String,
+    pub invalidated_leaf_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefineGateAttemptOutcome {
+    Passed {
+        gate_run_id: String,
+        verdict: String,
+        summary: String,
+    },
+    ReviewIssues {
+        verdict: String,
+        issues: Vec<ReviewIssue>,
+    },
+    PauseForUserDecision {
+        summary: String,
+        issues: Vec<ReviewIssue>,
+    },
+    InvocationFailure {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefineGateInvocationFailure {
+    pub gate_kind: RefineGateKind,
+    pub target_node_id: String,
+    pub attempt_index: u8,
+    pub error: String,
+    pub content_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefineGateExecutionError {
+    InvalidRegisteredTargets { reason: String },
+}
+
+impl fmt::Display for RefineGateExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for RefineGateExecutionError {}
+
+pub fn run_refine_gate_revalidation(
+    runtime: &Runtime,
+    request: RunRefineGateRevalidationRequest,
+) -> Result<RefineGateExecutionReport, RefineGateExecutionError> {
+    // global leaf-before-frontier; must not interleave leaf and frontier execution parent-by-parent.
+    // Frontier targets are not invoked until every required leaf target has a passed gate outcome.
+    // valid reviewer issues are not invocation failures. Any preflight violation returns
+    // RefineGateExecutionError::InvalidRegisteredTargets.
+    // Uses Runtime::run_leaf_review_gate, Runtime::run_frontier_review_gate,
+    // RunFrontierReviewGateResponse.invalidated_leaf_node_ids, and Runtime::list_children.
+    // Fingerprints are lowercase SHA-256 hex digest values over plan_root.join target bytes:
+    // leaf\0{relative_path}\0 and frontier\0{parent_relative_path}\0.
+    // The API must not inspect .loopy/loopy.db; parent_targets are not dispatched by this API.
+    validate_registered_targets(runtime, &request)?;
+
+    let mut report = RefineGateExecutionReport {
+        status: RefineGateExecutionStatus::Passed,
+        leaf_attempts: Vec::new(),
+        frontier_attempts: Vec::new(),
+        exhausted_invocation_retries: Vec::new(),
+        blocked_by_review_issues: Vec::new(),
+        paused_for_user_decision: None,
+        invalidated_leaf_node_ids: Vec::new(),
+    };
+
+    for target in &request.registered_targets.leaf_targets {
+        let status = run_leaf_target(runtime, &request, target, &mut report)?;
+        if status != RefineGateExecutionStatus::Passed {
+            report.status = status;
+            return Ok(report);
+        }
+    }
+
+    for target in &request.registered_targets.frontier_targets {
+        let status = run_frontier_target(runtime, &request, target, &mut report)?;
+        if status != RefineGateExecutionStatus::Passed {
+            report.status = status;
+            return Ok(report);
+        }
+    }
+
+    // A fully passed report has an empty invalidated_leaf_node_ids list. Approved frontier response
+    // with non-empty invalidated leaf ids is invalid under current runtime contract.
+    report.status = RefineGateExecutionStatus::Passed;
+    Ok(report)
+}
+
+fn run_leaf_target(
+    runtime: &Runtime,
+    request: &RunRefineGateRevalidationRequest,
+    target: &RegisteredRefineLeafTarget,
+    report: &mut RefineGateExecutionReport,
+) -> Result<RefineGateExecutionStatus, RefineGateExecutionError> {
+    let mut first_failure_fingerprint = None::<String>;
+    for attempt_index in 1..=request.retry_policy.max_invocation_retries {
+        let fingerprint = leaf_fingerprint(&request.plan_root, &target.relative_path)?;
+        if let Some(previous) = &first_failure_fingerprint {
+            if previous != &fingerprint {
+                return Err(RefineGateExecutionError::InvalidRegisteredTargets {
+                    reason: format!(
+                        "content fingerprint changed before retry for {}",
+                        target.relative_path
+                    ),
+                });
+            }
+        }
+        match runtime.run_leaf_review_gate(RunLeafReviewGateRequest {
+            plan_id: request.plan_id.clone(),
+            node_id: target.node_id.clone(),
+            planner_mode: request.planner_mode.clone(),
+        }) {
+            Ok(response) if response.passed => {
+                report.leaf_attempts.push(RefineGateAttempt {
+                    gate_kind: RefineGateKind::Leaf,
+                    target_node_id: target.node_id.clone(),
+                    target_relative_path: target.relative_path.clone(),
+                    attempt_index,
+                    outcome: RefineGateAttemptOutcome::Passed {
+                        gate_run_id: response.gate_run_id,
+                        verdict: response.verdict,
+                        summary: response.summary,
+                    },
+                    content_fingerprint: fingerprint,
+                    invalidated_leaf_node_ids: Vec::new(),
+                });
+                return Ok(RefineGateExecutionStatus::Passed);
+            }
+            Ok(response) => {
+                let status = status_for_review_issues(&response.issues);
+                if status == RefineGateExecutionStatus::PausedForUserDecision {
+                    report.paused_for_user_decision = response
+                        .issues
+                        .iter()
+                        .find_map(|issue| issue.question_for_user.clone());
+                    report.leaf_attempts.push(RefineGateAttempt {
+                        gate_kind: RefineGateKind::Leaf,
+                        target_node_id: target.node_id.clone(),
+                        target_relative_path: target.relative_path.clone(),
+                        attempt_index,
+                        outcome: RefineGateAttemptOutcome::PauseForUserDecision {
+                            summary: response.summary,
+                            issues: response.issues,
+                        },
+                        content_fingerprint: fingerprint,
+                        invalidated_leaf_node_ids: Vec::new(),
+                    });
+                } else {
+                    report
+                        .blocked_by_review_issues
+                        .extend(response.issues.clone());
+                    report.leaf_attempts.push(RefineGateAttempt {
+                        gate_kind: RefineGateKind::Leaf,
+                        target_node_id: target.node_id.clone(),
+                        target_relative_path: target.relative_path.clone(),
+                        attempt_index,
+                        outcome: RefineGateAttemptOutcome::ReviewIssues {
+                            verdict: response.verdict,
+                            issues: response.issues,
+                        },
+                        content_fingerprint: fingerprint,
+                        invalidated_leaf_node_ids: Vec::new(),
+                    });
+                }
+                return Ok(status);
+            }
+            Err(source) => {
+                first_failure_fingerprint.get_or_insert_with(|| fingerprint.clone());
+                let error = source.to_string();
+                report.leaf_attempts.push(RefineGateAttempt {
+                    gate_kind: RefineGateKind::Leaf,
+                    target_node_id: target.node_id.clone(),
+                    target_relative_path: target.relative_path.clone(),
+                    attempt_index,
+                    outcome: RefineGateAttemptOutcome::InvocationFailure {
+                        error: error.clone(),
+                    },
+                    content_fingerprint: fingerprint.clone(),
+                    invalidated_leaf_node_ids: Vec::new(),
+                });
+                if attempt_index == request.retry_policy.max_invocation_retries {
+                    report
+                        .exhausted_invocation_retries
+                        .push(RefineGateInvocationFailure {
+                            gate_kind: RefineGateKind::Leaf,
+                            target_node_id: target.node_id.clone(),
+                            attempt_index,
+                            error,
+                            content_fingerprint: fingerprint,
+                        });
+                    return Ok(RefineGateExecutionStatus::ExhaustedInvocationRetries);
+                }
+            }
+        }
+    }
+    Ok(RefineGateExecutionStatus::ExhaustedInvocationRetries)
+}
+
+fn run_frontier_target(
+    runtime: &Runtime,
+    request: &RunRefineGateRevalidationRequest,
+    target: &RegisteredRefineFrontierTarget,
+    report: &mut RefineGateExecutionReport,
+) -> Result<RefineGateExecutionStatus, RefineGateExecutionError> {
+    let mut first_failure_fingerprint = None::<String>;
+    for attempt_index in 1..=request.retry_policy.max_invocation_retries {
+        let fingerprint = frontier_fingerprint(runtime, request, target)?;
+        if let Some(previous) = &first_failure_fingerprint {
+            if previous != &fingerprint {
+                return Err(RefineGateExecutionError::InvalidRegisteredTargets {
+                    reason: format!(
+                        "content fingerprint changed before retry for {}",
+                        target.parent_relative_path
+                    ),
+                });
+            }
+        }
+        match runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
+            plan_id: request.plan_id.clone(),
+            parent_node_id: target.parent_node_id.clone(),
+            planner_mode: request.planner_mode.clone(),
+        }) {
+            Ok(response) if response.passed => {
+                report.frontier_attempts.push(RefineGateAttempt {
+                    gate_kind: RefineGateKind::Frontier,
+                    target_node_id: target.parent_node_id.clone(),
+                    target_relative_path: target.parent_relative_path.clone(),
+                    attempt_index,
+                    outcome: RefineGateAttemptOutcome::Passed {
+                        gate_run_id: response.gate_run_id,
+                        verdict: response.verdict,
+                        summary: response.summary,
+                    },
+                    content_fingerprint: fingerprint,
+                    invalidated_leaf_node_ids: Vec::new(),
+                });
+                return Ok(RefineGateExecutionStatus::Passed);
+            }
+            Ok(response) => {
+                // valid non-passed Runtime::run_frontier_review_gate response; collect
+                // stable-deduplicated union of all valid non-passed frontier response invalidations.
+                // must not present invalidated leaf ids as current approvals.
+                for invalidated in &response.invalidated_leaf_node_ids {
+                    if !report.invalidated_leaf_node_ids.contains(invalidated) {
+                        report.invalidated_leaf_node_ids.push(invalidated.clone());
+                    }
+                }
+                let status = status_for_review_issues(&response.issues);
+                if status == RefineGateExecutionStatus::PausedForUserDecision {
+                    report.paused_for_user_decision = response
+                        .issues
+                        .iter()
+                        .find_map(|issue| issue.question_for_user.clone());
+                    report.frontier_attempts.push(RefineGateAttempt {
+                        gate_kind: RefineGateKind::Frontier,
+                        target_node_id: target.parent_node_id.clone(),
+                        target_relative_path: target.parent_relative_path.clone(),
+                        attempt_index,
+                        outcome: RefineGateAttemptOutcome::PauseForUserDecision {
+                            summary: response.summary,
+                            issues: response.issues,
+                        },
+                        content_fingerprint: fingerprint,
+                        invalidated_leaf_node_ids: response.invalidated_leaf_node_ids,
+                    });
+                } else {
+                    report
+                        .blocked_by_review_issues
+                        .extend(response.issues.clone());
+                    report.frontier_attempts.push(RefineGateAttempt {
+                        gate_kind: RefineGateKind::Frontier,
+                        target_node_id: target.parent_node_id.clone(),
+                        target_relative_path: target.parent_relative_path.clone(),
+                        attempt_index,
+                        outcome: RefineGateAttemptOutcome::ReviewIssues {
+                            verdict: response.verdict,
+                            issues: response.issues,
+                        },
+                        content_fingerprint: fingerprint,
+                        invalidated_leaf_node_ids: response.invalidated_leaf_node_ids,
+                    });
+                }
+                return Ok(status);
+            }
+            Err(source) => {
+                first_failure_fingerprint.get_or_insert_with(|| fingerprint.clone());
+                let error = source.to_string();
+                report.frontier_attempts.push(RefineGateAttempt {
+                    gate_kind: RefineGateKind::Frontier,
+                    target_node_id: target.parent_node_id.clone(),
+                    target_relative_path: target.parent_relative_path.clone(),
+                    attempt_index,
+                    outcome: RefineGateAttemptOutcome::InvocationFailure {
+                        error: error.clone(),
+                    },
+                    content_fingerprint: fingerprint.clone(),
+                    invalidated_leaf_node_ids: Vec::new(),
+                });
+                if attempt_index == request.retry_policy.max_invocation_retries {
+                    report
+                        .exhausted_invocation_retries
+                        .push(RefineGateInvocationFailure {
+                            gate_kind: RefineGateKind::Frontier,
+                            target_node_id: target.parent_node_id.clone(),
+                            attempt_index,
+                            error,
+                            content_fingerprint: fingerprint,
+                        });
+                    return Ok(RefineGateExecutionStatus::ExhaustedInvocationRetries);
+                }
+            }
+        }
+    }
+    Ok(RefineGateExecutionStatus::ExhaustedInvocationRetries)
+}
+
+fn status_for_review_issues(issues: &[ReviewIssue]) -> RefineGateExecutionStatus {
+    if issues.iter().any(|issue| {
+        issue
+            .question_for_user
+            .as_deref()
+            .is_some_and(|q| !q.trim().is_empty())
+    }) {
+        RefineGateExecutionStatus::PausedForUserDecision
+    } else {
+        RefineGateExecutionStatus::BlockedByReviewIssues
+    }
+}
+
+fn validate_registered_targets(
+    runtime: &Runtime,
+    request: &RunRefineGateRevalidationRequest,
+) -> Result<(), RefineGateExecutionError> {
+    if request.retry_policy.max_invocation_retries == 0 {
+        return invalid("retry_policy.max_invocation_retries must be at least 1");
+    }
+    if !request.plan_root.is_dir() {
+        return invalid("plan_root must exist and be a directory");
+    }
+    let mut leaf_ids = HashSet::new();
+    let mut leaf_paths = HashSet::new();
+    for target in &request.registered_targets.leaf_targets {
+        if target.node_id.is_empty() || target.reasons.is_empty() {
+            return invalid("leaf target node_id and reasons must be non-empty");
+        }
+        validate_target_path(&request.plan_root, &target.relative_path)?;
+        if !leaf_ids.insert(target.node_id.clone())
+            || !leaf_paths.insert(target.relative_path.clone())
+        {
+            return invalid("duplicate leaf target node_id or relative_path");
+        }
+        if !request.plan_root.join(&target.relative_path).is_file() {
+            return invalid("leaf markdown file must exist under plan_root");
+        }
+    }
+
+    for parent in &request.registered_targets.parent_targets {
+        if parent.node_id.is_empty() || parent.relative_path.is_empty() || parent.reasons.is_empty()
+        {
+            return invalid("parent_targets are not dispatched by this API but must be canonical");
+        }
+        validate_target_path(&request.plan_root, &parent.relative_path)?;
+    }
+
+    let mut frontier_ids = HashSet::new();
+    let mut frontier_paths = HashSet::new();
+    for target in &request.registered_targets.frontier_targets {
+        if target.parent_node_id.is_empty() || target.reasons.is_empty() {
+            return invalid("frontier target parent_node_id and reasons must be non-empty");
+        }
+        validate_target_path(&request.plan_root, &target.parent_relative_path)?;
+        if !frontier_ids.insert(target.parent_node_id.clone())
+            || !frontier_paths.insert(target.parent_relative_path.clone())
+        {
+            return invalid("duplicate frontier target parent_node_id or parent_relative_path");
+        }
+        if !request
+            .plan_root
+            .join(&target.parent_relative_path)
+            .is_file()
+        {
+            return invalid("frontier parent markdown file must exist under plan_root");
+        }
+        let children = runtime
+            .list_children(ListChildrenRequest {
+                plan_id: request.plan_id.clone(),
+                parent_node_id: Some(target.parent_node_id.clone()),
+                parent_relative_path: None,
+            })
+            .map_err(
+                |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                    reason: source.to_string(),
+                },
+            )?;
+        let visible_children: HashSet<_> = children
+            .children
+            .into_iter()
+            .map(|child| child.relative_path)
+            .collect();
+        for child in &target.changed_child_relative_paths {
+            validate_target_path(&request.plan_root, child)?;
+            if !visible_children.contains(child) {
+                return invalid("frontier changed child path must be runtime-visible");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn leaf_fingerprint(
+    plan_root: &Path,
+    relative_path: &str,
+) -> Result<String, RefineGateExecutionError> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(format!("leaf\0{relative_path}\0").as_bytes());
+    bytes.extend(read_target_bytes(plan_root, relative_path)?);
+    Ok(sha256_hex(&bytes))
+}
+
+fn frontier_fingerprint(
+    runtime: &Runtime,
+    request: &RunRefineGateRevalidationRequest,
+    target: &RegisteredRefineFrontierTarget,
+) -> Result<String, RefineGateExecutionError> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(format!("frontier\0{}\0", target.parent_relative_path).as_bytes());
+    bytes.extend(read_target_bytes(
+        &request.plan_root,
+        &target.parent_relative_path,
+    )?);
+    let children = runtime
+        .list_children(ListChildrenRequest {
+            plan_id: request.plan_id.clone(),
+            parent_node_id: Some(target.parent_node_id.clone()),
+            parent_relative_path: None,
+        })
+        .map_err(
+            |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                reason: source.to_string(),
+            },
+        )?;
+    for child in children.children {
+        bytes.extend_from_slice(format!("child\0{}\0", child.relative_path).as_bytes());
+        bytes.extend(read_target_bytes(&request.plan_root, &child.relative_path)?);
+    }
+    Ok(sha256_hex(&bytes))
+}
+
+fn read_target_bytes(
+    plan_root: &Path,
+    relative_path: &str,
+) -> Result<Vec<u8>, RefineGateExecutionError> {
+    validate_target_path(plan_root, relative_path)?;
+    fs::read(plan_root.join(relative_path)).map_err(|source| {
+        RefineGateExecutionError::InvalidRegisteredTargets {
+            reason: source.to_string(),
+        }
+    })
+}
+
+fn validate_target_path(
+    plan_root: &Path,
+    relative_path: &str,
+) -> Result<(), RefineGateExecutionError> {
+    let path = Path::new(relative_path);
+    if relative_path.is_empty()
+        || path.is_absolute()
+        || path.extension().and_then(|ext| ext.to_str()) != Some("md")
+    {
+        return invalid("target path must be a canonical markdown relative path");
+    }
+    for component in path.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return invalid("target path must stay inside plan_root");
+        }
+    }
+    let joined = plan_root.join(relative_path);
+    if !joined.starts_with(plan_root) {
+        return invalid("plan_root.join target must remain inside plan_root");
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+fn invalid<T>(reason: &str) -> Result<T, RefineGateExecutionError> {
+    Err(RefineGateExecutionError::InvalidRegisteredTargets {
+        reason: reason.to_owned(),
+    })
+}
