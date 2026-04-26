@@ -118,6 +118,12 @@ pub(crate) fn bootstrap_schema(connection: &Connection) -> Result<()> {
         "summary",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    ensure_column_exists(
+        connection,
+        "GEN_PLAN__frontier_gate_runs",
+        "invalidated_leaf_node_ids_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
     Ok(())
 }
 

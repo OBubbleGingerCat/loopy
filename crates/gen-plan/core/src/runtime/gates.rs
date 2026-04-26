@@ -12,6 +12,7 @@ use super::{Runtime, query};
 use crate::{
     NodeKind, ReviewIssue, RunFrontierReviewGateRequest, RunFrontierReviewGateResponse,
     RunLeafReviewGateRequest, RunLeafReviewGateResponse,
+    refine::{RefineStaleGateClassification, RefineStaleResultHandoff, StaleGateTargetKind},
 };
 
 const LEAF_REVIEWER_ROLE_KIND: &str = "leaf_reviewer";
@@ -616,7 +617,12 @@ fn select_refine_context_invalidatable_leaf_node_ids(
     refine_context: &str,
 ) -> Result<Vec<String>> {
     let mut node_ids = select_descendant_leaf_node_ids(connection, plan_id, parent_node_id)?;
-    for node_id in select_context_mentioned_leaf_node_ids(connection, plan_id, refine_context)? {
+    let parent = query::load_node_record(connection, plan_id, parent_node_id)?;
+    for node_id in stale_leaf_node_ids_from_refine_context(
+        refine_context,
+        parent_node_id,
+        &parent.relative_path,
+    )? {
         push_unique(&mut node_ids, node_id);
     }
     Ok(node_ids)
@@ -649,61 +655,43 @@ fn collect_descendant_leaf_node_ids(
     Ok(())
 }
 
-fn select_context_mentioned_leaf_node_ids(
-    connection: &Connection,
-    plan_id: &str,
+fn stale_leaf_node_ids_from_refine_context(
     refine_context: &str,
+    parent_node_id: &str,
+    parent_relative_path: &str,
 ) -> Result<Vec<String>> {
-    let mut statement = connection
-        .prepare(
-            "SELECT node_id, relative_path, node_kind
-             FROM GEN_PLAN__nodes
-             WHERE plan_id = ?1
-             ORDER BY relative_path, node_id",
-        )
-        .context("failed to prepare refine context node lookup")?;
-    let nodes = statement
-        .query_map(params![plan_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+    let Some(json) = json_section(refine_context, "Stale Handoff") else {
+        return Ok(Vec::new());
+    };
+    let handoffs: Vec<RefineStaleResultHandoff> = serde_json::from_str(json)
+        .context("failed to parse Stale Handoff refine context section")?;
+    Ok(handoffs
+        .into_iter()
+        .filter(|handoff| {
+            handoff.target_kind == StaleGateTargetKind::Leaf
+                && handoff.classification == RefineStaleGateClassification::Stale
+                && !handoff.invalidation_reason.trim().is_empty()
+                && (handoff.parent_node_id.as_deref() == Some(parent_node_id)
+                    || handoff.parent_relative_path.as_deref() == Some(parent_relative_path))
         })
-        .context("failed to query refine context nodes")?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("failed to read refine context nodes")?;
+        .filter_map(|handoff| handoff.node_id)
+        .collect())
+}
 
-    let mut node_ids = Vec::new();
-    for (node_id, relative_path, node_kind) in nodes {
-        if !refine_context_mentions_path(refine_context, &relative_path) {
-            continue;
-        }
-        match node_kind.as_str() {
-            "leaf" => push_unique(&mut node_ids, node_id),
-            "parent" => {
-                collect_descendant_leaf_node_ids(connection, plan_id, &node_id, &mut node_ids)?
-            }
-            _ => {}
-        }
+fn json_section<'a>(refine_context: &'a str, title: &str) -> Option<&'a str> {
+    let marker = format!("## {title}");
+    let section = refine_context.split_once(&marker)?.1;
+    let json_start = section.find("```json")?;
+    let json = &section[json_start + "```json".len()..];
+    let json = json.strip_prefix('\n').unwrap_or(json);
+    let json_end = json.find("```")?;
+    Some(json[..json_end].trim())
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
     }
-    Ok(node_ids)
-}
-
-fn refine_context_mentions_path(refine_context: &str, relative_path: &str) -> bool {
-    refine_context
-        .match_indices(relative_path)
-        .any(|(start, _)| {
-            let before = refine_context[..start].chars().next_back();
-            let after = refine_context[start + relative_path.len()..].chars().next();
-            is_refine_context_path_boundary(before) && is_refine_context_path_boundary(after)
-        })
-}
-
-fn is_refine_context_path_boundary(character: Option<char>) -> bool {
-    character.is_none_or(|character| {
-        !character.is_ascii_alphanumeric() && !matches!(character, '/' | '\\' | '.' | '-' | '_')
-    })
 }
 
 fn validate_refine_invalidatable_leaf_node_ids(
@@ -732,12 +720,6 @@ fn validate_refine_invalidatable_leaf_node_ids(
         }
     }
     Ok(valid)
-}
-
-fn push_unique(values: &mut Vec<String>, value: String) {
-    if !values.contains(&value) {
-        values.push(value);
-    }
 }
 
 fn has_refine_revalidation_context(context: &Option<String>) -> bool {

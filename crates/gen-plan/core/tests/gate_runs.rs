@@ -1104,6 +1104,19 @@ fn frontier_gate_refine_context_can_invalidate_detached_leaf_approval() -> Resul
         r#"{"verdict":"approved_as_leaf","summary":"unused","issues":[]}"#,
         &frontier_output,
     )?;
+    let detached_refine_context = format!(
+        "## Stale Handoff\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&vec![RefineStaleResultHandoff {
+            target_kind: StaleGateTargetKind::Leaf,
+            node_id: Some(removed_leaf.node_id.clone()),
+            relative_path: "backend/removed.md".to_owned(),
+            parent_node_id: Some(parent.node_id.clone()),
+            parent_relative_path: Some("backend/backend.md".to_owned()),
+            regenerated_child_relative_path: None,
+            classification: RefineStaleGateClassification::Stale,
+            invalidation_reason: "Removed from backend child set.".to_owned(),
+        }])?
+    );
 
     let result = {
         let _env_guard = fake_codex_env(&fake_bin_dir);
@@ -1111,9 +1124,7 @@ fn frontier_gate_refine_context_can_invalidate_detached_leaf_approval() -> Resul
             plan_id: plan.plan_id.clone(),
             parent_node_id: parent.node_id,
             planner_mode: PlannerMode::Auto,
-            refine_revalidation_context: Some(
-                "Changed child set removed backend/removed.md".to_owned(),
-            ),
+            refine_revalidation_context: Some(detached_refine_context),
             refine_invalidatable_leaf_node_ids: None,
         })?
     };
@@ -1213,6 +1224,19 @@ fn frontier_gate_refine_context_rejects_unrelated_leaf_invalidation() -> Result<
         r#"{"verdict":"approved_as_leaf","summary":"unused","issues":[]}"#,
         &frontier_output,
     )?;
+    let shared_refine_context = format!(
+        "## Stale Handoff\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&vec![RefineStaleResultHandoff {
+            target_kind: StaleGateTargetKind::Leaf,
+            node_id: Some(sibling_leaf.node_id.clone()),
+            relative_path: "docs/guide.md".to_owned(),
+            parent_node_id: Some(docs_parent.node_id.clone()),
+            parent_relative_path: Some("docs/docs.md".to_owned()),
+            regenerated_child_relative_path: None,
+            classification: RefineStaleGateClassification::Stale,
+            invalidation_reason: "Docs branch changed independently.".to_owned(),
+        }])?
+    );
 
     let error = {
         let _env_guard = fake_codex_env(&fake_bin_dir);
@@ -1221,7 +1245,7 @@ fn frontier_gate_refine_context_rejects_unrelated_leaf_invalidation() -> Result<
                 plan_id: plan.plan_id.clone(),
                 parent_node_id: parent.node_id.clone(),
                 planner_mode: PlannerMode::Auto,
-                refine_revalidation_context: Some("Backend refine context".to_owned()),
+                refine_revalidation_context: Some(shared_refine_context.clone()),
                 refine_invalidatable_leaf_node_ids: None,
             })
             .expect_err("refine context must not allow unrelated leaf invalidations")
@@ -1238,7 +1262,7 @@ fn frontier_gate_refine_context_rejects_unrelated_leaf_invalidation() -> Result<
                 plan_id: plan.plan_id,
                 parent_node_id: parent.node_id,
                 planner_mode: PlannerMode::Auto,
-                refine_revalidation_context: Some("Backend refine context".to_owned()),
+                refine_revalidation_context: Some(shared_refine_context),
                 refine_invalidatable_leaf_node_ids: Some(vec![sibling_leaf.node_id]),
             })
             .expect_err("explicit refine invalidation scope must still stay inside the frontier")
@@ -1710,7 +1734,6 @@ fn create_old_schema_db(loopy_dir: &Path) -> Result<()> {
             passed INTEGER NOT NULL,
             verdict TEXT NOT NULL,
             issues_json TEXT NOT NULL,
-            invalidated_leaf_node_ids_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
         "#,
@@ -1748,11 +1771,19 @@ fn assert_migrated_columns_present_once(loopy_dir: &Path) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
+    let frontier_has_invalidated_leaf_node_ids_json: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM pragma_table_info('GEN_PLAN__frontier_gate_runs')
+         WHERE name = 'invalidated_leaf_node_ids_json'",
+        [],
+        |row| row.get(0),
+    )?;
 
     assert_eq!(plan_has_project_directory, 1);
     assert_eq!(plan_has_project_directory_source, 1);
     assert_eq!(leaf_has_summary, 1);
     assert_eq!(frontier_has_summary, 1);
+    assert_eq!(frontier_has_invalidated_leaf_node_ids_json, 1);
 
     Ok(())
 }
