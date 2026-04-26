@@ -770,6 +770,38 @@ fn ensure_node_id_accepts_root_plan_parent_for_scoped_children() -> Result<()> {
 }
 
 #[test]
+fn ensure_node_id_accepts_root_plan_parent_for_normal_child_parent() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "demo.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: Some("demo.md".to_owned()),
+    })?;
+    let inspected = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(child_parent.node_id),
+        relative_path: None,
+    })?;
+
+    assert_eq!(inspected.node_kind, NodeKind::Parent);
+    assert_eq!(inspected.parent_relative_path.as_deref(), Some("demo.md"));
+
+    Ok(())
+}
+
+#[test]
 fn ensure_node_id_accepts_root_plan_parent_for_first_layer_leaves() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;

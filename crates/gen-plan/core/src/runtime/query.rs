@@ -946,10 +946,17 @@ fn root_plan_parent_child_component_count(
     if !is_root_plan_parent_path(parent_relative_path) {
         return None;
     }
+    if relative_path == parent_relative_path {
+        return None;
+    }
     let root_stem = Path::new(parent_relative_path).file_stem()?.to_str()?;
-    let child_relative = Path::new(relative_path).strip_prefix(root_stem).ok()?;
-    let component_count = child_relative.components().count();
-    (component_count > 0).then_some(component_count)
+    if let Ok(child_relative) = Path::new(relative_path).strip_prefix(root_stem) {
+        let component_count = child_relative.components().count();
+        if component_count > 0 {
+            return Some(component_count);
+        }
+    }
+    Some(Path::new(relative_path).components().count())
 }
 
 fn is_plan_root_parent_markdown_path(

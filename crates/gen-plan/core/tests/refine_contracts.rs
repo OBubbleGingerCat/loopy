@@ -767,7 +767,7 @@ fn root_scope_new_leaf_targets_use_root_plan_parent() {
 }
 
 #[test]
-fn root_scope_top_level_new_leaf_targets_remain_root_level() {
+fn root_scope_top_level_new_leaf_targets_use_root_plan_parent() {
     let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
         plan_id: "plan-1".to_owned(),
         rewrite_result: RefineRewriteResult {
@@ -803,9 +803,14 @@ fn root_scope_top_level_new_leaf_targets_remain_root_level() {
         .iter()
         .find(|target| target.relative_path == "intro.md")
         .expect("new top-level root-scope leaf should be selected");
-    assert_eq!(leaf.parent_relative_path, None);
+    assert_eq!(leaf.parent_relative_path.as_deref(), Some("demo.md"));
     let registration = selection.to_registration_request("plan-1".to_owned());
-    assert_eq!(registration.leaf_candidates[0].parent_relative_path, None);
+    assert_eq!(
+        registration.leaf_candidates[0]
+            .parent_relative_path
+            .as_deref(),
+        Some("demo.md")
+    );
 }
 
 #[test]
@@ -2263,11 +2268,13 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         project_directory: workspace.path().to_path_buf(),
     })?;
     let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
     fs::write(
         plan_root.join("demo.md"),
-        "# Demo\n\n## Child Nodes\n\n- [Intro](./intro.md)\n",
+        "# Demo\n\n## Child Nodes\n\n- [Intro](./intro.md)\n- [API](./api/api.md)\n",
     )?;
     fs::write(plan_root.join("intro.md"), "# Intro\n")?;
+    fs::write(plan_root.join("api/api.md"), "# API\n")?;
     let connection = Connection::open(workspace.path().join(".loopy/loopy.db"))?;
     connection.execute(
         "INSERT INTO GEN_PLAN__nodes (
@@ -2281,23 +2288,38 @@ fn reconcile_parent_child_links_accepts_root_plan_parent() -> Result<()> {
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
         params![plan.plan_id, "leaf-1", "intro.md", "intro", "leaf", Option::<String>::None],
     )?;
+    connection.execute(
+        "INSERT INTO GEN_PLAN__nodes (
+            plan_id, node_id, relative_path, node_name, node_kind, parent_node_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '')",
+        params![plan.plan_id, "api-1", "api/api.md", "api", "parent", Option::<String>::None],
+    )?;
 
     let reconciled = runtime.reconcile_parent_child_links(ReconcileParentChildLinksRequest {
         plan_id: plan.plan_id.clone(),
         parent_relative_path: "demo.md".to_owned(),
     })?;
     assert_eq!(reconciled.parent_node_id, "root-1");
-    assert_eq!(reconciled.linked_child_relative_paths, vec!["intro.md"]);
-    assert_eq!(reconciled.attached_child_relative_paths, vec!["intro.md"]);
+    assert_eq!(
+        reconciled.linked_child_relative_paths,
+        vec!["intro.md", "api/api.md"]
+    );
+    assert_eq!(
+        reconciled.attached_child_relative_paths,
+        vec!["intro.md", "api/api.md"]
+    );
 
     let children = runtime.list_children(ListChildrenRequest {
         plan_id: plan.plan_id,
         parent_node_id: Some("root-1".to_owned()),
         parent_relative_path: None,
     })?;
-    assert_eq!(children.children.len(), 1);
-    assert_eq!(children.children[0].node_id, "leaf-1");
-    assert_eq!(children.children[0].relative_path, "intro.md");
+    let child_paths = children
+        .children
+        .iter()
+        .map(|child| child.relative_path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(child_paths, vec!["api/api.md", "intro.md"]);
     Ok(())
 }
 
