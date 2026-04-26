@@ -573,7 +573,7 @@ pub(crate) fn load_latest_passed_leaf_gate_summary(
                    SELECT 1
                    FROM GEN_PLAN__frontier_gate_runs AS frontier
                    WHERE frontier.plan_id = leaf.plan_id
-                     AND CAST(frontier.created_at AS INTEGER) > CAST(leaf.created_at AS INTEGER)
+                     AND CAST(frontier.created_at AS INTEGER) >= CAST(leaf.created_at AS INTEGER)
                      AND frontier.invalidated_leaf_node_ids_json LIKE '%' || leaf.node_id || '%'
                )
              ORDER BY CAST(leaf.created_at AS INTEGER) DESC, leaf.leaf_gate_run_id DESC

@@ -141,6 +141,7 @@ pub fn select_refine_gate_targets(
         .filter(|file| file.change_kind == RefineChangedFileKind::ExplicitlyRemoved)
         .map(|file| file.relative_path.as_str())
         .collect::<Vec<_>>();
+    let root_parent_paths = root_parent_paths(&request);
 
     for file in &request.rewrite_result.changed_files {
         match file.change_kind {
@@ -162,6 +163,7 @@ pub fn select_refine_gate_targets(
                         &request.runtime_snapshot,
                         &file.relative_path,
                         &explicitly_removed_paths,
+                        &root_parent_paths,
                         RefineGateTargetReason::ParentContractChanged,
                     );
                 } else {
@@ -171,6 +173,7 @@ pub fn select_refine_gate_targets(
                         &file.relative_path,
                         file.node_id.clone(),
                         None,
+                        &root_parent_paths,
                         RefineGateTargetReason::TextChanged,
                     );
                 }
@@ -192,6 +195,7 @@ pub fn select_refine_gate_targets(
                         &file.relative_path,
                         None,
                         None,
+                        &root_parent_paths,
                         RefineGateTargetReason::NewLeaf,
                     );
                 }
@@ -203,6 +207,7 @@ pub fn select_refine_gate_targets(
                     &file.relative_path,
                     file.node_id.clone(),
                     None,
+                    &root_parent_paths,
                     RefineGateTargetReason::RegeneratedLeaf,
                 );
             }
@@ -218,6 +223,7 @@ pub fn select_refine_gate_targets(
             &invalidation.relative_path,
             invalidation.node_id.clone(),
             None,
+            &root_parent_paths,
             RefineGateTargetReason::ContextInvalidated,
         );
     }
@@ -249,6 +255,7 @@ pub fn select_refine_gate_targets(
                         child,
                         None,
                         Some(change.parent_relative_path.clone()),
+                        &root_parent_paths,
                         reason.clone(),
                     );
                 }
@@ -258,6 +265,7 @@ pub fn select_refine_gate_targets(
                         &request.runtime_snapshot,
                         child,
                         &[],
+                        &root_parent_paths,
                         reason.clone(),
                     );
                 }
@@ -266,7 +274,7 @@ pub fn select_refine_gate_targets(
         }
     }
 
-    apply_stale_handoff(&request, &mut selection);
+    apply_stale_handoff(&request, &mut selection, &root_parent_paths);
     selection.expected_target_summary = ExpectedGateTargetSummary {
         leaf_targets: selection
             .leaf_targets
@@ -296,6 +304,7 @@ pub fn select_refine_gate_targets(
 fn apply_stale_handoff(
     request: &SelectRefineGateTargetsRequest,
     selection: &mut RefineGateTargetSelection,
+    root_parent_paths: &HashSet<String>,
 ) {
     // stale_result_handoff classifications are supplied by the stale policy.
     for handoff in &request.stale_result_handoff {
@@ -313,6 +322,7 @@ fn apply_stale_handoff(
                     &handoff.relative_path,
                     handoff.node_id.clone(),
                     None,
+                    root_parent_paths,
                     RefineGateTargetReason::StaleDescendant,
                 );
                 if let Some(prior) = request.prior_gate_summaries.leaf.iter().find(|prior| {
@@ -414,6 +424,7 @@ fn upsert_descendant_leaf_targets(
     snapshot: &RefineRuntimeNodeSnapshot,
     parent_relative_path: &str,
     explicitly_removed_paths: &[&str],
+    root_parent_paths: &HashSet<String>,
     reason: RefineGateTargetReason,
 ) {
     let Some(parent_node) = find_node(snapshot, parent_relative_path) else {
@@ -425,6 +436,7 @@ fn upsert_descendant_leaf_targets(
             snapshot,
             child_relative_path,
             explicitly_removed_paths,
+            root_parent_paths,
             reason.clone(),
         );
     }
@@ -435,6 +447,7 @@ fn upsert_descendant_leaf_target(
     snapshot: &RefineRuntimeNodeSnapshot,
     relative_path: &str,
     explicitly_removed_paths: &[&str],
+    root_parent_paths: &HashSet<String>,
     reason: RefineGateTargetReason,
 ) {
     if explicitly_removed_paths
@@ -453,6 +466,7 @@ fn upsert_descendant_leaf_target(
             &node.relative_path,
             Some(node.node_id.clone()),
             None,
+            root_parent_paths,
             reason,
         ),
         NodeKind::Parent => {
@@ -462,6 +476,7 @@ fn upsert_descendant_leaf_target(
                     snapshot,
                     child_relative_path,
                     explicitly_removed_paths,
+                    root_parent_paths,
                     reason.clone(),
                 );
             }
@@ -475,6 +490,7 @@ fn upsert_leaf(
     relative_path: &str,
     explicit_node_id: Option<String>,
     explicit_parent_relative_path: Option<String>,
+    root_parent_paths: &HashSet<String>,
     reason: RefineGateTargetReason,
 ) {
     if let Some(existing) = targets
@@ -494,7 +510,7 @@ fn upsert_leaf(
         parent_relative_path: explicit_parent_relative_path.or_else(|| {
             runtime_node
                 .and_then(|node| node.parent_relative_path.clone())
-                .or_else(|| parent_self_path(snapshot, relative_path))
+                .or_else(|| parent_self_path(root_parent_paths, relative_path))
         }),
         reasons: vec![reason],
     });
@@ -620,35 +636,50 @@ fn known_parent_paths(selection: &RefineGateTargetSelection) -> HashSet<String> 
     known
 }
 
-fn parent_self_path(snapshot: &RefineRuntimeNodeSnapshot, relative_path: &str) -> Option<String> {
-    root_scope_direct_parent_path(relative_path, 1)
-        .filter(|candidate| {
-            find_node(snapshot, candidate).is_some_and(|node| node.node_kind == NodeKind::Parent)
-        })
-        .or_else(|| top_level_root_parent_path(snapshot, relative_path))
-        .or_else(|| scoped_parent_self_path(relative_path))
-}
-
-fn top_level_root_parent_path(
-    snapshot: &RefineRuntimeNodeSnapshot,
-    relative_path: &str,
-) -> Option<String> {
-    if Path::new(relative_path).components().count() != 1 {
-        return None;
-    }
-    let root_parent_paths = snapshot
+fn root_parent_paths(request: &SelectRefineGateTargetsRequest) -> HashSet<String> {
+    let mut paths = request
+        .runtime_snapshot
         .nodes
         .iter()
         .filter(|node| {
             node.node_kind == NodeKind::Parent
                 && node.parent_node_id.is_none()
                 && Path::new(&node.relative_path).components().count() == 1
-                && node.relative_path != relative_path
         })
         .map(|node| node.relative_path.clone())
+        .collect::<HashSet<_>>();
+    paths.extend(
+        request
+            .rewrite_result
+            .structural_changes
+            .iter()
+            .filter(|change| Path::new(&change.parent_relative_path).components().count() == 1)
+            .map(|change| change.parent_relative_path.clone()),
+    );
+    paths
+}
+
+fn parent_self_path(root_parent_paths: &HashSet<String>, relative_path: &str) -> Option<String> {
+    root_scope_direct_parent_path(relative_path, 1)
+        .filter(|candidate| root_parent_paths.contains(candidate))
+        .or_else(|| top_level_root_parent_path(root_parent_paths, relative_path))
+        .or_else(|| scoped_parent_self_path(relative_path))
+}
+
+fn top_level_root_parent_path(
+    root_parent_paths: &HashSet<String>,
+    relative_path: &str,
+) -> Option<String> {
+    if Path::new(relative_path).components().count() != 1 {
+        return None;
+    }
+    let matching_paths = root_parent_paths
+        .iter()
+        .filter(|path| path.as_str() != relative_path)
+        .cloned()
         .collect::<Vec<_>>();
-    if root_parent_paths.len() == 1 {
-        root_parent_paths.into_iter().next()
+    if matching_paths.len() == 1 {
+        matching_paths.into_iter().next()
     } else {
         None
     }

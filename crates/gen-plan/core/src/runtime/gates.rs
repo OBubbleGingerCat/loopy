@@ -240,9 +240,17 @@ pub(crate) fn run_frontier_review_gate(
         has_refine_revalidation_context(&refine_revalidation_context),
         refine_invalidatable_leaf_node_ids,
     ) {
-        (true, Some(node_ids)) => {
-            validate_refine_invalidatable_leaf_node_ids(connection, &plan_id, node_ids)?
-        }
+        (true, Some(node_ids)) => validate_refine_invalidatable_leaf_node_ids(
+            connection,
+            &plan_id,
+            select_refine_context_invalidatable_leaf_node_ids(
+                connection,
+                &plan_id,
+                &parent_node_id,
+                refine_revalidation_context.as_deref().unwrap_or_default(),
+            )?,
+            node_ids,
+        )?,
         (true, None) => select_refine_context_invalidatable_leaf_node_ids(
             connection,
             &plan_id,
@@ -685,6 +693,7 @@ fn select_context_mentioned_leaf_node_ids(
 fn validate_refine_invalidatable_leaf_node_ids(
     connection: &Connection,
     plan_id: &str,
+    allowed_node_ids: Vec<String>,
     node_ids: Vec<String>,
 ) -> Result<Vec<String>> {
     let plan_leaf_node_ids = select_plan_leaf_node_ids(connection, plan_id)?;
@@ -695,6 +704,12 @@ fn validate_refine_invalidatable_leaf_node_ids(
             .any(|candidate| candidate == &node_id)
         {
             bail!("refine invalidatable node_id `{node_id}` is not a tracked leaf in this plan");
+        }
+        if !allowed_node_ids
+            .iter()
+            .any(|candidate| candidate == &node_id)
+        {
+            bail!("refine invalidatable leaf `{node_id}` is outside the reviewed frontier scope");
         }
         if !valid.contains(&node_id) {
             valid.push(node_id);

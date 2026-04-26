@@ -1218,8 +1218,8 @@ fn frontier_gate_refine_context_rejects_unrelated_leaf_invalidation() -> Result<
         let _env_guard = fake_codex_env(&fake_bin_dir);
         runtime
             .run_frontier_review_gate(RunFrontierReviewGateRequest {
-                plan_id: plan.plan_id,
-                parent_node_id: parent.node_id,
+                plan_id: plan.plan_id.clone(),
+                parent_node_id: parent.node_id.clone(),
                 planner_mode: PlannerMode::Auto,
                 refine_revalidation_context: Some("Backend refine context".to_owned()),
                 refine_invalidatable_leaf_node_ids: None,
@@ -1229,6 +1229,23 @@ fn frontier_gate_refine_context_rejects_unrelated_leaf_invalidation() -> Result<
     assert!(
         format!("{error:#}").contains("invalidated unknown leaf child"),
         "unexpected error: {error:#}"
+    );
+
+    let explicit_error = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime
+            .run_frontier_review_gate(RunFrontierReviewGateRequest {
+                plan_id: plan.plan_id,
+                parent_node_id: parent.node_id,
+                planner_mode: PlannerMode::Auto,
+                refine_revalidation_context: Some("Backend refine context".to_owned()),
+                refine_invalidatable_leaf_node_ids: Some(vec![sibling_leaf.node_id]),
+            })
+            .expect_err("explicit refine invalidation scope must still stay inside the frontier")
+    };
+    assert!(
+        format!("{explicit_error:#}").contains("invalidatable leaf"),
+        "unexpected error: {explicit_error:#}"
     );
 
     Ok(())
@@ -1337,6 +1354,12 @@ fn frontier_gate_invalidated_leaf_approval_is_not_latest_summary() -> Result<()>
     };
 
     assert_eq!(result.invalidated_leaf_node_ids, vec![leaf.node_id.clone()]);
+    connection.execute(
+        "UPDATE GEN_PLAN__frontier_gate_runs
+         SET created_at = '1'
+         WHERE frontier_gate_run_id = ?1",
+        params![result.gate_run_id],
+    )?;
     let inspected = runtime.inspect_node(loopy_gen_plan::InspectNodeRequest {
         plan_id: plan.plan_id,
         node_id: Some(leaf.node_id),

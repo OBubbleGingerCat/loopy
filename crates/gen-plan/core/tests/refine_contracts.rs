@@ -814,6 +814,52 @@ fn root_scope_top_level_new_leaf_targets_use_root_plan_parent() {
 }
 
 #[test]
+fn root_scope_new_leaf_targets_use_untracked_root_plan_parent_from_structural_change() {
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result: RefineRewriteResult {
+            changed_files: vec![
+                RefineChangedFile {
+                    relative_path: "demo/leaf.md".to_owned(),
+                    node_id: None,
+                    change_kind: RefineChangedFileKind::Created,
+                },
+                RefineChangedFile {
+                    relative_path: "intro.md".to_owned(),
+                    node_id: None,
+                    change_kind: RefineChangedFileKind::Created,
+                },
+            ],
+            structural_changes: vec![RefineStructuralChange {
+                parent_relative_path: "demo.md".to_owned(),
+                parent_node_id: None,
+                change_kind: RefineStructuralChangeKind::ChangedChildSet,
+                added_child_relative_paths: vec!["demo/leaf.md".to_owned(), "intro.md".to_owned()],
+                removed_child_relative_paths: vec![],
+            }],
+            stale_nodes: vec![],
+            context_invalidations: vec![],
+            unchanged_nodes: vec![],
+            expected_gate_targets: vec![],
+            unresolved_follow_ups: vec![],
+            summary: Default::default(),
+        },
+        runtime_snapshot: RefineRuntimeNodeSnapshot { nodes: vec![] },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+
+    for relative_path in ["demo/leaf.md", "intro.md"] {
+        let leaf = selection
+            .leaf_targets
+            .iter()
+            .find(|target| target.relative_path == relative_path)
+            .expect("new root-scope leaf should be selected");
+        assert_eq!(leaf.parent_relative_path.as_deref(), Some("demo.md"));
+    }
+}
+
+#[test]
 fn root_scope_new_parent_registration_uses_root_plan_parent() {
     let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
         plan_id: "plan-1".to_owned(),
