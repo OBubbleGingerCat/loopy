@@ -1044,6 +1044,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::refine::summary::{RefineStaleNodeSummaryEntry, RefineStaleNodeSummaryKind};
     use crate::refine::{
         RefineAffectedScope, RefineAffectedTrackedNode, RefineDecisionConfirmation,
         RefineRewriteAction, RefineRewriteActionKind, RefineRewriteTarget,
@@ -1200,7 +1201,23 @@ mod tests {
                 reason: "final reason with -- > marker and newline".to_owned(),
             }]
         );
-        assert_eq!(result.summary.stale_nodes, result.stale_nodes);
+        assert_eq!(
+            result.summary.stale_node_summary_entries,
+            vec![
+                RefineStaleNodeSummaryEntry {
+                    relative_path: "removed.md".to_owned(),
+                    node_id: Some("removed-1".to_owned()),
+                    summary_kind: RefineStaleNodeSummaryKind::ExplicitlyRemoved,
+                    reason: None,
+                },
+                RefineStaleNodeSummaryEntry {
+                    relative_path: "stale.md".to_owned(),
+                    node_id: Some("stale-1".to_owned()),
+                    summary_kind: RefineStaleNodeSummaryKind::StaleMarked,
+                    reason: Some("final reason with -- > marker and newline".to_owned()),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1395,11 +1412,28 @@ mod tests {
             blocked_follow_ups: vec![follow_up],
         };
         let reports = MutationReports {
-            changed_files: vec![RefineChangedFile {
-                relative_path: "leaf.md".to_owned(),
-                node_id: Some("leaf-1".to_owned()),
-                change_kind: RefineChangedFileKind::TextUpdated,
-            }],
+            changed_files: vec![
+                RefineChangedFile {
+                    relative_path: "leaf.md".to_owned(),
+                    node_id: Some("leaf-1".to_owned()),
+                    change_kind: RefineChangedFileKind::TextUpdated,
+                },
+                RefineChangedFile {
+                    relative_path: "created.md".to_owned(),
+                    node_id: None,
+                    change_kind: RefineChangedFileKind::Created,
+                },
+                RefineChangedFile {
+                    relative_path: "removed.md".to_owned(),
+                    node_id: Some("removed-1".to_owned()),
+                    change_kind: RefineChangedFileKind::ExplicitlyRemoved,
+                },
+                RefineChangedFile {
+                    relative_path: "stale.md".to_owned(),
+                    node_id: Some("stale-1".to_owned()),
+                    change_kind: RefineChangedFileKind::StaleMarked,
+                },
+            ],
             structural_changes: vec![RefineStructuralChange {
                 parent_relative_path: "parent/parent.md".to_owned(),
                 parent_node_id: Some("parent-1".to_owned()),
@@ -1420,7 +1454,29 @@ mod tests {
 
         assert_eq!(result.summary.changed_files, result.changed_files);
         assert_eq!(result.summary.structural_changes, result.structural_changes);
-        assert_eq!(result.summary.stale_nodes, result.stale_nodes);
+        assert_eq!(
+            result.summary.stale_node_summary_entries,
+            vec![
+                RefineStaleNodeSummaryEntry {
+                    relative_path: "created.md".to_owned(),
+                    node_id: None,
+                    summary_kind: RefineStaleNodeSummaryKind::Created,
+                    reason: None,
+                },
+                RefineStaleNodeSummaryEntry {
+                    relative_path: "removed.md".to_owned(),
+                    node_id: Some("removed-1".to_owned()),
+                    summary_kind: RefineStaleNodeSummaryKind::ExplicitlyRemoved,
+                    reason: None,
+                },
+                RefineStaleNodeSummaryEntry {
+                    relative_path: "stale.md".to_owned(),
+                    node_id: Some("stale-1".to_owned()),
+                    summary_kind: RefineStaleNodeSummaryKind::StaleMarked,
+                    reason: Some("invalidated".to_owned()),
+                },
+            ]
+        );
         assert_eq!(
             result.summary.expected_gate_targets,
             result.expected_gate_targets
@@ -1429,7 +1485,8 @@ mod tests {
             result.summary.unresolved_follow_ups,
             result.unresolved_follow_ups
         );
-        assert_eq!(result.summary.changed_file_count, 1);
+        assert_eq!(result.summary.changed_file_count, 4);
+        assert_eq!(result.summary.stale_node_count, 3);
         assert_eq!(result.summary.expected_leaf_gate_target_count, 1);
         assert_eq!(result.summary.expected_frontier_gate_target_count, 1);
 
@@ -1446,7 +1503,7 @@ mod tests {
         .unwrap();
         assert!(empty.summary.changed_files.is_empty());
         assert!(empty.summary.structural_changes.is_empty());
-        assert!(empty.summary.stale_nodes.is_empty());
+        assert!(empty.summary.stale_node_summary_entries.is_empty());
         assert!(empty.summary.expected_gate_targets.is_empty());
         assert!(empty.summary.unresolved_follow_ups.is_empty());
     }

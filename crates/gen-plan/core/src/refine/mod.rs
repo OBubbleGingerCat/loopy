@@ -53,4 +53,4 @@ pub use scope::{
     RefineRewriteScopeRequest, RefineRewriteTarget, RefineStaleDescendant,
     plan_refine_rewrite_scope,
 };
-pub use summary::RefineRewriteSummary;
+pub use summary::{RefineRewriteSummary, RefineStaleNodeSummaryEntry, RefineStaleNodeSummaryKind};
