@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ListChildrenRequest, PlannerMode, ReviewIssue, RunFrontierReviewGateRequest,
-    RunLeafReviewGateRequest, Runtime,
+    InspectNodeRequest, ListChildrenRequest, NodeKind, PlannerMode, ReviewIssue,
+    RunFrontierReviewGateRequest, RunFrontierReviewGateResponse, RunLeafReviewGateRequest, Runtime,
 };
 
 use super::gate_registration::{
@@ -298,6 +298,7 @@ fn run_frontier_target(
             planner_mode: request.planner_mode.clone(),
         }) {
             Ok(response) if response.passed => {
+                validate_frontier_response_contract(&response)?;
                 report.frontier_attempts.push(RefineGateAttempt {
                     gate_kind: RefineGateKind::Frontier,
                     target_node_id: target.parent_node_id.clone(),
@@ -404,6 +405,15 @@ fn status_for_review_issues(issues: &[ReviewIssue]) -> RefineGateExecutionStatus
     }
 }
 
+fn validate_frontier_response_contract(
+    response: &RunFrontierReviewGateResponse,
+) -> Result<(), RefineGateExecutionError> {
+    if response.passed && !response.invalidated_leaf_node_ids.is_empty() {
+        return invalid("passed frontier target must not invalidate leaf approvals");
+    }
+    Ok(())
+}
+
 fn validate_registered_targets(
     runtime: &Runtime,
     request: &RunRefineGateRevalidationRequest,
@@ -429,6 +439,7 @@ fn validate_registered_targets(
         if !request.plan_root.join(&target.relative_path).is_file() {
             return invalid("leaf markdown file must exist under plan_root");
         }
+        validate_leaf_target_node(runtime, request, target)?;
     }
 
     for parent in &request.registered_targets.parent_targets {
@@ -458,6 +469,7 @@ fn validate_registered_targets(
         {
             return invalid("frontier parent markdown file must exist under plan_root");
         }
+        validate_frontier_target_node(runtime, request, target)?;
         let linked_child_paths =
             linked_child_paths_for_parent(&request.plan_root, &target.parent_relative_path)?;
         let children = runtime
@@ -486,6 +498,59 @@ fn validate_registered_targets(
                 return invalid("frontier removed child path must not be runtime-visible");
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_leaf_target_node(
+    runtime: &Runtime,
+    request: &RunRefineGateRevalidationRequest,
+    target: &RegisteredRefineLeafTarget,
+) -> Result<(), RefineGateExecutionError> {
+    let node = runtime
+        .inspect_node(InspectNodeRequest {
+            plan_id: request.plan_id.clone(),
+            node_id: Some(target.node_id.clone()),
+            relative_path: None,
+        })
+        .map_err(
+            |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                reason: source.to_string(),
+            },
+        )?;
+    if node.node_kind != NodeKind::Leaf {
+        return invalid("leaf target node_id must reference a leaf node");
+    }
+    if node.relative_path != target.relative_path {
+        return invalid("leaf target node_id must match relative_path");
+    }
+    if node.parent_relative_path != target.parent_relative_path {
+        return invalid("leaf target parent_relative_path must match runtime parent");
+    }
+    Ok(())
+}
+
+fn validate_frontier_target_node(
+    runtime: &Runtime,
+    request: &RunRefineGateRevalidationRequest,
+    target: &RegisteredRefineFrontierTarget,
+) -> Result<(), RefineGateExecutionError> {
+    let node = runtime
+        .inspect_node(InspectNodeRequest {
+            plan_id: request.plan_id.clone(),
+            node_id: Some(target.parent_node_id.clone()),
+            relative_path: None,
+        })
+        .map_err(
+            |source| RefineGateExecutionError::InvalidRegisteredTargets {
+                reason: source.to_string(),
+            },
+        )?;
+    if node.node_kind != NodeKind::Parent {
+        return invalid("frontier target parent_node_id must reference a parent node");
+    }
+    if node.relative_path != target.parent_relative_path {
+        return invalid("frontier target parent_node_id must match parent_relative_path");
     }
     Ok(())
 }
@@ -742,6 +807,140 @@ mod tests {
             },
         )
         .expect("removed child paths should not have to remain runtime-visible");
+    }
+
+    #[test]
+    fn validate_registered_leaf_rejects_node_id_path_mismatch() {
+        let workspace = temp_workspace();
+        let runtime = Runtime::new(&workspace).expect("runtime should initialize");
+        let plan = runtime
+            .ensure_plan(EnsurePlanRequest {
+                plan_name: "mismatched-leaf-refine".to_owned(),
+                task_type: "coding-task".to_owned(),
+                project_directory: workspace.clone(),
+            })
+            .expect("plan should be created");
+        let plan_root = PathBuf::from(&plan.plan_root);
+        fs::write(plan_root.join("first.md"), "# First\n").unwrap();
+        fs::write(plan_root.join("second.md"), "# Second\n").unwrap();
+        let first = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "first.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("first leaf should be tracked");
+        runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "second.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("second leaf should be tracked");
+
+        let error = validate_registered_targets(
+            &runtime,
+            &RunRefineGateRevalidationRequest {
+                plan_id: plan.plan_id,
+                plan_root,
+                planner_mode: PlannerMode::Manual,
+                registered_targets: RegisteredRefineGateTargets {
+                    leaf_targets: vec![RegisteredRefineLeafTarget {
+                        node_id: first.node_id,
+                        relative_path: "second.md".to_owned(),
+                        parent_relative_path: None,
+                        reasons: vec![RefineGateTargetReason::TextChanged],
+                    }],
+                    ..Default::default()
+                },
+                retry_policy: RefineGateRetryPolicy::default(),
+            },
+        )
+        .expect_err("mismatched leaf node_id and relative_path should fail preflight");
+
+        assert!(
+            format!("{error:?}").contains("leaf target node_id must match relative_path"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_registered_frontier_rejects_node_id_path_mismatch() {
+        let workspace = temp_workspace();
+        let runtime = Runtime::new(&workspace).expect("runtime should initialize");
+        let plan = runtime
+            .ensure_plan(EnsurePlanRequest {
+                plan_name: "mismatched-frontier-refine".to_owned(),
+                task_type: "coding-task".to_owned(),
+                project_directory: workspace.clone(),
+            })
+            .expect("plan should be created");
+        let plan_root = PathBuf::from(&plan.plan_root);
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::create_dir_all(plan_root.join("other")).unwrap();
+        fs::write(plan_root.join("api/api.md"), "# API\n").unwrap();
+        fs::write(plan_root.join("other/other.md"), "# Other\n").unwrap();
+        let api_parent = runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "api/api.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("api parent should be tracked");
+        runtime
+            .ensure_node_id(EnsureNodeIdRequest {
+                plan_id: plan.plan_id.clone(),
+                relative_path: "other/other.md".to_owned(),
+                parent_relative_path: None,
+            })
+            .expect("other parent should be tracked");
+
+        let error = validate_registered_targets(
+            &runtime,
+            &RunRefineGateRevalidationRequest {
+                plan_id: plan.plan_id,
+                plan_root,
+                planner_mode: PlannerMode::Manual,
+                registered_targets: RegisteredRefineGateTargets {
+                    frontier_targets: vec![RegisteredRefineFrontierTarget {
+                        parent_node_id: api_parent.node_id,
+                        parent_relative_path: "other/other.md".to_owned(),
+                        changed_child_relative_paths: Vec::new(),
+                        reasons: vec![RefineGateTargetReason::ParentContractChanged],
+                    }],
+                    ..Default::default()
+                },
+                retry_policy: RefineGateRetryPolicy::default(),
+            },
+        )
+        .expect_err("mismatched frontier parent_node_id and path should fail preflight");
+
+        assert!(
+            format!("{error:?}")
+                .contains("frontier target parent_node_id must match parent_relative_path"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn passed_frontier_response_with_invalidations_is_invalid() {
+        let response = crate::RunFrontierReviewGateResponse {
+            gate_run_id: "frontier-run-1".to_owned(),
+            passed: true,
+            verdict: "approved_frontier".to_owned(),
+            summary: "approved but contradictory".to_owned(),
+            reviewer_role_id: "codex_default".to_owned(),
+            issues: Vec::new(),
+            invalidated_leaf_node_ids: vec!["leaf-1".to_owned()],
+        };
+
+        let error = validate_frontier_response_contract(&response)
+            .expect_err("passed frontier responses must not invalidate leaves");
+        assert!(
+            format!("{error:?}")
+                .contains("passed frontier target must not invalidate leaf approvals"),
+            "unexpected error: {error:?}"
+        );
     }
 
     fn temp_workspace() -> PathBuf {

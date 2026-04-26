@@ -236,7 +236,16 @@ fn prevalidate_rewrite_link_updates(
         .iter()
         .map(|creation| creation.relative_path.as_str())
         .collect::<HashSet<_>>();
+    let planned_removals = request
+        .rewrite_scope
+        .node_removals
+        .iter()
+        .map(|removal| removal.relative_path.as_str())
+        .collect::<HashSet<_>>();
     for change in merged_changes {
+        if planned_removals.contains(change.parent_relative_path.as_str()) {
+            return Err(RefineRewriteError::InvalidRewriteScope);
+        }
         if !path_exists_or_is_planned_creation(
             request,
             &change.parent_relative_path,
@@ -245,6 +254,9 @@ fn prevalidate_rewrite_link_updates(
             return Err(RefineRewriteError::InvalidRewriteScope);
         }
         for child in &change.add_child_relative_paths {
+            if planned_removals.contains(child.as_str()) {
+                return Err(RefineRewriteError::InvalidRewriteScope);
+            }
             if !path_exists_or_is_planned_creation(request, child, &planned_creations) {
                 return Err(RefineRewriteError::InvalidRewriteScope);
             }
@@ -1664,6 +1676,49 @@ mod tests {
             fs::read_to_string(plan_root.join("stale.md")).unwrap(),
             "# Stale\n"
         );
+    }
+
+    #[test]
+    fn refine_prevalidates_link_updates_against_removed_paths_before_file_mutations() {
+        let plan_root = temp_plan_root();
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(plan_root.join("stale.md"), "# Stale\n").unwrap();
+        fs::write(plan_root.join("api/api.md"), "# API\n").unwrap();
+        fs::write(plan_root.join("api/child.md"), "# Child\n").unwrap();
+
+        let error = apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![confirmed_decision(Vec::new(), Vec::new())],
+            rewrite_scope: RefineRewriteScope {
+                stale_descendants: vec![RefineStaleDescendant {
+                    relative_path: "stale.md".to_owned(),
+                    node_id: Some("stale-1".to_owned()),
+                    reason: "parent changed".to_owned(),
+                }],
+                node_removals: vec![crate::refine::RefineNodeRemoval {
+                    relative_path: "api/child.md".to_owned(),
+                    parent_relative_path: Some("api/api.md".to_owned()),
+                    node_id: Some("child-1".to_owned()),
+                    explicit: true,
+                }],
+                link_changes: vec![RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: vec!["api/child.md".to_owned()],
+                    remove_child_relative_paths: Vec::new(),
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect_err("linking to a removed path should fail before any mutation");
+
+        assert_eq!(error, RefineRewriteError::InvalidRewriteScope);
+        assert_eq!(
+            fs::read_to_string(plan_root.join("stale.md")).unwrap(),
+            "# Stale\n"
+        );
+        assert!(plan_root.join("api/child.md").is_file());
     }
 
     #[test]
