@@ -516,6 +516,71 @@ fn added_existing_leaf_child_is_revalidated_before_frontier() {
 }
 
 #[test]
+fn moved_existing_leaf_uses_destination_parent_for_revalidation() {
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![],
+        structural_changes: vec![RefineStructuralChange {
+            parent_relative_path: "api/new/new.md".to_owned(),
+            parent_node_id: Some("new-parent".to_owned()),
+            change_kind: RefineStructuralChangeKind::ChangedChildSet,
+            added_child_relative_paths: vec!["api/moved.md".to_owned()],
+            removed_child_relative_paths: Vec::new(),
+        }],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: "plan-1".to_owned(),
+        rewrite_result,
+        runtime_snapshot: RefineRuntimeNodeSnapshot {
+            nodes: vec![
+                RefineRuntimeNodeSummary {
+                    node_id: "old-parent".to_owned(),
+                    relative_path: "api/old/old.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: None,
+                    parent_relative_path: None,
+                    child_relative_paths: vec![],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "new-parent".to_owned(),
+                    relative_path: "api/new/new.md".to_owned(),
+                    node_kind: NodeKind::Parent,
+                    parent_node_id: None,
+                    parent_relative_path: None,
+                    child_relative_paths: vec!["api/moved.md".to_owned()],
+                },
+                RefineRuntimeNodeSummary {
+                    node_id: "leaf-1".to_owned(),
+                    relative_path: "api/moved.md".to_owned(),
+                    node_kind: NodeKind::Leaf,
+                    parent_node_id: Some("old-parent".to_owned()),
+                    parent_relative_path: Some("api/old/old.md".to_owned()),
+                    child_relative_paths: vec![],
+                },
+            ],
+        },
+        prior_gate_summaries: RefinePriorGateSummaries::default(),
+        stale_result_handoff: vec![],
+    });
+
+    let moved = selection
+        .leaf_targets
+        .iter()
+        .find(|target| target.relative_path == "api/moved.md")
+        .expect("moved leaf should be selected for destination-parent revalidation");
+    assert_eq!(
+        moved.parent_relative_path.as_deref(),
+        Some("api/new/new.md")
+    );
+}
+
+#[test]
 fn attached_existing_parent_revalidates_descendant_leaves_before_frontier() {
     let rewrite_result = RefineRewriteResult {
         changed_files: vec![],
@@ -880,6 +945,63 @@ fn refine_gate_registration_reconciles_removed_child_links_before_frontier() -> 
     })?;
     assert_eq!(child.parent_node_id, None);
     assert_eq!(child.parent_relative_path, None);
+    Ok(())
+}
+
+#[test]
+fn refine_gate_registration_validates_frontier_children_before_reconciling() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Old](./old.md)\n",
+    )?;
+    fs::write(plan_root.join("api/old.md"), "# Old\n")?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/old.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n")?;
+
+    let error = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_candidates: vec![],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "api/api.md".to_owned(),
+                changed_child_relative_paths: vec!["api/typo.md".to_owned()],
+                reasons: vec![RefineGateTargetReason::ChangedChildSet],
+            }],
+        },
+    )
+    .expect_err("unknown frontier child path should fail before reconciliation");
+    assert!(matches!(
+        error,
+        loopy_gen_plan::refine::RefineGatePreparationError::IncoherentFrontierChildren { .. }
+    ));
+
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(children.children.len(), 1);
+    assert_eq!(children.children[0].node_id, child.node_id);
     Ok(())
 }
 

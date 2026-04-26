@@ -862,6 +862,19 @@ fn apply_single_link_update(
     }
 
     if added_child_relative_paths.is_empty() && removed_child_relative_paths.is_empty() {
+        if path_mutated_before_link_updates(request, &change.parent_relative_path)
+            && (!change.add_child_relative_paths.is_empty()
+                || !change.remove_child_relative_paths.is_empty())
+        {
+            return Ok(Some(ParentLinkMutation {
+                parent_relative_path: change.parent_relative_path.clone(),
+                parent_node_id: parent_node_id_for_path(request, &change.parent_relative_path),
+                parent_was_created: created_parent_paths
+                    .contains(change.parent_relative_path.as_str()),
+                added_child_relative_paths: change.add_child_relative_paths.clone(),
+                removed_child_relative_paths: change.remove_child_relative_paths.clone(),
+            }));
+        }
         return Ok(None);
     }
 
@@ -2219,6 +2232,74 @@ mod tests {
         })
         .expect_err("missing add target should fail during link update");
         assert_eq!(missing_add_error, RefineRewriteError::InvalidRewriteScope);
+    }
+
+    #[test]
+    fn refine_parent_rewrite_keeps_already_applied_child_link_structural_changes() {
+        let plan_root = temp_plan_root();
+        fs::create_dir_all(plan_root.join("api")).unwrap();
+        fs::write(
+            plan_root.join("api/api.md"),
+            "# API\n\nOld contract.\n\n## Child Nodes\n\n",
+        )
+        .unwrap();
+        fs::write(plan_root.join("api/new.md"), "# New\n").unwrap();
+
+        let decision = confirmed_decision(
+            vec![RefineAffectedTrackedNode {
+                node_id: "parent-1".to_owned(),
+                relative_path: Some("api/api.md".to_owned()),
+            }],
+            vec![RefineRewriteAction {
+                action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                target_relative_path: Some("api/api.md".to_owned()),
+                parent_relative_path: None,
+                node_kind: Some("parent".to_owned()),
+                link_change: None,
+                replacement_markdown: Some(
+                    "# API\n\nNew contract.\n\n## Child Nodes\n\n- [New](./new.md)\n".to_owned(),
+                ),
+                rationale: None,
+            }],
+        );
+
+        let result = apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root,
+            decisions: vec![decision],
+            rewrite_scope: RefineRewriteScope {
+                rewrite_targets: vec![RefineRewriteTarget {
+                    relative_path: "api/api.md".to_owned(),
+                    node_id: Some("parent-1".to_owned()),
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                }],
+                link_changes: vec![crate::refine::RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: vec!["api/new.md".to_owned()],
+                    remove_child_relative_paths: Vec::new(),
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect("parent rewrite with already-applied child link should pass");
+
+        assert_eq!(
+            result
+                .structural_changes
+                .iter()
+                .filter(|change| change.parent_relative_path == "api/api.md")
+                .map(|change| &change.change_kind)
+                .collect::<Vec<_>>(),
+            vec![
+                &RefineStructuralChangeKind::ChangedChildSet,
+                &RefineStructuralChangeKind::ParentContractChanged,
+            ]
+        );
+        for change in &result.structural_changes {
+            assert_eq!(change.added_child_relative_paths, vec!["api/new.md"]);
+            assert!(change.removed_child_relative_paths.is_empty());
+        }
     }
 
     #[test]

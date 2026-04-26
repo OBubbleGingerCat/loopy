@@ -213,6 +213,10 @@ pub fn register_refine_gate_targets(
     }
 
     for candidate in &frontier_candidates {
+        validate_frontier_changed_child_paths(runtime, &plan_id, candidate)?;
+    }
+
+    for candidate in &frontier_candidates {
         if !frontier_needs_child_link_reconciliation(candidate)
             || reconciled_frontiers.contains_key(&candidate.parent_relative_path)
         {
@@ -378,6 +382,35 @@ fn frontier_needs_child_link_reconciliation(
         || candidate
             .reasons
             .contains(&RefineGateTargetReason::ChangedChildSet)
+}
+
+fn validate_frontier_changed_child_paths(
+    runtime: &Runtime,
+    plan_id: &str,
+    candidate: &RefineFrontierRegistrationCandidate,
+) -> Result<(), RefineGatePreparationError> {
+    let mut missing_child_relative_paths = Vec::new();
+    for child in &candidate.changed_child_relative_paths {
+        validate_markdown_path("changed_child_relative_paths", child)?;
+        if runtime
+            .inspect_node(InspectNodeRequest {
+                plan_id: plan_id.to_owned(),
+                node_id: None,
+                relative_path: Some(child.clone()),
+            })
+            .is_err()
+        {
+            missing_child_relative_paths.push(child.clone());
+        }
+    }
+    if missing_child_relative_paths.is_empty() {
+        Ok(())
+    } else {
+        Err(RefineGatePreparationError::IncoherentFrontierChildren {
+            parent_relative_path: candidate.parent_relative_path.clone(),
+            missing_child_relative_paths,
+        })
+    }
 }
 
 fn ordered_parent_candidates(

@@ -166,6 +166,7 @@ pub fn select_refine_gate_targets(
                         &request.runtime_snapshot,
                         &file.relative_path,
                         file.node_id.clone(),
+                        None,
                         RefineGateTargetReason::TextChanged,
                     );
                 }
@@ -185,6 +186,7 @@ pub fn select_refine_gate_targets(
                         &request.runtime_snapshot,
                         &file.relative_path,
                         None,
+                        None,
                         RefineGateTargetReason::NewLeaf,
                     );
                 }
@@ -195,6 +197,7 @@ pub fn select_refine_gate_targets(
                     &request.runtime_snapshot,
                     &file.relative_path,
                     file.node_id.clone(),
+                    None,
                     RefineGateTargetReason::RegeneratedLeaf,
                 );
             }
@@ -209,6 +212,7 @@ pub fn select_refine_gate_targets(
             &request.runtime_snapshot,
             &invalidation.relative_path,
             invalidation.node_id.clone(),
+            None,
             RefineGateTargetReason::ContextInvalidated,
         );
     }
@@ -238,6 +242,7 @@ pub fn select_refine_gate_targets(
                         &request.runtime_snapshot,
                         child,
                         None,
+                        Some(change.parent_relative_path.clone()),
                         reason.clone(),
                     );
                 }
@@ -300,6 +305,7 @@ fn apply_stale_handoff(
                     &request.runtime_snapshot,
                     &handoff.relative_path,
                     handoff.node_id.clone(),
+                    None,
                     RefineGateTargetReason::StaleDescendant,
                 );
                 if let Some(prior) = request.prior_gate_summaries.leaf.iter().find(|prior| {
@@ -438,6 +444,7 @@ fn upsert_descendant_leaf_target(
             snapshot,
             &node.relative_path,
             Some(node.node_id.clone()),
+            None,
             reason,
         ),
         NodeKind::Parent => {
@@ -459,12 +466,16 @@ fn upsert_leaf(
     snapshot: &RefineRuntimeNodeSnapshot,
     relative_path: &str,
     explicit_node_id: Option<String>,
+    explicit_parent_relative_path: Option<String>,
     reason: RefineGateTargetReason,
 ) {
     if let Some(existing) = targets
         .iter_mut()
         .find(|target| target.relative_path == relative_path)
     {
+        if explicit_parent_relative_path.is_some() {
+            existing.parent_relative_path = explicit_parent_relative_path;
+        }
         push_reason(&mut existing.reasons, reason);
         return;
     }
@@ -472,9 +483,11 @@ fn upsert_leaf(
     targets.push(RefineLeafGateTarget {
         node_id: explicit_node_id.or_else(|| runtime_node.map(|node| node.node_id.clone())),
         relative_path: relative_path.to_owned(),
-        parent_relative_path: runtime_node
-            .and_then(|node| node.parent_relative_path.clone())
-            .or_else(|| parent_self_path(snapshot, relative_path)),
+        parent_relative_path: explicit_parent_relative_path.or_else(|| {
+            runtime_node
+                .and_then(|node| node.parent_relative_path.clone())
+                .or_else(|| parent_self_path(snapshot, relative_path))
+        }),
         reasons: vec![reason],
     });
 }
