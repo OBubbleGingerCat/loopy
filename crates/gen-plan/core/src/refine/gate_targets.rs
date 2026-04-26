@@ -138,6 +138,9 @@ pub fn select_refine_gate_targets(
         match file.change_kind {
             RefineChangedFileKind::TextUpdated => {
                 if is_parent_path(&file.relative_path) {
+                    if is_link_only_parent_text_update(&request, &file.relative_path) {
+                        continue;
+                    }
                     upsert_frontier(
                         &mut selection.frontier_targets,
                         &request.runtime_snapshot,
@@ -329,6 +332,27 @@ fn apply_stale_handoff(
             }
         }
     }
+}
+
+fn is_link_only_parent_text_update(
+    request: &SelectRefineGateTargetsRequest,
+    parent_relative_path: &str,
+) -> bool {
+    let text_update_count = request
+        .rewrite_result
+        .changed_files
+        .iter()
+        .filter(|file| {
+            file.relative_path == parent_relative_path
+                && file.change_kind == RefineChangedFileKind::TextUpdated
+        })
+        .count();
+    text_update_count == 1
+        && request
+            .rewrite_result
+            .structural_changes
+            .iter()
+            .any(|change| change.parent_relative_path == parent_relative_path)
 }
 
 fn upsert_descendant_leaf_targets(

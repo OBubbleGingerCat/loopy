@@ -214,7 +214,43 @@ fn validate_refine_rewrite_request(
             validate_plan_relative_markdown_path(child)?;
         }
     }
+    prevalidate_rewrite_link_updates(request)?;
     Ok(())
+}
+
+fn prevalidate_rewrite_link_updates(
+    request: &RefineRewriteRequest,
+) -> Result<(), RefineRewriteError> {
+    let merged_changes = merge_link_changes(&request.rewrite_scope.link_changes)?;
+    let planned_creations = request
+        .rewrite_scope
+        .node_creations
+        .iter()
+        .map(|creation| creation.relative_path.as_str())
+        .collect::<HashSet<_>>();
+    for change in merged_changes {
+        if !path_exists_or_is_planned_creation(
+            request,
+            &change.parent_relative_path,
+            &planned_creations,
+        ) {
+            return Err(RefineRewriteError::InvalidRewriteScope);
+        }
+        for child in &change.add_child_relative_paths {
+            if !path_exists_or_is_planned_creation(request, child, &planned_creations) {
+                return Err(RefineRewriteError::InvalidRewriteScope);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn path_exists_or_is_planned_creation(
+    request: &RefineRewriteRequest,
+    relative_path: &str,
+    planned_creations: &HashSet<&str>,
+) -> bool {
+    planned_creations.contains(relative_path) || request.plan_root.join(relative_path).is_file()
 }
 
 fn cleanup_processed_comment_blocks(
@@ -268,12 +304,13 @@ fn apply_in_place_node_rewrites(
         if target.action_kind != RefineRewriteActionKind::UpdateExistingNode {
             continue;
         }
-        let replacement = replacement_for_path(request, &target.relative_path).or_else(|| {
-            sanitized_payloads
-                .iter()
-                .find(|(path, _)| path == &target.relative_path)
-                .map(|(_, text)| text.clone())
-        });
+        let replacement =
+            sanitized_replacement_for_path(request, &target.relative_path)?.or_else(|| {
+                sanitized_payloads
+                    .iter()
+                    .find(|(path, _)| path == &target.relative_path)
+                    .map(|(_, text)| text.clone())
+            });
         let Some(markdown) = replacement else {
             reports.unchanged_nodes.push(RefineUnchangedNode {
                 relative_path: target.relative_path.clone(),
@@ -298,7 +335,7 @@ fn create_new_node_files(
 ) -> Result<(), RefineRewriteError> {
     // new node file creation rules
     for creation in &request.rewrite_scope.node_creations {
-        let markdown = replacement_for_path(request, &creation.relative_path)
+        let markdown = sanitized_replacement_for_path(request, &creation.relative_path)?
             .unwrap_or_else(|| format!("# {}\n", title_from_path(&creation.relative_path)));
         write_plan_file(&request.plan_root, &creation.relative_path, &markdown)?;
         reports.changed_files.push(RefineChangedFile {
@@ -991,6 +1028,17 @@ fn replacement_for_path(request: &RefineRewriteRequest, relative_path: &str) -> 
         .and_then(|action| action.replacement_markdown.clone())
 }
 
+fn sanitized_replacement_for_path(
+    request: &RefineRewriteRequest,
+    relative_path: &str,
+) -> Result<Option<String>, RefineRewriteError> {
+    let Some(markdown) = replacement_for_path(request, relative_path) else {
+        return Ok(None);
+    };
+    let preserved_blocks = preserved_comment_blocks_for_path(request, relative_path);
+    remove_comment_blocks(relative_path, &markdown, &preserved_blocks).map(Some)
+}
+
 fn markdown_from_sanitized_or_disk(
     request: &RefineRewriteRequest,
     sanitized_payloads: &[(String, String)],
@@ -1352,6 +1400,80 @@ mod tests {
         assert!(stale_markdown.starts_with("<!-- loopy-refine-status: stale -->"));
         assert!(!stale_markdown.contains("BEGIN_COMMENT"));
         assert!(!stale_markdown.contains("stale this node"));
+    }
+
+    #[test]
+    fn refine_prevalidates_link_updates_before_file_mutations() {
+        let plan_root = temp_plan_root();
+        fs::write(plan_root.join("stale.md"), "# Stale\n").unwrap();
+
+        let error = apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![confirmed_decision(Vec::new(), Vec::new())],
+            rewrite_scope: RefineRewriteScope {
+                stale_descendants: vec![RefineStaleDescendant {
+                    relative_path: "stale.md".to_owned(),
+                    node_id: Some("stale-1".to_owned()),
+                    reason: "parent changed".to_owned(),
+                }],
+                link_changes: vec![RefineLinkChange {
+                    parent_relative_path: "api/api.md".to_owned(),
+                    add_child_relative_paths: vec!["api/child.md".to_owned()],
+                    remove_child_relative_paths: vec!["api/child.md".to_owned()],
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect_err("invalid link update should fail before stale mutation");
+
+        assert_eq!(error, RefineRewriteError::InvalidRewriteScope);
+        assert_eq!(
+            fs::read_to_string(plan_root.join("stale.md")).unwrap(),
+            "# Stale\n"
+        );
+    }
+
+    #[test]
+    fn refine_replacement_markdown_is_sanitized_before_write() {
+        let plan_root = temp_plan_root();
+        fs::write(plan_root.join("api.md"), "# API\n").unwrap();
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![confirmed_decision(
+                Vec::new(),
+                vec![RefineRewriteAction {
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                    target_relative_path: Some("api.md".to_owned()),
+                    parent_relative_path: None,
+                    node_kind: Some("leaf".to_owned()),
+                    link_change: None,
+                    replacement_markdown: Some(
+                        "# API\n\nBEGIN_COMMENT\nprocessed feedback\nEND_COMMENT\n\nUpdated\n"
+                            .to_owned(),
+                    ),
+                    rationale: None,
+                }],
+            )],
+            rewrite_scope: RefineRewriteScope {
+                rewrite_targets: vec![RefineRewriteTarget {
+                    relative_path: "api.md".to_owned(),
+                    node_id: Some("leaf-1".to_owned()),
+                    action_kind: RefineRewriteActionKind::UpdateExistingNode,
+                }],
+                ..Default::default()
+            },
+            blocked_follow_ups: Vec::new(),
+        })
+        .expect("replacement rewrite should pass");
+
+        let updated = fs::read_to_string(plan_root.join("api.md")).unwrap();
+        assert!(!updated.contains("BEGIN_COMMENT"));
+        assert!(!updated.contains("processed feedback"));
+        assert!(updated.contains("Updated\n"));
     }
 
     #[test]

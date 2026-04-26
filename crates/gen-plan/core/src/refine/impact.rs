@@ -56,7 +56,8 @@ pub fn analyze_refine_comment_impact(request: RefineImpactAnalysisRequest) -> Re
                     .to_owned(),
             });
         }
-        let status = if ambiguous {
+        let user_owned = category == RefineImpactCategory::UserOwnedDecision;
+        let status = if ambiguous || user_owned {
             RefineDecisionStatus::AwaitingManualConfirmation
         } else {
             RefineDecisionStatus::AutoContinuationCandidate
@@ -74,12 +75,8 @@ pub fn analyze_refine_comment_impact(request: RefineImpactAnalysisRequest) -> Re
             confirmation: RefineDecisionConfirmation {
                 status,
                 rationale: format!("mapped natural-language comment to {category:?}"),
-                question_for_user: ambiguous.then(|| {
-                    "Which tracked plan node should this refine comment modify?".to_owned()
-                }),
-                decision_impact: ambiguous.then(|| {
-                    "Rewrite scope and gate targets cannot be selected safely.".to_owned()
-                }),
+                question_for_user: question_for_user(ambiguous, user_owned),
+                decision_impact: decision_impact(ambiguous, user_owned),
             },
             rewrite_actions: Vec::new(),
             expected_gate_revalidation: Vec::new(),
@@ -98,7 +95,9 @@ fn classify_comment(comment: &RefineCommentSource) -> RefineImpactCategory {
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if text.contains("new node") || text.contains("add node") {
+    if text.contains("ask user") || text.contains("user decides") {
+        RefineImpactCategory::UserOwnedDecision
+    } else if text.contains("new node") || text.contains("add node") {
         RefineImpactCategory::NewNodeRequest
     } else if text.contains("remove node") || text.contains("delete node") {
         RefineImpactCategory::NodeRemovalRequest
@@ -106,10 +105,28 @@ fn classify_comment(comment: &RefineCommentSource) -> RefineImpactCategory {
         RefineImpactCategory::ChildSetChange
     } else if text.contains("parent") || text.contains("contract") {
         RefineImpactCategory::ParentContractChange
-    } else if text.contains("ask user") || text.contains("user decides") {
-        RefineImpactCategory::UserOwnedDecision
     } else {
         RefineImpactCategory::NodeContentChange
+    }
+}
+
+fn question_for_user(ambiguous: bool, user_owned: bool) -> Option<String> {
+    if ambiguous {
+        Some("Which tracked plan node should this refine comment modify?".to_owned())
+    } else if user_owned {
+        Some("How should this user-owned refine decision proceed?".to_owned())
+    } else {
+        None
+    }
+}
+
+fn decision_impact(ambiguous: bool, user_owned: bool) -> Option<String> {
+    if ambiguous {
+        Some("Rewrite scope and gate targets cannot be selected safely.".to_owned())
+    } else if user_owned {
+        Some("Rewrite scope and gate targets must wait for explicit user direction.".to_owned())
+    } else {
+        None
     }
 }
 
@@ -163,5 +180,32 @@ mod tests {
             analysis.decisions[1].confirmation.status,
             RefineDecisionStatus::AwaitingManualConfirmation
         );
+    }
+
+    #[test]
+    fn impact_analysis_pauses_user_owned_decisions_on_known_paths() {
+        let analysis = analyze_refine_comment_impact(RefineImpactAnalysisRequest {
+            plan_id: "plan-1".to_owned(),
+            comments: vec![RefineCommentSource {
+                source_path: "api/add-auth-tests.md".to_owned(),
+                begin_comment_line: 8,
+                end_comment_line: 10,
+                comment_text: Some("ask user whether to delete this node".to_owned()),
+            }],
+            known_node_paths: vec!["api/add-auth-tests.md".to_owned()],
+        });
+
+        assert!(analysis.mapping_issues.is_empty());
+        assert_eq!(
+            analysis.decisions[0].confirmation.status,
+            RefineDecisionStatus::AwaitingManualConfirmation
+        );
+        assert!(
+            analysis.decisions[0]
+                .confirmation
+                .question_for_user
+                .is_some()
+        );
+        assert!(analysis.decisions[0].confirmation.decision_impact.is_some());
     }
 }
