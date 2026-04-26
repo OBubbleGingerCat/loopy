@@ -916,12 +916,6 @@ fn validate_direct_child_relationship(
         NodeKind::Parent => 2,
     };
     if is_root_plan_parent_path(parent_relative_path) {
-        if node_kind == NodeKind::Leaf
-            && relative_path != parent_relative_path
-            && Path::new(relative_path).components().count() == 1
-        {
-            return Ok(());
-        }
         if root_plan_parent_child_component_count(relative_path, parent_relative_path)
             == Some(expected_components)
         {
