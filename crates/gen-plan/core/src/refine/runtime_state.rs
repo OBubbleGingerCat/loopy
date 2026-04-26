@@ -4,7 +4,9 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GateSummary, InspectNodeRequest, ListChildrenRequest, NodeKind, Runtime};
+use crate::{
+    GateSummary, InspectNodeRequest, ListChildrenRequest, NodeKind, OpenPlanRequest, Runtime,
+};
 
 use super::rewrite::{RefineChangedFileKind, RefineRewriteResult, RefineStructuralChange};
 
@@ -112,7 +114,7 @@ pub fn build_refine_gate_selection_inputs(
     runtime: &Runtime,
     request: BuildRefineGateSelectionInputsRequest,
 ) -> Result<RefineGateSelectionInputs, RefineRuntimeStateLoadError> {
-    // This runtime-state-loading API uses Runtime::inspect_node and Runtime::list_children.
+    // This runtime-state-loading API uses public Runtime APIs only.
     // It must not inspect the private runtime database, register nodes, select targets, or run gates.
     // The output is ready for SelectRefineGateTargetsRequest.
     let created_paths = created_pre_registration_paths(&request.rewrite_result);
@@ -132,16 +134,29 @@ pub fn build_refine_gate_selection_inputs(
         if !loaded_paths.insert(relative_path.clone()) {
             continue;
         }
-        let inspected = runtime
-            .inspect_node(InspectNodeRequest {
-                plan_id: request.plan_id.clone(),
-                node_id: node_id.clone(),
-                relative_path: node_id.is_none().then(|| relative_path.clone()),
-            })
-            .map_err(|source| RefineRuntimeStateLoadError::MissingTrackedNode {
-                relative_path: relative_path.clone(),
-                source: source.to_string(),
-            })?;
+        let inspected = match runtime.inspect_node(InspectNodeRequest {
+            plan_id: request.plan_id.clone(),
+            node_id: node_id.clone(),
+            relative_path: node_id.is_none().then(|| relative_path.clone()),
+        }) {
+            Ok(inspected) => inspected,
+            Err(_)
+                if node_id.is_none()
+                    && is_actual_root_plan_parent_path(
+                        runtime,
+                        &request.plan_id,
+                        &relative_path,
+                    ) =>
+            {
+                continue;
+            }
+            Err(source) => {
+                return Err(RefineRuntimeStateLoadError::MissingTrackedNode {
+                    relative_path: relative_path.clone(),
+                    source: source.to_string(),
+                });
+            }
+        };
         let child_relative_paths = if inspected.node_kind == NodeKind::Parent {
             let children = runtime
                 .list_children(ListChildrenRequest {
@@ -296,6 +311,22 @@ fn collect_stale_handoff_paths(
         }
     }
     Ok(())
+}
+
+fn is_actual_root_plan_parent_path(runtime: &Runtime, plan_id: &str, relative_path: &str) -> bool {
+    let path = Path::new(relative_path);
+    if path.components().count() != 1 {
+        return false;
+    }
+    let Some(plan_name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    runtime
+        .open_plan(OpenPlanRequest {
+            plan_name: plan_name.to_owned(),
+        })
+        .map(|plan| plan.plan_id == plan_id)
+        .unwrap_or(false)
 }
 
 fn validate_stale_handoff(

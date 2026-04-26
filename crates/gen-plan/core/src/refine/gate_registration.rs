@@ -35,6 +35,8 @@ pub struct RefineLeafRegistrationCandidate {
 pub struct RefineFrontierRegistrationCandidate {
     pub parent_relative_path: String,
     pub changed_child_relative_paths: Vec<String>,
+    #[serde(default)]
+    pub removed_child_relative_paths: Vec<String>,
     pub reasons: Vec<RefineGateTargetReason>,
 }
 
@@ -300,14 +302,14 @@ pub fn register_refine_gate_targets(
                 missing_child_relative_paths: missing,
             });
         }
+        let changed_child_relative_paths =
+            dispatchable_changed_child_relative_paths(runtime, &plan_id, &candidate);
         registered
             .frontier_targets
             .push(RegisteredRefineFrontierTarget {
                 parent_node_id,
                 parent_relative_path: candidate.parent_relative_path,
-                changed_child_relative_paths: stable_dedup_strings(
-                    candidate.changed_child_relative_paths,
-                ),
+                changed_child_relative_paths: stable_dedup_strings(changed_child_relative_paths),
                 reasons: stable_dedup_reasons(candidate.reasons),
             });
     }
@@ -481,6 +483,14 @@ fn validate_frontier_changed_child_paths(
     plan_id: &str,
     candidate: &RefineFrontierRegistrationCandidate,
 ) -> Result<(), RefineGatePreparationError> {
+    for child in &candidate.removed_child_relative_paths {
+        validate_markdown_path("removed_child_relative_paths", child)?;
+    }
+    let removed_child_paths = candidate
+        .removed_child_relative_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     let mut missing_child_relative_paths = Vec::new();
     for child in &candidate.changed_child_relative_paths {
         validate_markdown_path("changed_child_relative_paths", child)?;
@@ -492,6 +502,9 @@ fn validate_frontier_changed_child_paths(
             })
             .is_err()
         {
+            if removed_child_paths.contains(child.as_str()) {
+                continue;
+            }
             missing_child_relative_paths.push(child.clone());
         }
     }
@@ -503,6 +516,35 @@ fn validate_frontier_changed_child_paths(
             missing_child_relative_paths,
         })
     }
+}
+
+fn dispatchable_changed_child_relative_paths(
+    runtime: &Runtime,
+    plan_id: &str,
+    candidate: &RefineFrontierRegistrationCandidate,
+) -> Vec<String> {
+    let removed_child_paths = candidate
+        .removed_child_relative_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    candidate
+        .changed_child_relative_paths
+        .iter()
+        .filter(|child| {
+            if !removed_child_paths.contains(child.as_str()) {
+                return true;
+            }
+            runtime
+                .inspect_node(InspectNodeRequest {
+                    plan_id: plan_id.to_owned(),
+                    node_id: None,
+                    relative_path: Some((*child).clone()),
+                })
+                .is_ok()
+        })
+        .cloned()
+        .collect()
 }
 
 fn ordered_parent_candidates(
@@ -624,6 +666,14 @@ fn validate_frontier_changed_child_paths_before_mutation(
     candidate: &RefineFrontierRegistrationCandidate,
     candidate_node_paths: &HashSet<String>,
 ) -> Result<(), RefineGatePreparationError> {
+    for child in &candidate.removed_child_relative_paths {
+        validate_markdown_path("removed_child_relative_paths", child)?;
+    }
+    let removed_child_paths = candidate
+        .removed_child_relative_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     let mut missing_child_relative_paths = Vec::new();
     for child in &candidate.changed_child_relative_paths {
         validate_markdown_path("changed_child_relative_paths", child)?;
@@ -638,6 +688,9 @@ fn validate_frontier_changed_child_paths_before_mutation(
             })
             .is_err()
         {
+            if removed_child_paths.contains(child.as_str()) {
+                continue;
+            }
             missing_child_relative_paths.push(child.clone());
         }
     }

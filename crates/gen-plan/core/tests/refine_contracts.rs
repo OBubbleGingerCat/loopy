@@ -855,6 +855,7 @@ fn refine_gate_registration_prepares_targets_fail_closed() -> Result<()> {
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "api/auth/auth.md".to_owned(),
                 changed_child_relative_paths: vec!["api/auth/check.md".to_owned()],
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ChangedChildSet],
             }],
         },
@@ -925,6 +926,7 @@ fn refine_gate_registration_reconciles_removed_child_links_before_frontier() -> 
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "api/api.md".to_owned(),
                 changed_child_relative_paths: vec!["api/removed.md".to_owned()],
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ChangedChildSet],
             }],
         },
@@ -985,6 +987,7 @@ fn refine_gate_registration_validates_frontier_children_before_reconciling() -> 
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "api/api.md".to_owned(),
                 changed_child_relative_paths: vec!["api/typo.md".to_owned()],
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ChangedChildSet],
             }],
         },
@@ -1056,6 +1059,7 @@ fn refine_gate_registration_reconciles_existing_leaf_attach_before_leaf_registra
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "api/api.md".to_owned(),
                 changed_child_relative_paths: vec!["api/attached.md".to_owned()],
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ChangedChildSet],
             }],
         },
@@ -1112,6 +1116,7 @@ fn parent_contract_frontier_registration_does_not_detach_existing_children() -> 
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "api/api.md".to_owned(),
                 changed_child_relative_paths: vec![],
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ParentContractChanged],
             }],
         },
@@ -1208,6 +1213,7 @@ fn refine_gate_registration_accepts_existing_root_parent_for_frontier_targets() 
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "demo.md".to_owned(),
                 changed_child_relative_paths: Vec::new(),
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ParentContractChanged],
             }],
         },
@@ -1248,6 +1254,7 @@ fn refine_gate_registration_creates_root_parent_through_public_runtime() -> Resu
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "demo.md".to_owned(),
                 changed_child_relative_paths: Vec::new(),
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ParentContractChanged],
             }],
         },
@@ -1300,6 +1307,7 @@ fn refine_gate_registration_validates_all_targets_before_parent_mutation() -> Re
             frontier_candidates: vec![RefineFrontierRegistrationCandidate {
                 parent_relative_path: "api/api.md".to_owned(),
                 changed_child_relative_paths: vec!["api/typo.md".to_owned()],
+                removed_child_relative_paths: Vec::new(),
                 reasons: vec![RefineGateTargetReason::ChangedChildSet],
             }],
         },
@@ -1398,11 +1406,13 @@ fn refine_gate_registration_validates_all_frontiers_before_reconciling_links() -
                 RefineFrontierRegistrationCandidate {
                     parent_relative_path: "api/api.md".to_owned(),
                     changed_child_relative_paths: vec!["api/old.md".to_owned()],
+                    removed_child_relative_paths: Vec::new(),
                     reasons: vec![RefineGateTargetReason::ChangedChildSet],
                 },
                 RefineFrontierRegistrationCandidate {
                     parent_relative_path: "missing/missing.md".to_owned(),
                     changed_child_relative_paths: Vec::new(),
+                    removed_child_relative_paths: Vec::new(),
                     reasons: vec![RefineGateTargetReason::ParentContractChanged],
                 },
             ],
@@ -1421,6 +1431,129 @@ fn refine_gate_registration_validates_all_frontiers_before_reconciling_links() -
     })?;
     assert_eq!(children.children.len(), 1);
     assert_eq!(children.children[0].node_id, old_child.node_id);
+    Ok(())
+}
+
+#[test]
+fn refine_runtime_state_allows_untracked_root_parent_to_register_later() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::write(
+        plan_root.join("demo.md"),
+        "# Demo\n\nUpdated root contract.\n",
+    )?;
+    let rewrite_result = RefineRewriteResult {
+        changed_files: vec![RefineChangedFile {
+            relative_path: "demo.md".to_owned(),
+            node_id: None,
+            change_kind: RefineChangedFileKind::TextUpdated,
+        }],
+        structural_changes: vec![RefineStructuralChange {
+            parent_relative_path: "demo.md".to_owned(),
+            parent_node_id: None,
+            change_kind: RefineStructuralChangeKind::ParentContractChanged,
+            added_child_relative_paths: vec![],
+            removed_child_relative_paths: vec![],
+        }],
+        stale_nodes: vec![],
+        context_invalidations: vec![],
+        unchanged_nodes: vec![],
+        expected_gate_targets: vec![],
+        unresolved_follow_ups: vec![],
+        summary: Default::default(),
+    };
+
+    let inputs = loopy_gen_plan::refine::build_refine_gate_selection_inputs(
+        &runtime,
+        loopy_gen_plan::refine::BuildRefineGateSelectionInputsRequest {
+            plan_id: plan.plan_id.clone(),
+            rewrite_result,
+            stale_result_handoff: vec![],
+        },
+    )?;
+    assert!(
+        inputs.runtime_snapshot.nodes.is_empty(),
+        "untracked root parent should be left for registration"
+    );
+
+    let selection = select_refine_gate_targets(SelectRefineGateTargetsRequest {
+        plan_id: plan.plan_id.clone(),
+        rewrite_result: inputs.rewrite_result,
+        runtime_snapshot: inputs.runtime_snapshot,
+        prior_gate_summaries: inputs.prior_gate_summaries,
+        stale_result_handoff: inputs.stale_result_handoff,
+    });
+    assert_eq!(selection.frontier_targets.len(), 1);
+    assert_eq!(
+        selection.frontier_targets[0].parent_relative_path,
+        "demo.md"
+    );
+    assert_eq!(selection.frontier_targets[0].parent_node_id, None);
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        selection.to_registration_request(plan.plan_id.clone()),
+    )?;
+    assert_eq!(registered.parent_targets.len(), 1);
+    assert_eq!(registered.parent_targets[0].relative_path, "demo.md");
+    let root = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan.plan_id,
+        node_id: Some(registered.parent_targets[0].node_id.clone()),
+        relative_path: None,
+    })?;
+    assert_eq!(root.node_kind, NodeKind::Parent);
+
+    Ok(())
+}
+
+#[test]
+fn refine_gate_registration_allows_removed_untracked_child_link() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n")?;
+    runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id,
+            parent_candidates: vec![],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "api/api.md".to_owned(),
+                changed_child_relative_paths: vec!["api/missing.md".to_owned()],
+                removed_child_relative_paths: vec!["api/missing.md".to_owned()],
+                reasons: vec![RefineGateTargetReason::ChangedChildSet],
+            }],
+        },
+    )
+    .expect("removed untracked child paths should not block reconciliation");
+
+    assert_eq!(registered.frontier_targets.len(), 1);
+    assert!(
+        registered.frontier_targets[0]
+            .changed_child_relative_paths
+            .is_empty(),
+        "untracked removed children should not be dispatched as changed child targets"
+    );
+
     Ok(())
 }
 

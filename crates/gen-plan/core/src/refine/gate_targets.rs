@@ -46,6 +46,7 @@ pub struct RefineFrontierGateTarget {
     pub parent_node_id: Option<String>,
     pub parent_relative_path: String,
     pub changed_child_relative_paths: Vec<String>,
+    pub removed_child_relative_paths: Vec<String>,
     pub reasons: Vec<RefineGateTargetReason>,
 }
 
@@ -77,6 +78,7 @@ pub struct ExpectedFrontierGateTargetSummary {
     pub parent_node_id: Option<String>,
     pub parent_relative_path: String,
     pub changed_child_relative_paths: Vec<String>,
+    pub removed_child_relative_paths: Vec<String>,
     pub reasons: Vec<RefineGateTargetReason>,
 }
 
@@ -116,6 +118,7 @@ impl RefineGateTargetSelection {
                 .map(|target| RefineFrontierRegistrationCandidate {
                     parent_relative_path: target.parent_relative_path.clone(),
                     changed_child_relative_paths: target.changed_child_relative_paths.clone(),
+                    removed_child_relative_paths: target.removed_child_relative_paths.clone(),
                     reasons: target.reasons.clone(),
                 })
                 .collect(),
@@ -142,7 +145,7 @@ pub fn select_refine_gate_targets(
     for file in &request.rewrite_result.changed_files {
         match file.change_kind {
             RefineChangedFileKind::TextUpdated => {
-                if is_parent_target_path(&request.runtime_snapshot, &file.relative_path) {
+                if is_parent_target_path(&request, &file.relative_path) {
                     if is_link_only_parent_text_update(&request, &file.relative_path) {
                         continue;
                     }
@@ -150,6 +153,7 @@ pub fn select_refine_gate_targets(
                         &mut selection.frontier_targets,
                         &request.runtime_snapshot,
                         &file.relative_path,
+                        Vec::new(),
                         Vec::new(),
                         RefineGateTargetReason::ParentContractChanged,
                     );
@@ -172,11 +176,12 @@ pub fn select_refine_gate_targets(
                 }
             }
             RefineChangedFileKind::Created => {
-                if is_parent_target_path(&request.runtime_snapshot, &file.relative_path) {
+                if is_parent_target_path(&request, &file.relative_path) {
                     upsert_frontier(
                         &mut selection.frontier_targets,
                         &request.runtime_snapshot,
                         &file.relative_path,
+                        Vec::new(),
                         Vec::new(),
                         RefineGateTargetReason::NewParent,
                     );
@@ -232,6 +237,7 @@ pub fn select_refine_gate_targets(
             &request.runtime_snapshot,
             &change.parent_relative_path,
             changed_child_relative_paths,
+            change.removed_child_relative_paths.clone(),
             reason.clone(),
         );
         for child in &change.added_child_relative_paths {
@@ -279,6 +285,7 @@ pub fn select_refine_gate_targets(
                 parent_node_id: target.parent_node_id.clone(),
                 parent_relative_path: target.parent_relative_path.clone(),
                 changed_child_relative_paths: target.changed_child_relative_paths.clone(),
+                removed_child_relative_paths: target.removed_child_relative_paths.clone(),
                 reasons: target.reasons.clone(),
             })
             .collect(),
@@ -343,6 +350,7 @@ fn apply_stale_handoff(
                     &request.runtime_snapshot,
                     &parent_relative_path,
                     changed_child_relative_paths,
+                    Vec::new(),
                     RefineGateTargetReason::StaleDescendant,
                 );
                 if let Some(prior) = request.prior_gate_summaries.frontier.iter().find(|prior| {
@@ -497,9 +505,11 @@ fn upsert_frontier(
     snapshot: &RefineRuntimeNodeSnapshot,
     parent_relative_path: &str,
     changed_child_relative_paths: Vec<String>,
+    removed_child_relative_paths: Vec<String>,
     reason: RefineGateTargetReason,
 ) {
     let deduped_children = stable_dedup_strings(changed_child_relative_paths);
+    let deduped_removed_children = stable_dedup_strings(removed_child_relative_paths);
     if let Some(existing) = targets
         .iter_mut()
         .find(|target| target.parent_relative_path == parent_relative_path)
@@ -507,6 +517,11 @@ fn upsert_frontier(
         for child in deduped_children {
             if !existing.changed_child_relative_paths.contains(&child) {
                 existing.changed_child_relative_paths.push(child);
+            }
+        }
+        for child in deduped_removed_children {
+            if !existing.removed_child_relative_paths.contains(&child) {
+                existing.removed_child_relative_paths.push(child);
             }
         }
         push_reason(&mut existing.reasons, reason);
@@ -517,6 +532,7 @@ fn upsert_frontier(
         parent_node_id: runtime_node.map(|node| node.node_id.clone()),
         parent_relative_path: parent_relative_path.to_owned(),
         changed_child_relative_paths: deduped_children,
+        removed_child_relative_paths: deduped_removed_children,
         reasons: vec![reason],
     });
 }
@@ -580,9 +596,15 @@ fn is_parent_path(relative_path: &str) -> bool {
     stem.is_some() && parent_dir == stem
 }
 
-fn is_parent_target_path(snapshot: &RefineRuntimeNodeSnapshot, relative_path: &str) -> bool {
-    find_node(snapshot, relative_path).is_some_and(|node| node.node_kind == NodeKind::Parent)
+fn is_parent_target_path(request: &SelectRefineGateTargetsRequest, relative_path: &str) -> bool {
+    find_node(&request.runtime_snapshot, relative_path)
+        .is_some_and(|node| node.node_kind == NodeKind::Parent)
         || is_parent_path(relative_path)
+        || request
+            .rewrite_result
+            .structural_changes
+            .iter()
+            .any(|change| change.parent_relative_path == relative_path)
 }
 
 fn known_parent_paths(selection: &RefineGateTargetSelection) -> HashSet<String> {
