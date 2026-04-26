@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path};
 
@@ -119,16 +119,22 @@ pub fn register_refine_gate_targets(
 ) -> Result<RegisteredRefineGateTargets, RefineGatePreparationError> {
     // Uses only public Runtime::ensure_node_id, Runtime::inspect_node, and Runtime::list_children;
     // must not edit crates/gen-plan/core/src/runtime/mod.rs or private runtime query modules.
+    let RegisterRefineGateTargetsRequest {
+        plan_id,
+        parent_candidates,
+        leaf_candidates,
+        frontier_candidates,
+    } = request;
     let mut registered = RegisteredRefineGateTargets::default();
     let mut tracked_parents = HashSet::<String>::new();
 
-    for candidate in ordered_parent_candidates(request.parent_candidates) {
+    for candidate in ordered_parent_candidates(parent_candidates) {
         validate_non_empty_reasons("parent", &candidate.relative_path, &candidate.reasons)?;
         validate_parent_path("relative_path", &candidate.relative_path)?;
         if let Some(parent_relative_path) = &candidate.parent_relative_path {
             validate_parent_path("parent_relative_path", parent_relative_path)?;
             if !tracked_parents.contains(parent_relative_path)
-                && inspect_parent(runtime, &request.plan_id, parent_relative_path).is_err()
+                && inspect_parent(runtime, &plan_id, parent_relative_path).is_err()
             {
                 return Err(RefineGatePreparationError::MissingParentRegistration {
                     child_relative_path: candidate.relative_path.clone(),
@@ -138,7 +144,7 @@ pub fn register_refine_gate_targets(
         }
         let response = runtime
             .ensure_node_id(EnsureNodeIdRequest {
-                plan_id: request.plan_id.clone(),
+                plan_id: plan_id.clone(),
                 relative_path: candidate.relative_path.clone(),
                 parent_relative_path: candidate.parent_relative_path.clone(),
             })
@@ -157,58 +163,72 @@ pub fn register_refine_gate_targets(
             });
     }
 
-    for candidate in request.leaf_candidates {
+    for candidate in &frontier_candidates {
+        validate_frontier_candidate(candidate)?;
+    }
+
+    let mut deferred_leaf_candidates = Vec::new();
+    for candidate in leaf_candidates {
         validate_non_empty_reasons("leaf", &candidate.relative_path, &candidate.reasons)?;
         validate_leaf_path("relative_path", &candidate.relative_path)?;
         validate_leaf_parent(
             runtime,
-            &request.plan_id,
+            &plan_id,
             &candidate.relative_path,
             candidate.parent_relative_path.as_deref(),
             &tracked_parents,
         )?;
-        let response = runtime
-            .ensure_node_id(EnsureNodeIdRequest {
-                plan_id: request.plan_id.clone(),
-                relative_path: candidate.relative_path.clone(),
-                parent_relative_path: candidate.parent_relative_path.clone(),
-            })
-            .map_err(|source| RefineGatePreparationError::RegistrationFailed {
-                relative_path: candidate.relative_path.clone(),
-                source: source.to_string(),
-            })?;
-        registered.leaf_targets.push(RegisteredRefineLeafTarget {
-            node_id: response.node_id,
-            relative_path: candidate.relative_path,
-            parent_relative_path: candidate.parent_relative_path,
-            reasons: stable_dedup_reasons(candidate.reasons),
-        });
+        if leaf_needs_child_link_reconciliation(runtime, &plan_id, &candidate) {
+            deferred_leaf_candidates.push(candidate);
+        } else {
+            registered
+                .leaf_targets
+                .push(register_leaf_candidate(runtime, &plan_id, candidate)?);
+        }
     }
 
-    for candidate in request.frontier_candidates {
-        validate_non_empty_reasons(
-            "frontier",
-            &candidate.parent_relative_path,
-            &candidate.reasons,
-        )?;
-        validate_parent_path("parent_relative_path", &candidate.parent_relative_path)?;
-        let parent = inspect_parent(runtime, &request.plan_id, &candidate.parent_relative_path)
-            .map_err(|_| RefineGatePreparationError::MissingParentRegistration {
-                child_relative_path: candidate.parent_relative_path.clone(),
-                parent_relative_path: candidate.parent_relative_path.clone(),
-            })?;
+    let mut reconciled_frontiers = HashMap::<String, HashSet<String>>::new();
+    for candidate in &frontier_candidates {
+        if !frontier_needs_child_link_reconciliation(candidate)
+            || reconciled_frontiers.contains_key(&candidate.parent_relative_path)
+        {
+            continue;
+        }
         let reconciled = runtime
             .reconcile_parent_child_links(ReconcileParentChildLinksRequest {
-                plan_id: request.plan_id.clone(),
+                plan_id: plan_id.clone(),
                 parent_relative_path: candidate.parent_relative_path.clone(),
             })
             .map_err(|source| RefineGatePreparationError::RegistrationFailed {
                 relative_path: candidate.parent_relative_path.clone(),
                 source: source.to_string(),
             })?;
+        reconciled_frontiers.insert(
+            candidate.parent_relative_path.clone(),
+            reconciled
+                .linked_child_relative_paths
+                .into_iter()
+                .collect::<HashSet<_>>(),
+        );
+    }
+
+    for candidate in deferred_leaf_candidates {
+        registered
+            .leaf_targets
+            .push(register_leaf_candidate(runtime, &plan_id, candidate)?);
+    }
+
+    for candidate in frontier_candidates {
+        let parent =
+            inspect_parent(runtime, &plan_id, &candidate.parent_relative_path).map_err(|_| {
+                RefineGatePreparationError::MissingParentRegistration {
+                    child_relative_path: candidate.parent_relative_path.clone(),
+                    parent_relative_path: candidate.parent_relative_path.clone(),
+                }
+            })?;
         let children = runtime
             .list_children(ListChildrenRequest {
-                plan_id: request.plan_id.clone(),
+                plan_id: plan_id.clone(),
                 parent_node_id: Some(parent.node_id.clone()),
                 parent_relative_path: None,
             })
@@ -221,16 +241,15 @@ pub fn register_refine_gate_targets(
             .iter()
             .map(|child| child.relative_path.as_str())
             .collect();
-        let linked_child_paths: HashSet<_> = reconciled
-            .linked_child_relative_paths
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let linked_child_paths = reconciled_frontiers
+            .get(&candidate.parent_relative_path)
+            .cloned()
+            .unwrap_or_default();
         let missing: Vec<String> = candidate
             .changed_child_relative_paths
             .iter()
             .filter(|child| {
-                linked_child_paths.contains(child.as_str()) && !child_paths.contains(child.as_str())
+                linked_child_paths.contains(*child) && !child_paths.contains(child.as_str())
             })
             .cloned()
             .collect();
@@ -253,6 +272,68 @@ pub fn register_refine_gate_targets(
     }
 
     Ok(registered)
+}
+
+fn validate_frontier_candidate(
+    candidate: &RefineFrontierRegistrationCandidate,
+) -> Result<(), RefineGatePreparationError> {
+    validate_non_empty_reasons(
+        "frontier",
+        &candidate.parent_relative_path,
+        &candidate.reasons,
+    )?;
+    validate_parent_path("parent_relative_path", &candidate.parent_relative_path)
+}
+
+fn register_leaf_candidate(
+    runtime: &Runtime,
+    plan_id: &str,
+    candidate: RefineLeafRegistrationCandidate,
+) -> Result<RegisteredRefineLeafTarget, RefineGatePreparationError> {
+    let response = runtime
+        .ensure_node_id(EnsureNodeIdRequest {
+            plan_id: plan_id.to_owned(),
+            relative_path: candidate.relative_path.clone(),
+            parent_relative_path: candidate.parent_relative_path.clone(),
+        })
+        .map_err(|source| RefineGatePreparationError::RegistrationFailed {
+            relative_path: candidate.relative_path.clone(),
+            source: source.to_string(),
+        })?;
+    Ok(RegisteredRefineLeafTarget {
+        node_id: response.node_id,
+        relative_path: candidate.relative_path,
+        parent_relative_path: candidate.parent_relative_path,
+        reasons: stable_dedup_reasons(candidate.reasons),
+    })
+}
+
+fn leaf_needs_child_link_reconciliation(
+    runtime: &Runtime,
+    plan_id: &str,
+    candidate: &RefineLeafRegistrationCandidate,
+) -> bool {
+    let Some(parent_relative_path) = candidate.parent_relative_path.as_deref() else {
+        return false;
+    };
+    let Ok(node) = runtime.inspect_node(InspectNodeRequest {
+        plan_id: plan_id.to_owned(),
+        node_id: None,
+        relative_path: Some(candidate.relative_path.clone()),
+    }) else {
+        return false;
+    };
+    node.node_kind == NodeKind::Leaf
+        && node.parent_relative_path.as_deref() != Some(parent_relative_path)
+}
+
+fn frontier_needs_child_link_reconciliation(
+    candidate: &RefineFrontierRegistrationCandidate,
+) -> bool {
+    !candidate.changed_child_relative_paths.is_empty()
+        || candidate
+            .reasons
+            .contains(&RefineGateTargetReason::ChangedChildSet)
 }
 
 fn ordered_parent_candidates(

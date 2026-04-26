@@ -1142,16 +1142,14 @@ fn remove_comment_blocks(
 ) -> Result<String, RefineRewriteError> {
     let parsed_blocks =
         parse_comment_blocks_for_file(relative_path, markdown).map_err(map_comment_error)?;
+    let preserved_start_lines = preserved_comment_start_lines(&parsed_blocks, preserved_blocks);
     let mut output = String::new();
     let mut preserve_current_block = None::<bool>;
     for (index, line) in markdown.split_inclusive('\n').enumerate() {
         let line_number = index + 1;
         match line.trim() {
             "BEGIN_COMMENT" => {
-                let preserve = parsed_blocks
-                    .iter()
-                    .find(|block| block.start_line == line_number)
-                    .is_some_and(|block| should_preserve_comment_block(block, preserved_blocks));
+                let preserve = preserved_start_lines.contains(&line_number);
                 preserve_current_block = Some(preserve);
                 if preserve {
                     output.push_str(line);
@@ -1168,6 +1166,45 @@ fn remove_comment_blocks(
         }
     }
     Ok(output)
+}
+
+fn preserved_comment_start_lines(
+    parsed_blocks: &[CommentBlock],
+    preserved_blocks: &[PreservedCommentBlock],
+) -> HashSet<usize> {
+    let mut preserved_start_lines = HashSet::new();
+    let mut matched_preserved_blocks = HashSet::new();
+
+    for (preserved_index, preserved) in preserved_blocks.iter().enumerate() {
+        if let Some(block) = parsed_blocks.iter().find(|block| {
+            block.start_line == preserved.start_line
+                && block.end_line == preserved.end_line
+                && !preserved_start_lines.contains(&block.start_line)
+        }) {
+            preserved_start_lines.insert(block.start_line);
+            matched_preserved_blocks.insert(preserved_index);
+        }
+    }
+
+    for (preserved_index, preserved) in preserved_blocks.iter().enumerate() {
+        if matched_preserved_blocks.contains(&preserved_index) {
+            continue;
+        }
+        let Some(comment_text) = preserved.comment_text.as_deref() else {
+            continue;
+        };
+        if let Some(block) = parsed_blocks
+            .iter()
+            .filter(|block| {
+                block.text == comment_text && !preserved_start_lines.contains(&block.start_line)
+            })
+            .min_by_key(|block| block.start_line.abs_diff(preserved.start_line))
+        {
+            preserved_start_lines.insert(block.start_line);
+        }
+    }
+
+    preserved_start_lines
 }
 
 fn preserved_comment_blocks_for_path(
@@ -1189,19 +1226,6 @@ fn comment_source_to_preserved_block(source: &RefineCommentSource) -> PreservedC
         end_line: source.end_comment_line,
         comment_text: source.comment_text.clone(),
     }
-}
-
-fn should_preserve_comment_block(
-    block: &CommentBlock,
-    preserved_blocks: &[PreservedCommentBlock],
-) -> bool {
-    preserved_blocks.iter().any(|preserved| {
-        (preserved.start_line == block.start_line && preserved.end_line == block.end_line)
-            || preserved
-                .comment_text
-                .as_deref()
-                .is_some_and(|text| text == block.text)
-    })
 }
 
 fn map_comment_error(error: CommentDiscoveryError) -> RefineRewriteError {
@@ -1465,6 +1489,47 @@ mod tests {
         assert!(updated.contains("Inserted line"));
         assert!(updated.contains("BEGIN_COMMENT\nlater\nEND_COMMENT"));
         assert_eq!(updated.matches("BEGIN_COMMENT").count(), 1);
+    }
+
+    #[test]
+    fn refine_rewrite_does_not_preserve_processed_duplicate_comment_text() {
+        let plan_root = temp_plan_root();
+        fs::write(
+            plan_root.join("api.md"),
+            "# API\n\nBEGIN_COMMENT\nduplicate\nEND_COMMENT\n\nBody\n\nBEGIN_COMMENT\nduplicate\nEND_COMMENT\n",
+        )
+        .unwrap();
+        let applied = RefineDecision {
+            source_comments: vec![RefineCommentSource {
+                source_path: "api.md".to_owned(),
+                begin_comment_line: 3,
+                end_comment_line: 5,
+                comment_text: Some("duplicate".to_owned()),
+            }],
+            ..confirmed_decision(Vec::new(), Vec::new())
+        };
+        let follow_up = RefineDecision {
+            source_comments: vec![RefineCommentSource {
+                source_path: "api.md".to_owned(),
+                begin_comment_line: 9,
+                end_comment_line: 11,
+                comment_text: Some("duplicate".to_owned()),
+            }],
+            ..confirmed_decision(Vec::new(), Vec::new())
+        };
+
+        apply_refine_rewrite(RefineRewriteRequest {
+            plan_id: "plan-1".to_owned(),
+            plan_root: plan_root.clone(),
+            decisions: vec![applied],
+            rewrite_scope: RefineRewriteScope::default(),
+            blocked_follow_ups: vec![follow_up],
+        })
+        .expect("rewrite should only preserve the blocked duplicate comment");
+
+        let updated = fs::read_to_string(plan_root.join("api.md")).unwrap();
+        assert_eq!(updated.matches("BEGIN_COMMENT").count(), 1);
+        assert!(updated.contains("Body\n\nBEGIN_COMMENT\nduplicate\nEND_COMMENT"));
     }
 
     #[test]

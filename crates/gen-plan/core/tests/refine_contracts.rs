@@ -512,6 +512,130 @@ fn refine_gate_registration_reconciles_removed_child_links_before_frontier() -> 
 }
 
 #[test]
+fn refine_gate_registration_reconciles_existing_leaf_attach_before_leaf_registration() -> Result<()>
+{
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Attached](./attached.md)\n",
+    )?;
+    fs::write(plan_root.join("api/attached.md"), "# Attached\n")?;
+
+    let new_parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let attached = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/attached.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+    fs::write(plan_root.join("api/api.md"), "# API\n\n## Child Nodes\n\n")?;
+    runtime.reconcile_parent_child_links(ReconcileParentChildLinksRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_relative_path: "api/api.md".to_owned(),
+    })?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Attached](./attached.md)\n",
+    )?;
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_candidates: vec![],
+            leaf_candidates: vec![RefineLeafRegistrationCandidate {
+                relative_path: "api/attached.md".to_owned(),
+                parent_relative_path: Some("api/api.md".to_owned()),
+                reasons: vec![RefineGateTargetReason::ChangedChildSet],
+            }],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "api/api.md".to_owned(),
+                changed_child_relative_paths: vec!["api/attached.md".to_owned()],
+                reasons: vec![RefineGateTargetReason::ChangedChildSet],
+            }],
+        },
+    )
+    .expect("existing attached leaf should be reconciled before leaf re-registration");
+
+    assert_eq!(registered.leaf_targets.len(), 1);
+    assert_eq!(registered.leaf_targets[0].node_id, attached.node_id);
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(new_parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(children.children.len(), 1);
+    assert_eq!(children.children[0].relative_path, "api/attached.md");
+    Ok(())
+}
+
+#[test]
+fn parent_contract_frontier_registration_does_not_detach_existing_children() -> Result<()> {
+    let workspace = support::workspace()?;
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "demo".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: workspace.path().to_path_buf(),
+    })?;
+    let plan_root = workspace.path().join(".loopy/plans/demo");
+    fs::create_dir_all(plan_root.join("api"))?;
+    fs::write(plan_root.join("api/child.md"), "# Child\n")?;
+    fs::write(
+        plan_root.join("api/api.md"),
+        "# API\n\n## Child Nodes\n\n- [Child](./child.md)\n",
+    )?;
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/api.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let child = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "api/child.md".to_owned(),
+        parent_relative_path: Some("api/api.md".to_owned()),
+    })?;
+
+    fs::write(plan_root.join("api/api.md"), "# API\n\nUpdated contract\n")?;
+
+    let registered = register_refine_gate_targets(
+        &runtime,
+        loopy_gen_plan::refine::RegisterRefineGateTargetsRequest {
+            plan_id: plan.plan_id.clone(),
+            parent_candidates: vec![],
+            leaf_candidates: vec![],
+            frontier_candidates: vec![RefineFrontierRegistrationCandidate {
+                parent_relative_path: "api/api.md".to_owned(),
+                changed_child_relative_paths: vec![],
+                reasons: vec![RefineGateTargetReason::ParentContractChanged],
+            }],
+        },
+    )
+    .expect("parent-only frontier target should not reconcile child links");
+
+    assert_eq!(registered.frontier_targets.len(), 1);
+    let children = runtime.list_children(ListChildrenRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_node_id: Some(parent.node_id),
+        parent_relative_path: None,
+    })?;
+    assert_eq!(children.children.len(), 1);
+    assert_eq!(children.children[0].node_id, child.node_id);
+    Ok(())
+}
+
+#[test]
 fn refine_runtime_state_builds_selection_inputs_from_public_runtime() -> Result<()> {
     let workspace = support::workspace()?;
     let runtime = Runtime::new(workspace.path())?;
