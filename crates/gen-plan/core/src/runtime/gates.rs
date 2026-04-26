@@ -235,7 +235,11 @@ pub(crate) fn run_frontier_review_gate(
         other => bail!("unsupported frontier reviewer verdict `{other}`"),
     };
     validate_review_issues(&output.verdict, &output.issues, passed)?;
-    let valid_invalidations = select_leaf_child_node_ids(connection, &plan_id, &parent_node_id)?;
+    let valid_invalidations = if has_refine_revalidation_context(&refine_revalidation_context) {
+        select_plan_leaf_node_ids(connection, &plan_id)?
+    } else {
+        select_leaf_child_node_ids(connection, &plan_id, &parent_node_id)?
+    };
     for invalidated_node_id in &output.invalidated_leaf_node_ids {
         if !valid_invalidations
             .iter()
@@ -566,6 +570,31 @@ fn select_leaf_child_node_ids(
         .context("failed to query leaf child nodes for frontier gate")?
         .collect::<std::result::Result<Vec<String>, _>>()
         .context("failed to read leaf child nodes for frontier gate")
+}
+
+fn select_plan_leaf_node_ids(connection: &Connection, plan_id: &str) -> Result<Vec<String>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT node_id
+             FROM GEN_PLAN__nodes
+             WHERE plan_id = ?1
+               AND node_kind = 'leaf'
+             ORDER BY relative_path, node_id",
+        )
+        .context("failed to prepare plan leaf lookup")?;
+
+    statement
+        .query_map(params![plan_id], |row| row.get(0))
+        .context("failed to query plan leaf nodes for frontier gate")?
+        .collect::<std::result::Result<Vec<String>, _>>()
+        .context("failed to read plan leaf nodes for frontier gate")
+}
+
+fn has_refine_revalidation_context(context: &Option<String>) -> bool {
+    context
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|context| !context.is_empty())
 }
 
 fn current_timestamp() -> Result<String> {

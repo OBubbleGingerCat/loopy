@@ -935,6 +935,97 @@ fn frontier_gate_dispatches_real_reviewer_and_persists_selected_role_id() -> Res
 }
 
 #[test]
+fn frontier_gate_refine_context_can_invalidate_detached_leaf_approval() -> Result<()> {
+    let workspace = support::workspace()?;
+    write_dev_registry(
+        workspace.path(),
+        &repo_root().join("skills").join("gen-plan"),
+    )?;
+    let project_directory = workspace.path().join("project");
+    fs::create_dir_all(&project_directory)?;
+
+    let runtime = Runtime::new(workspace.path())?;
+    let plan = runtime.ensure_plan(EnsurePlanRequest {
+        plan_name: "frontier-detached-leaf-invalidation".to_owned(),
+        task_type: "coding-task".to_owned(),
+        project_directory: project_directory.clone(),
+    })?;
+    let plan_root = workspace
+        .path()
+        .join(".loopy/plans/frontier-detached-leaf-invalidation");
+    fs::create_dir_all(plan_root.join("backend"))?;
+    fs::write(
+        plan_root.join("backend/backend.md"),
+        "# Backend\n\n## Child Nodes\n\n- [Removed](./removed.md)\n",
+    )?;
+    fs::write(plan_root.join("backend/removed.md"), "# Removed\n")?;
+
+    let parent = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/backend.md".to_owned(),
+        parent_relative_path: None,
+    })?;
+    let removed_leaf = runtime.ensure_node_id(EnsureNodeIdRequest {
+        plan_id: plan.plan_id.clone(),
+        relative_path: "backend/removed.md".to_owned(),
+        parent_relative_path: Some("backend/backend.md".to_owned()),
+    })?;
+    fs::write(
+        plan_root.join("backend/backend.md"),
+        "# Backend\n\n## Child Nodes\n\n",
+    )?;
+    runtime.reconcile_parent_child_links(loopy_gen_plan::ReconcileParentChildLinksRequest {
+        plan_id: plan.plan_id.clone(),
+        parent_relative_path: "backend/backend.md".to_owned(),
+    })?;
+
+    let fake_bin_dir = workspace.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    let removed_leaf_node_id = removed_leaf.node_id.clone();
+    let frontier_output = serde_json::json!({
+        "verdict": "revise_frontier",
+        "summary": "Detached leaf approval is stale.",
+        "issues": [{
+            "issue_kind": "stale_detached_leaf",
+            "target_node_id": removed_leaf_node_id,
+            "target_parent_node_id": null,
+            "target_node_ids": null,
+            "summary": "The removed leaf approval is stale.",
+            "rationale": "The leaf is no longer part of this frontier after refine reconciliation.",
+            "expected_revision": "Regenerate or retire the stale leaf approval.",
+            "question_for_user": null,
+            "decision_impact": null
+        }],
+        "invalidated_leaf_node_ids": [removed_leaf_node_id]
+    })
+    .to_string();
+    write_fake_codex_with_outputs(
+        &fake_bin_dir.join("codex"),
+        &project_directory,
+        r#"{"verdict":"approved_as_leaf","summary":"unused","issues":[]}"#,
+        &frontier_output,
+    )?;
+
+    let result = {
+        let _env_guard = fake_codex_env(&fake_bin_dir);
+        runtime.run_frontier_review_gate(RunFrontierReviewGateRequest {
+            plan_id: plan.plan_id,
+            parent_node_id: parent.node_id,
+            planner_mode: PlannerMode::Auto,
+            refine_revalidation_context: Some(
+                "Changed child set removed backend/removed.md".to_owned(),
+            ),
+        })?
+    };
+
+    assert!(!result.passed);
+    assert_eq!(result.verdict, "revise_frontier");
+    assert_eq!(result.invalidated_leaf_node_ids, vec![removed_leaf.node_id]);
+
+    Ok(())
+}
+
+#[test]
 fn frontier_gate_fails_closed_when_invalidations_field_is_missing() -> Result<()> {
     let workspace = support::workspace()?;
     write_dev_registry(
