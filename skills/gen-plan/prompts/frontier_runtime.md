@@ -35,6 +35,8 @@ You must return exactly one verdict:
 - If there are any issues, the gate does not pass.
 - Every issue must include an explicit target.
 - You may return invalidated_leaf_node_ids if some previously accepted leaf approvals should no longer be trusted.
+- If the verdict is approved_frontier, invalidated_leaf_node_ids must be an empty array.
+- If any leaf approval should be invalidated, do not return approved_frontier; return the appropriate non-approved verdict and include the blocking issue.
 - If the verdict is pause_for_user_decision, each relevant issue must also include:
   - question_for_user
   - decision_impact

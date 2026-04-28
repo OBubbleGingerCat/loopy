@@ -3,7 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use loopy_gen_plan::{OpenPlanRequest, Runtime};
 
 #[test]
 fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
@@ -57,6 +58,12 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
             "Do not inspect or print the installed \\`bin/loopy-gen-plan\\` ELF binary as text"
         ),
         "script should forbid inspecting the bundled ELF binary as text"
+    );
+    assert!(
+        script.contains("Installed runtime helper path: `$INSTALL_ROOT/bin/loopy-gen-plan`")
+            || script
+                .contains("Installed runtime helper path: \\`$INSTALL_ROOT/bin/loopy-gen-plan\\`"),
+        "script should give refine prompts the exact installed helper path"
     );
     assert!(
         script.contains("Do not use `apply_patch` in this smoke.")
@@ -263,6 +270,30 @@ fn smoke_script_uses_the_installed_gen_plan_skill_entrypoint() -> Result<()> {
         "script should distinguish review issues from invocation-layer retry cases"
     );
     assert!(
+        script.contains("Do not pass `--refine-invalidatable-leaf-node-id`")
+            || script.contains("Do not pass \\`--refine-invalidatable-leaf-node-id\\`"),
+        "script should prevent refine frontier calls from treating changed leaves as invalidation requests"
+    );
+    assert!(
+        script.contains("do not pass `--plan-name` to those helpers")
+            || script.contains("do not pass \\`--plan-name\\` to those helpers"),
+        "script should require refine follow-up helpers to use plan_id rather than plan_name"
+    );
+    assert!(
+        script.contains("not `refine`") || script.contains("not \\`refine\\`"),
+        "script should prohibit invalid refine planner-mode values for gate helpers"
+    );
+    assert!(
+        script.contains("detected invalid refine helper `--plan-name` usage")
+            || script.contains("detected invalid refine gate `--planner-mode refine` usage"),
+        "script should strictly reject invalid refine helper arguments"
+    );
+    assert!(
+        script.contains("approved_frontier")
+            && script.contains("invalidated_leaf_node_ids"),
+        "script should remind refine smokes that approved frontiers cannot invalidate leaves"
+    );
+    assert!(
         script.contains("LOOPY_SMOKE_STRICT_VALIDATION"),
         "script should expose strict validation control"
     );
@@ -466,6 +497,68 @@ fn smoke_script_preserves_artifacts_for_all_auto_mode_cases() -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+#[test]
+fn smoke_script_refine_fixture_opens_with_absolute_workspace_when_run_root_is_relative(
+) -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_refine_success")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let suffix = temp
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("run");
+    let relative_run_root =
+        PathBuf::from("target").join(format!("loopy-smoke-relative-refine-{suffix}"));
+    let run_root = repo_root.join(&relative_run_root);
+    let _ = fs::remove_dir_all(&run_root);
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &relative_run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "refine-api-plan")
+        .env("PATH", path)
+        .output()
+        .context("failed to run refine smoke script with relative run root")?;
+
+    if !output.status.success() {
+        bail!(
+            "relative-run-root refine smoke failed\n{}",
+            combined_output(&output)
+        );
+    }
+
+    let workspace = run_root
+        .join("workspaces/refine-api-plan")
+        .canonicalize()
+        .context("expected refine workspace to exist")?;
+    let opened = Runtime::new(&workspace)?.open_plan(OpenPlanRequest {
+        plan_name: "refine-api-plan".to_owned(),
+    })?;
+
+    assert_eq!(
+        opened.plan_root,
+        workspace.join(".loopy/plans/refine-api-plan"),
+        "refine fixture should persist the same absolute workspace root that real codex uses"
+    );
 
     Ok(())
 }
@@ -733,6 +826,104 @@ fn smoke_script_strict_validation_checks_refine_helper_contract() -> Result<()> 
 }
 
 #[test]
+fn smoke_script_strict_validation_rejects_refine_helper_outside_install_root() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let fake_bin_dir = temp.path().join("bin-external-helper");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_refine_external_helper")?;
+    let run_root = temp.path().join("run-strict-refine-external-helper");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "refine-api-plan")
+        .env("PATH", path)
+        .output()
+        .context("failed to run strict refine external-helper smoke")?;
+
+    assert!(
+        !output.status.success(),
+        "strict validation should reject refine helper calls outside the isolated install root\n{}",
+        combined_output(&output)
+    );
+    assert!(
+        combined_output(&output).contains("outside isolated installed helper root"),
+        "expected external-helper rejection in output:\n{}",
+        combined_output(&output)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn smoke_script_rejects_refine_invalid_runtime_helper_arguments() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    for (mode, expected_error) in [
+        (
+            "strict_refine_bad_helper_plan_name",
+            "detected invalid refine helper `--plan-name` usage",
+        ),
+        (
+            "strict_refine_bad_planner_mode",
+            "detected invalid refine gate `--planner-mode refine` usage",
+        ),
+        (
+            "strict_refine_bad_invalidatable_leaf",
+            "detected unnecessary refine frontier invalidatable-leaf flag",
+        ),
+    ] {
+        let fake_bin_dir = temp.path().join(format!("bin-{mode}"));
+        fs::create_dir_all(&fake_bin_dir)?;
+        write_fake_codex(&fake_bin_dir.join("codex"), mode)?;
+        let run_root = temp.path().join(format!("run-{mode}"));
+        let path = format!(
+            "{}:{}",
+            fake_bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let output = Command::new("bash")
+            .arg("scripts/smoke-installed-gen-plan-codex.sh")
+            .current_dir(repo_root)
+            .env("CARGO_NET_OFFLINE", "true")
+            .env("CODEX_HOME", &source_codex_home)
+            .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+            .env("LOOPY_SMOKE_CASE_FILTER", "refine-api-plan")
+            .env("PATH", path)
+            .output()
+            .with_context(|| format!("failed to run strict refine smoke for {mode}"))?;
+
+        assert!(
+            !output.status.success(),
+            "strict validation should reject {mode}\n{}",
+            combined_output(&output)
+        );
+        assert!(
+            combined_output(&output).contains(expected_error),
+            "expected `{expected_error}` in output for {mode}:\n{}",
+            combined_output(&output)
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn smoke_script_rejects_direct_db_write_attempts_from_exec_transcript() -> Result<()> {
     let repo_root = repo_root();
     let temp = support::workspace()?;
@@ -821,6 +1012,88 @@ fn smoke_script_rejects_direct_db_read_attempts_from_exec_transcript() -> Result
     Ok(())
 }
 
+#[test]
+fn smoke_script_allows_rg_file_listing_that_excludes_loopy_db() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_db_exclude_glob")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let run_root = temp.path().join("run-strict-db-exclude-glob");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "rust-cli-todo")
+        .env("PATH", path)
+        .output()
+        .context("failed to run smoke script with fake db-exclude transcript")?;
+
+    if !output.status.success() {
+        bail!(
+            "strict validation should allow rg --files with a loopy.db exclude glob\n{}",
+            combined_output(&output)
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn smoke_script_rejects_batched_gate_invocations() -> Result<()> {
+    let repo_root = repo_root();
+    let temp = support::workspace()?;
+    let fake_bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin_dir)?;
+    write_fake_codex(&fake_bin_dir.join("codex"), "strict_batched_gate_invocations")?;
+
+    let source_codex_home = temp.path().join("source-codex-home");
+    write_fake_codex_home(&source_codex_home)?;
+
+    let run_root = temp.path().join("run-strict-batched-gates");
+    let path = format!(
+        "{}:{}",
+        fake_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/smoke-installed-gen-plan-codex.sh")
+        .current_dir(repo_root)
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CODEX_HOME", &source_codex_home)
+        .env("LOOPY_SMOKE_RUN_ROOT", &run_root)
+        .env("LOOPY_SMOKE_CASE_FILTER", "rust-cli-todo")
+        .env("PATH", path)
+        .output()
+        .context("failed to run smoke script with fake batched gate transcript")?;
+
+    assert!(
+        !output.status.success(),
+        "strict validation should reject batched gate commands\n{}",
+        combined_output(&output)
+    );
+    assert!(
+        combined_output(&output).contains("batched runtime gate invocations"),
+        "expected batched-gate rejection in output:\n{}",
+        combined_output(&output)
+    );
+
+    Ok(())
+}
+
 fn repo_root() -> &'static Path {
     static REPO_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     REPO_ROOT.get_or_init(|| {
@@ -874,12 +1147,13 @@ plan_name="$(printf '%s\n' "$prompt" | grep -m1 '^- Desired plan name: `' | cut 
 if [[ -z "$plan_name" ]]; then
   plan_name="$(printf '%s' "$prompt" | grep -oE -- '--plan-name [^` ]+' | head -n1 | awk '{{print $2}}')"
 fi
+helper_path="${{CODEX_HOME:-/tmp/fake-codex-home/.codex}}/skills/loopy-gen-plan/bin/loopy-gen-plan"
 
 if [[ "$prompt" == *"--refine <plan-name>"* ]]; then
   if [[ "$plan_name" == "refine-malformed-comments" ]]; then
     cat <<EOF
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+/bin/bash -lc 'bin=$helper_path
 "\$bin" open-plan --workspace . --plan-name $plan_name'
  succeeded in 0ms:
 malformed nested BEGIN_COMMENT in api/add-auth-tests.md at line 6; fail closed before rewrite or gates
@@ -946,20 +1220,101 @@ exec
  failed in 0ms:
 EOF
   fi
-  cat <<EOF
+  if [[ "$mode" == "strict_refine_bad_helper_plan_name" ]]; then
+    cat <<EOF
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+/bin/bash -lc 'bin=$helper_path
 "\$bin" open-plan --workspace . --plan-name $plan_name'
  succeeded in 0ms:
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"\$bin" inspect-node --workspace . --plan-id plan-1 --relative-path api/api.md'
- succeeded in 0ms:
+/bin/bash -lc 'bin=$helper_path
+"\$bin" inspect-node --workspace . --plan-name $plan_name --relative-path api/add-auth-tests.md'
+ exited 2 in 0ms:
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
+/bin/bash -lc 'bin=$helper_path
 "\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
  succeeded in 0ms:
 EOF
+    cat >"$output_file" <<EOF
+{{"plan_name":"$plan_name","status":"ok"}}
+EOF
+    echo "fake-codex-refine-bad-plan-name"
+    exit 0
+  fi
+  if [[ "$mode" == "strict_refine_bad_planner_mode" ]]; then
+    cat <<EOF
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" open-plan --workspace . --plan-name $plan_name'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" inspect-node --workspace . --plan-id plan-1 --relative-path api/add-auth-tests.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode refine'
+ exited 1 in 0ms:
+EOF
+    cat >"$output_file" <<EOF
+{{"plan_name":"$plan_name","status":"ok"}}
+EOF
+    echo "fake-codex-refine-bad-planner-mode"
+    exit 0
+  fi
+  if [[ "$mode" == "strict_refine_bad_invalidatable_leaf" ]]; then
+    cat <<EOF
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" open-plan --workspace . --plan-name $plan_name'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" inspect-node --workspace . --plan-id plan-1 --relative-path api/add-auth-tests.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" run-frontier-review-gate --workspace . --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto --refine-invalidatable-leaf-node-id leaf-1'
+ succeeded in 0ms:
+EOF
+    cat >"$output_file" <<EOF
+{{"plan_name":"$plan_name","status":"ok"}}
+EOF
+    echo "fake-codex-refine-bad-invalidatable-leaf"
+    exit 0
+  fi
+  if [[ "$mode" == "strict_refine_external_helper" ]]; then
+    cat <<EOF
+exec
+/bin/bash -lc '/home/user/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan open-plan --workspace . --plan-name $plan_name'
+ succeeded in 0ms:
+exec
+/bin/bash -lc '/home/user/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan inspect-node --workspace . --plan-id plan-1 --relative-path api/api.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc '/home/user/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+ succeeded in 0ms:
+EOF
+  else
+    cat <<EOF
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" open-plan --workspace . --plan-name $plan_name'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" inspect-node --workspace . --plan-id plan-1 --relative-path api/api.md'
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'bin=$helper_path
+"\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+ succeeded in 0ms:
+EOF
+  fi
   cat >"$output_file" <<EOF
 {{"plan_name":"$plan_name","status":"ok"}}
 EOF
@@ -967,14 +1322,14 @@ EOF
   exit 0
 fi
 
-    if [[ "$mode" == "success" || "$mode" == "strict_success" || "$mode" == "strict_success_direct_path" || "$mode" == "strict_success_single_quoted_helper" || "$mode" == "strict_direct_db_write" || "$mode" == "strict_direct_db_read" ]]; then
+    if [[ "$mode" == "success" || "$mode" == "strict_success" || "$mode" == "strict_success_direct_path" || "$mode" == "strict_success_single_quoted_helper" || "$mode" == "strict_direct_db_write" || "$mode" == "strict_direct_db_read" || "$mode" == "strict_db_exclude_glob" || "$mode" == "strict_batched_gate_invocations" ]]; then
       mkdir -p "$workspace/.loopy/plans/$plan_name"
       cat >"$workspace/.loopy/plans/$plan_name/$plan_name.md" <<EOF
 # $plan_name
 
 - generated by fake codex
 EOF
-      if [[ "$mode" == "strict_success" || "$mode" == "strict_success_direct_path" || "$mode" == "strict_success_single_quoted_helper" || "$mode" == "strict_direct_db_write" || "$mode" == "strict_direct_db_read" ]]; then
+      if [[ "$mode" == "strict_success" || "$mode" == "strict_success_direct_path" || "$mode" == "strict_success_single_quoted_helper" || "$mode" == "strict_direct_db_write" || "$mode" == "strict_direct_db_read" || "$mode" == "strict_db_exclude_glob" || "$mode" == "strict_batched_gate_invocations" ]]; then
         mkdir -p "$workspace/.loopy/gate-runs/leaf-1" "$workspace/.loopy/gate-runs/frontier-1"
         python3 - "$workspace" "$plan_name" <<'PY'
 import pathlib
@@ -1090,63 +1445,74 @@ EOF
         cat >"$workspace/.loopy/gate-runs/frontier-1/last-message.json" <<EOF
 {{"reviewer_role_id":"codex_default","summary":"ok"}}
 EOF
-        if [[ "$mode" == "strict_success_single_quoted_helper" ]]; then
-          cat <<'EOF'
+        if [[ "$mode" == "strict_batched_gate_invocations" ]]; then
+          cat <<EOF
 exec
-/bin/bash -lc "'/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan' --workspace . ensure-plan --plan-name strict-plan --task-type coding-task --project-directory ."
+/bin/bash -lc 'bin=$helper_path
+"\$bin" ensure-plan --workspace . --plan-name strict-plan --task-type coding-task --project-directory .
+"\$bin" open-plan --workspace . --plan-name strict-plan
+"\$bin" ensure-node-id --workspace . --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md
+"\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto
+"\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-2 --planner-mode auto'
+ succeeded in 0ms:
+EOF
+        elif [[ "$mode" == "strict_success_single_quoted_helper" ]]; then
+          cat <<EOF
+exec
+/bin/bash -lc "'$helper_path' --workspace . ensure-plan --plan-name strict-plan --task-type coding-task --project-directory ."
  succeeded in 0ms:
 exec
-/bin/bash -lc "'/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan' --workspace . open-plan --plan-name strict-plan"
+/bin/bash -lc "'$helper_path' --workspace . open-plan --plan-name strict-plan"
  succeeded in 0ms:
 exec
-/bin/bash -lc "'/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan' --workspace . ensure-node-id --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md"
+/bin/bash -lc "'$helper_path' --workspace . ensure-node-id --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md"
  succeeded in 0ms:
 exec
-/bin/bash -lc "'/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan' --workspace . run-leaf-review-gate --plan-id plan-1 --node-id leaf-1 --planner-mode auto"
+/bin/bash -lc "'$helper_path' --workspace . run-leaf-review-gate --plan-id plan-1 --node-id leaf-1 --planner-mode auto"
  succeeded in 0ms:
 exec
-/bin/bash -lc "'/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan' --workspace . run-frontier-review-gate --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto"
+/bin/bash -lc "'$helper_path' --workspace . run-frontier-review-gate --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto"
  succeeded in 0ms:
 EOF
         elif [[ "$mode" == "strict_success_direct_path" ]]; then
-          cat <<'EOF'
+          cat <<EOF
 exec
-/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . ensure-plan --plan-name strict-plan --task-type coding-task --project-directory .'
+/bin/bash -lc '$helper_path --workspace . ensure-plan --plan-name strict-plan --task-type coding-task --project-directory .'
 exec
-/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . open-plan --plan-name strict-plan'
+/bin/bash -lc '$helper_path --workspace . open-plan --plan-name strict-plan'
 exec
-/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . ensure-node-id --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md'
+/bin/bash -lc '$helper_path --workspace . ensure-node-id --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md'
  succeeded in 0ms:
 exec
-/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . run-leaf-review-gate --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+/bin/bash -lc '$helper_path --workspace . run-leaf-review-gate --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
  succeeded in 0ms:
 exec
-/bin/bash -lc '/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan --workspace . run-frontier-review-gate --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
+/bin/bash -lc '$helper_path --workspace . run-frontier-review-gate --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
  succeeded in 0ms:
  succeeded in 0ms:
  succeeded in 0ms:
 EOF
         else
-        cat <<'EOF'
+        cat <<EOF
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"$bin" ensure-plan --workspace . --plan-name strict-plan --task-type coding-task --project-directory .' 
+/bin/bash -lc 'bin=$helper_path
+"\$bin" ensure-plan --workspace . --plan-name strict-plan --task-type coding-task --project-directory .'
  succeeded in 0ms:
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"$bin" open-plan --workspace . --plan-name strict-plan'
+/bin/bash -lc 'bin=$helper_path
+"\$bin" open-plan --workspace . --plan-name strict-plan'
  succeeded in 0ms:
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"$bin" ensure-node-id --workspace . --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md'
+/bin/bash -lc 'bin=$helper_path
+"\$bin" ensure-node-id --workspace . --plan-id plan-1 --relative-path strict-plan/leaf.md --parent-relative-path strict-plan.md'
  succeeded in 0ms:
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
+/bin/bash -lc 'bin=$helper_path
+"\$bin" run-leaf-review-gate --workspace . --plan-id plan-1 --node-id leaf-1 --planner-mode auto'
  succeeded in 0ms:
 exec
-/bin/bash -lc 'bin=/tmp/fake-codex-home/.codex/skills/loopy-gen-plan/bin/loopy-gen-plan
-"$bin" run-frontier-review-gate --workspace . --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
+/bin/bash -lc 'bin=$helper_path
+"\$bin" run-frontier-review-gate --workspace . --plan-id plan-1 --parent-node-id parent-1 --planner-mode auto'
  succeeded in 0ms:
 EOF
         fi
@@ -1173,6 +1539,14 @@ bash -lc "find .loopy -maxdepth 4 -type f | sort | xargs -I{{}} sh -c 'echo \"--
  succeeded in 0ms:
 --- .loopy/loopy.db ---
 SQLite format 3
+EOF
+      fi
+      if [[ "$mode" == "strict_db_exclude_glob" ]]; then
+        cat <<'EOF'
+exec
+/bin/bash -lc "rg --files -g '!**/.loopy/loopy.db' | sed -n '1,200p'"
+ succeeded in 0ms:
+README.md
 EOF
       fi
       echo "fake-codex-direct-path"

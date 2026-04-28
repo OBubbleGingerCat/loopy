@@ -126,6 +126,10 @@ This means:
 
 The Agent may summarize or explain runtime gate results to the user, but only after the runtime gate has actually returned them.
 
+Gate helper process success is not the same as gate approval. The Agent MUST inspect the returned JSON from every `run-leaf-review-gate` and `run-frontier-review-gate` call and treat `passed: false` or a non-empty `issues` array as a substantive review result that blocks progression until the relevant plan content is revised and the same affected gate is rerun.
+
+The Agent MUST invoke review gates one at a time. It must not put multiple `run-leaf-review-gate` or `run-frontier-review-gate` calls in one shell command, loop, function, pipeline, `xargs`, or parallel batch. After each individual gate call, it must read the returned JSON, decide whether to revise, retry only invocation-layer failures, or proceed to the next gate.
+
 ### 0.3.3 Controlled Recovery Runtime Rule
 
 `loopy:gen-plan` is fail-closed with respect to authoritative runtime state, but it allows controlled recovery from runtime request-construction mistakes and missing prerequisite runtime state.
@@ -320,6 +324,8 @@ Refine mode is invoked as a skill contract, not as a helper shell command:
 `$ loopy:gen-plan --refine <existing-plan-name>`
 
 The refine target must be the name of an existing tracked plan under `.loopy/plans/`. Refine mode is in-place unless a future feature explicitly adds separate clone/refine output behavior. The Agent must call installed runtime `open-plan` for `<existing-plan-name>` and must stop before comment discovery, rewrite planning, runtime registration, or file mutation if `open-plan` fails.
+
+After `open-plan` succeeds, the returned `plan_id` is the runtime identity for every later tracked-state and gate helper call. Use `--plan-id` for `inspect-node`, `list-children`, `ensure-node-id`, `reconcile-parent-child-links`, `run-leaf-review-gate`, and `run-frontier-review-gate`; do not pass `--plan-name` to those helpers. Gate helper `--planner-mode` values remain `manual` or `auto`; refine revalidation is expressed with `--refine-revalidation-context-file`, not with `--planner-mode refine`.
 
 Argument compatibility is fail-closed:
 - `--refine <plan-name>` is the required refine target and must reference an existing plan.

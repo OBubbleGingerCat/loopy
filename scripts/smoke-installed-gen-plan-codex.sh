@@ -90,6 +90,7 @@ make_workspace() {
   local case_name="$1"
   local workspace="$WORKSPACES_ROOT/$case_name"
   mkdir -p "$workspace"
+  workspace="$(cd "$workspace" && pwd -P)"
   seed_workspace "$workspace"
   printf '%s\n' "$workspace"
 }
@@ -218,17 +219,131 @@ output_read_pattern = re.compile(
     r"(?is)(---\s+\.loopy/loopy\.db\s+---|SQLite format 3)"
 )
 
+def strip_safe_db_exclude_globs(command):
+    return re.sub(
+        r"""(?is)(?<!\S)(?:-g|--glob)\s+(?:"!\*\*/\.loopy/loopy\.db"|'!\*\*/\.loopy/loopy\.db'|!\*\*/\.loopy/loopy\.db)(?!\S)""",
+        " ",
+        command,
+    )
+
 for match in block_pattern.finditer(text):
     command = match.group("command")
+    command_for_db_read_check = strip_safe_db_exclude_globs(command)
     output = match.group("output")
-    if command_read_pattern.search(command):
+    if command_read_pattern.search(command_for_db_read_check):
         sys.stderr.write(
             f"detected direct sqlite read attempt against .loopy/loopy.db in {log_path}:\n{command.strip()}\n"
         )
         sys.exit(1)
-    if command_pipe_pattern.search(command) and output_read_pattern.search(output):
+    if command_pipe_pattern.search(command_for_db_read_check) and output_read_pattern.search(output):
         sys.stderr.write(
             f"detected indirect text inspection of .loopy/loopy.db in {log_path}:\n{command.strip()}\n"
+        )
+        sys.exit(1)
+PY
+}
+
+validate_isolated_helper_root_usage() {
+  local log_file="$1"
+  local expected_helper="$INSTALL_ROOT/bin/loopy-gen-plan"
+  python3 - "$log_file" "$expected_helper" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+expected_helper = sys.argv[2]
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+
+runtime_api = (
+    r"(?:ensure-plan|open-plan|inspect-node|list-children|ensure-node-id|"
+    r"run-leaf-review-gate|run-frontier-review-gate|mock-leaf-reviewer|mock-frontier-reviewer)"
+)
+helper_pattern = (
+    r'(?:'
+    r'"\$bin"'
+    r'|\$bin'
+    r'|'
+    r'"[^"\n]*/loopy-gen-plan"'
+    r'|'
+    r"'[^'\n]*/loopy-gen-plan'"
+    r'|'
+    r"[^'\"\s\n]*/loopy-gen-plan"
+    r')'
+)
+subcommand_pattern = re.compile(
+    helper_pattern
+    + r"""(?:\s+--[A-Za-z0-9_-]+(?:\s+(?:"[^"\n]*"|'[^'\n]*'|[^\s"'\n]+))?)*"""
+    + r"\s+"
+    + runtime_api
+    + r"\b(?!\s+--help)"
+)
+invocation_pattern = re.compile(
+    r"(?ms)^exec\s*\n(?P<command>.+?)(?=^exec\s*$|^\s*(?:succeeded|exited \d+|failed) in\b|\Z)"
+)
+direct_helper_pattern = re.compile(
+    r"""(?:"(?P<dq>[^"\n]*/loopy-gen-plan)"|'(?P<sq>[^'\n]*/loopy-gen-plan)'|(?P<bare>[^='"\s\n]*/loopy-gen-plan))"""
+)
+bin_assignment_pattern = re.compile(
+    r"""(?m)(?:^|[\s'";])bin=(?:"(?P<dq>[^"\n]*/loopy-gen-plan)"|'(?P<sq>[^'\n]*/loopy-gen-plan)'|(?P<bare>[^='"\s\n]*/loopy-gen-plan))"""
+)
+
+def helper_path(match):
+    return match.group("dq") or match.group("sq") or match.group("bare")
+
+for match in invocation_pattern.finditer(text):
+    command = match.group("command")
+    if not subcommand_pattern.search(command):
+        continue
+
+    for direct in direct_helper_pattern.finditer(command):
+        path = helper_path(direct)
+        if path != expected_helper:
+            sys.stderr.write(
+                "runtime helper command outside isolated installed helper root "
+                f"in {log_path}: expected {expected_helper}, saw {path}\n"
+                f"{command.strip()}\n"
+            )
+            sys.exit(1)
+
+    if re.search(r'(?:"\$bin"|\$bin)\s+', command):
+        assigned_paths = [helper_path(item) for item in bin_assignment_pattern.finditer(command)]
+        if expected_helper not in assigned_paths:
+            sys.stderr.write(
+                "runtime helper variable `$bin` outside isolated installed helper root "
+                f"in {log_path}: expected assignment to {expected_helper}\n"
+                f"{command.strip()}\n"
+            )
+            sys.exit(1)
+PY
+}
+
+validate_no_batched_gate_invocations() {
+  local log_file="$1"
+  python3 - "$log_file" <<'PY'
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="ignore")
+
+invocation_pattern = re.compile(
+    r"(?ms)^exec\s*\n(?P<command>.+?)(?=^exec\s*$|^\s*(?:succeeded|exited \d+|failed) in\b|\Z)"
+)
+gate_pattern = re.compile(r"\brun-(?:leaf|frontier)-review-gate\b(?!\s+--help)")
+
+for match in invocation_pattern.finditer(text):
+    command = match.group("command")
+    gate_calls = list(gate_pattern.finditer(command))
+    if len(gate_calls) > 1:
+        snippet = command.strip()
+        if len(snippet) > 1200:
+            snippet = snippet[:1200] + "\n..."
+        sys.stderr.write(
+            f"detected batched runtime gate invocations in {log_path}; "
+            "run one gate helper per shell command and inspect its JSON `passed` field before continuing:\n"
+            f"{snippet}\n"
         )
         sys.exit(1)
 PY
@@ -390,9 +505,32 @@ invocation_pattern = re.compile(
 
 positions = {}
 for match in invocation_pattern.finditer(text):
-    subcommand_match = subcommand_pattern.search(match.group("command"))
+    command = match.group("command")
+    subcommand_match = subcommand_pattern.search(command)
     if subcommand_match:
-        positions.setdefault(subcommand_match.group(1), []).append(match.start())
+        api = subcommand_match.group(1)
+        positions.setdefault(api, []).append(match.start())
+        if api not in {"ensure-plan", "open-plan"} and re.search(r"(?<![\w-])--plan-name(?:[=\s]|$)", command):
+            sys.stderr.write(
+                f"detected invalid refine helper `--plan-name` usage for `{api}` in {log_path}\n"
+            )
+            sys.exit(1)
+        if api in {"run-leaf-review-gate", "run-frontier-review-gate"} and re.search(
+            r"(?<![\w-])--planner-mode(?:=|\s+)refine(?:\s|['\"]|$)",
+            command,
+        ):
+            sys.stderr.write(
+                f"detected invalid refine gate `--planner-mode refine` usage for `{api}` in {log_path}\n"
+            )
+            sys.exit(1)
+        if api == "run-frontier-review-gate" and re.search(
+            r"(?<![\w-])--refine-invalidatable-leaf-node-id(?:[=\s]|$)",
+            command,
+        ):
+            sys.stderr.write(
+                f"detected unnecessary refine frontier invalidatable-leaf flag in {log_path}\n"
+            )
+            sys.exit(1)
 
 for api in ["open-plan", "run-leaf-review-gate"]:
     if api not in positions:
@@ -512,6 +650,8 @@ validate_strict_case_shared_non_transcript() {
   validate_no_direct_db_mutation_attempts "$log_file"
   validate_no_direct_db_read_attempts "$log_file"
   validate_no_skill_shell_command_attempts "$log_file"
+  validate_isolated_helper_root_usage "$log_file"
+  validate_no_batched_gate_invocations "$log_file"
 
   python3 - "$db_path" "$plan_name" "$require_frontier_gate" <<'PY'
 import sqlite3
@@ -540,6 +680,14 @@ frontier_non_mock = scalar(
     "SELECT COUNT(*) FROM GEN_PLAN__frontier_gate_runs WHERE plan_id = ? AND reviewer_role_id <> 'mock'",
     (plan_id,),
 )
+leaf_passed_non_mock = scalar(
+    "SELECT COUNT(*) FROM GEN_PLAN__leaf_gate_runs WHERE plan_id = ? AND reviewer_role_id <> 'mock' AND passed = 1",
+    (plan_id,),
+)
+frontier_passed_non_mock = scalar(
+    "SELECT COUNT(*) FROM GEN_PLAN__frontier_gate_runs WHERE plan_id = ? AND reviewer_role_id <> 'mock' AND passed = 1",
+    (plan_id,),
+)
 leaf_mock = scalar(
     "SELECT COUNT(*) FROM GEN_PLAN__leaf_gate_runs WHERE plan_id = ? AND reviewer_role_id = 'mock'",
     (plan_id,),
@@ -558,9 +706,19 @@ if leaf_non_mock < 1:
         f"strict validation expected non-mock leaf gate usage for {plan_name} in {db_path}\n"
     )
     sys.exit(1)
+if leaf_passed_non_mock < 1:
+    sys.stderr.write(
+        f"strict validation expected passed non-mock leaf gate usage for {plan_name} in {db_path}\n"
+    )
+    sys.exit(1)
 if require_frontier_gate == "1" and frontier_non_mock < 1:
     sys.stderr.write(
         f"strict validation expected non-mock frontier gate usage for {plan_name} in {db_path}\n"
+    )
+    sys.exit(1)
+if require_frontier_gate == "1" and frontier_passed_non_mock < 1:
+    sys.stderr.write(
+        f"strict validation expected passed non-mock frontier gate usage for {plan_name} in {db_path}\n"
     )
     sys.exit(1)
 if non_flat_nodes < 1:
@@ -593,6 +751,8 @@ validate_refine_malformed_strict_case() {
   validate_no_direct_db_mutation_attempts "$log_file"
   validate_no_direct_db_read_attempts "$log_file"
   validate_no_skill_shell_command_attempts "$log_file"
+  validate_isolated_helper_root_usage "$log_file"
+  validate_no_batched_gate_invocations "$log_file"
   validate_refine_malformed_transcript_usage "$log_file"
 }
 
@@ -709,6 +869,8 @@ Use the \`loopy:gen-plan\` skill.
 - If installed \`run-leaf-review-gate\` or \`run-frontier-review-gate\` fails to launch, times out, fails to write the expected runtime artifact, or fails to return parseable valid output, immediately retry the same gate call up to 5 times without changing files, ids, or arguments.
 - If all 5 immediate retries fail for the same gate call, stop and surface the combined failure instead of bypassing the gate.
 - If a gate call succeeds and returns review issues, revise the plan and then submit a new gate call; do not treat review issues as a retry case.
+- Run exactly one installed review-gate helper per shell command; do not put multiple leaf or frontier gate calls in a shell loop, function, pipeline, xargs, or parallel batch.
+- After each individual gate helper returns, read the returned JSON. Shell exit 0 only means the invocation completed; it is not approval. If \`passed\` is false or \`issues\` is non-empty, stop gate progression, revise the affected plan content, and rerun the affected gate before moving to any other gate.
 - Do not inline the installed skill files into the prompt.
 - Do not inspect or print the installed \`bin/loopy-gen-plan\` ELF binary as text.
 - Do not run \`cat\`, \`sed\`, \`head\`, \`tail\`, \`strings\`, \`less\`, \`more\`, \`hexdump\`, \`xxd\`, or similar text inspection commands against that ELF binary.
@@ -747,7 +909,44 @@ setup_refine_fixture() {
   local plan_root="$workspace/.loopy/plans/$plan_name"
   local state_dir="$RUN_ROOT/fixture-state/$case_name"
   local helper="$INSTALL_ROOT/bin/loopy-gen-plan"
-  mkdir -p "$plan_root/api" "$state_dir"
+  mkdir -p "$plan_root/api" "$state_dir" "$workspace/tests/api"
+
+  cat >"$workspace/tests/api/__init__.py" <<'EOF'
+EOF
+
+  cat >"$workspace/tests/api/test_auth_tokens.py" <<'EOF'
+import unittest
+
+
+def protected_resource(token):
+    if token == "valid-token":
+        return {"status": 200, "body": "protected resource"}
+    return {"status": 401, "error": "unauthorized"}
+
+
+class AuthTokenTests(unittest.TestCase):
+    def test_valid_token_reaches_protected_resource(self):
+        response = protected_resource("valid-token")
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(response["body"], "protected resource")
+
+
+if __name__ == "__main__":
+    unittest.main()
+EOF
+
+  cat >"$workspace/README.md" <<'EOF'
+# Refine API fixture
+
+API auth token regression tests live in `tests/api/test_auth_tokens.py`.
+Run them with:
+
+```bash
+python -m unittest tests.api.test_auth_tokens
+```
+
+Current coverage includes the valid-token success path. The expired-token rejection path still needs to be added.
+EOF
 
   cat >"$plan_root/$plan_name.md" <<EOF
 # $plan_name
@@ -787,14 +986,38 @@ EOF
 # Add Auth Tests
 
 ## Goal
-Add focused authentication regression tests.
+Add focused authentication token regression coverage for rejected and accepted token paths.
+
+## Task Description
+Update the existing API auth token tests so the implementation has explicit coverage for both unauthorized token rejection and valid-token success. Keep the README coverage note aligned with the test suite.
+
+## Inputs
+- `tests/api/test_auth_tokens.py`
+- `README.md`
 
 BEGIN_COMMENT
 Please require one negative token case and one successful token case in the acceptance criteria.
 END_COMMENT
 
 ## Acceptance Criteria
-- Existing API test coverage remains documented.
+- Auth token regression coverage remains documented in `README.md`.
+- `python -m unittest tests.api.test_auth_tokens` exits successfully.
+
+## Expected Outputs
+- Updated auth token regression tests in `tests/api/test_auth_tokens.py`.
+- Updated API auth coverage note in `README.md`.
+- Passing output from `python -m unittest tests.api.test_auth_tokens`.
+
+## Suggested Steps
+1. Review the current `protected_resource` helper and existing `AuthTokenTests` cases.
+2. Add or preserve test coverage for the valid-token success path.
+3. Add test coverage for an unauthorized response from an expired, invalid, or missing token.
+4. Update the README coverage note to match the resulting test coverage.
+5. Run `python -m unittest tests.api.test_auth_tokens`.
+
+## Constraints
+- Keep changes limited to auth token tests and the README coverage note.
+- Do not change unrelated API behavior or unrelated test modules.
 EOF
   fi
 
@@ -874,8 +1097,12 @@ PY
     echo "processed comment markers remain in $leaf" >&2
     return 1
   }
-  grep -Fq "token expiry acceptance criteria" "$leaf" || {
-    echo "missing stable refine snippet in $leaf" >&2
+  grep -Eiq '(negative|expired|expiry|invalid|unauthorized).{0,120}token|token.{0,120}(negative|expired|expiry|invalid|unauthorized)' "$leaf" || {
+    echo "missing negative token acceptance coverage in $leaf" >&2
+    return 1
+  }
+  grep -Eiq '(successful|valid|authorized).{0,120}token|token.{0,120}(successful|valid|authorized)' "$leaf" || {
+    echo "missing successful token acceptance coverage in $leaf" >&2
     return 1
   }
   validate_plan_tree "$workspace" "$plan_name"
@@ -955,8 +1182,10 @@ Skill name: \`loopy:gen-plan\`
 
 Use the \`loopy:gen-plan --refine <plan-name>\` skill invocation contract for plan \`$plan_name\`.
 - Desired plan name: \`$plan_name\`
+- Installed runtime helper path: \`$INSTALL_ROOT/bin/loopy-gen-plan\`
 - \`loopy:gen-plan --refine <plan-name>\` is a skill invocation contract, not a shell command.
 - Do not execute \`loopy:gen-plan\` as a shell command.
+- Use the installed runtime helper path above for helper subcommands; do not search global installs or \`target/debug\`.
 - Use installed runtime helper \`open-plan\` before comment discovery.
 - Discover literal \`BEGIN_COMMENT\` and \`END_COMMENT\` markers.
 - This case intentionally contains malformed nested comment markers.
@@ -970,13 +1199,19 @@ Skill name: \`loopy:gen-plan\`
 
 Use the \`loopy:gen-plan --refine <plan-name>\` skill invocation contract for plan \`$plan_name\`.
 - Desired plan name: \`$plan_name\`
+- Installed runtime helper path: \`$INSTALL_ROOT/bin/loopy-gen-plan\`
 - \`loopy:gen-plan --refine <plan-name>\` is a skill invocation contract, not a shell command.
 - Do not execute \`loopy:gen-plan\` as a shell command.
+- Use the installed runtime helper path above for helper subcommands; do not search global installs or \`target/debug\`.
 - Treat \`BEGIN_COMMENT\` and \`END_COMMENT\` blocks as natural-language feedback.
 - Use installed \`open-plan\` before comment discovery.
 - Use installed \`inspect-node\` or \`list-children\` for tracked runtime state.
+- After \`open-plan\` returns, use its \`plan_id\` with \`--plan-id\` for \`inspect-node\`, \`list-children\`, \`ensure-node-id\`, \`reconcile-parent-child-links\`, and review-gate helpers; do not pass \`--plan-name\` to those helpers.
 - Use installed \`ensure-node-id\` for any new refined nodes.
 - Run installed \`run-leaf-review-gate\` before any installed \`run-frontier-review-gate\`.
+- Gate helper \`--planner-mode\` only accepts \`auto\` or \`manual\`; for this auto-safe smoke use \`auto\`, not \`refine\`.
+- Run exactly one installed review-gate helper per shell command, read its returned JSON, and do not continue to another gate while \`passed\` is false or \`issues\` is non-empty.
+- Do not pass \`--refine-invalidatable-leaf-node-id\` merely for a changed leaf that just passed leaf revalidation; \`approved_frontier\` must return an empty \`invalidated_leaf_node_ids\` array.
 - Do not inspect or mutate \`.loopy/loopy.db\` directly.
 - Refine the existing tracked plan in place.
 EOF

@@ -54,10 +54,18 @@ After every post-write checkpoint, preserve the normal mode choice: continue man
 
 Runtime state must come from installed helpers such as `open-plan`, `inspect-node`, `list-children`, `ensure-node-id`, `reconcile-parent-child-links`, `run-leaf-review-gate`, and `run-frontier-review-gate`. Do not inspect `.loopy/loopy.db` directly.
 
+Only `open-plan` takes the refine target `--plan-name`. After `open-plan` succeeds, use its returned `plan_id` for every later tracked-state or gate helper by passing `--plan-id`. Do not pass `--plan-name` to `inspect-node`, `list-children`, `ensure-node-id`, `reconcile-parent-child-links`, `run-leaf-review-gate`, or `run-frontier-review-gate`.
+
+Gate helper `--planner-mode` accepts only `manual` or `auto`. Refine mode is not a planner-mode value; carry refine-specific evidence with `--refine-revalidation-context-file`.
+
 New or affected nodes must be registered or inspected through runtime helpers before gates consume them. Historical approvals are stale when node content, parent contracts, descendant context, regenerated nodes, or newly created nodes change.
 
 After structural rewrites update a parent's child links in markdown, call `reconcile-parent-child-links` for that parent before frontier revalidation so runtime child state matches the edited markdown.
 
 Selected leaf gates run globally before any selected frontier gate. Frontier gates must not run while selected leaf gates still have unresolved review issues. Invocation failures may be retried with identical content and arguments; substantive reviewer issues require plan changes, not blind retries.
 
+Run exactly one review-gate helper per shell command. A helper exit status of 0 only means the invocation completed; it does not mean the gate approved the node. Read the returned JSON after every gate call and block progression when `passed` is false or `issues` is non-empty.
+
 Leaf and frontier reviewer prompts receive refine-specific context by treating stale approvals, changed contracts, and invalidated descendants as first-class review evidence rather than current approvals. During refine gate revalidation, write that rendered context to a file and pass it to `run-leaf-review-gate` or `run-frontier-review-gate` with `--refine-revalidation-context-file`.
+
+Do not pass `--refine-invalidatable-leaf-node-id` merely because a changed leaf was revalidated. That option is an allow-list for stale leaf approvals that a non-approved frontier result may invalidate; it is not a request to invalidate a just-approved leaf. After selected leaf gates pass, run the frontier gate with the refine revalidation context file and omit explicit invalidatable ids unless a runtime error specifically requires narrowing the allow-list. An approved frontier must return an empty `invalidated_leaf_node_ids` array.

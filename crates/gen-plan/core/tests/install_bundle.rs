@@ -685,6 +685,8 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
         "`--input` must be omitted with `--refine`",
         "`--plan-name` must be omitted with `--refine`",
         "`--task-type` must be omitted with `--refine`",
+        "Use `--plan-id` for `inspect-node`, `list-children`, `ensure-node-id`, `reconcile-parent-child-links`, `run-leaf-review-gate`, and `run-frontier-review-gate`",
+        "not with `--planner-mode refine`",
         "send the review-driven revision back to the user",
         "If review-driven changes altered the structure, the Agent MUST ask the user to re-confirm the revised expansion before writing it or continuing.",
         "pause only for true user-owned decisions that cannot be inferred safely",
@@ -703,10 +705,26 @@ fn assert_installed_bundle(install_root: &Path) -> Result<()> {
         "Decision report",
         "apply_refine_rewrite",
         "Selected leaf gates run globally before any selected frontier gate",
+        "Only `open-plan` takes the refine target `--plan-name`",
+        "Gate helper `--planner-mode` accepts only `manual` or `auto`",
+        "`--refine-invalidatable-leaf-node-id`",
+        "An approved frontier must return an empty `invalidated_leaf_node_ids` array",
     ] {
         assert!(
             refine_instructions.contains(required_snippet),
             "installed refine instructions should contain `{required_snippet}`"
+        );
+    }
+
+    let frontier_runtime =
+        fs::read_to_string(install_root.join("prompts/frontier_runtime.md"))?;
+    for required_snippet in [
+        "If the verdict is approved_frontier, invalidated_leaf_node_ids must be an empty array",
+        "If any leaf approval should be invalidated, do not return approved_frontier",
+    ] {
+        assert!(
+            frontier_runtime.contains(required_snippet),
+            "installed frontier runtime should contain `{required_snippet}`"
         );
     }
 
